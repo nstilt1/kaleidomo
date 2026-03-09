@@ -4,3 +4,14 @@ members = [
     "src-tauri",
     "kaleidomo-core",
 ]
+
+[profile.dev]
+incremental = false
+
+[profile.release]
+incremental = false # Disable incremental for a smaller final build
+codegen-units = 1   # Reduces parallel compilation to allow more optimizations
+lto = true          # Enables Link Time Optimization
+opt-level = "z"     # "z" optimizes for size; use "3" if you prefer raw speed
+panic = "abort"     # Removes stack unwinding code (saves ~1MB)
+strip = true        # Automatically removes debug symbols (saves ~2-4MB)

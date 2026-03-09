@@ -1,7 +1,7 @@
-#[cfg(target_arch = "x86_64")]
-pub use core::arch::x86_64::*;
 #[cfg(target_arch = "x86")]
 pub use core::arch::x86::*;
+#[cfg(target_arch = "x86_64")]
+pub use core::arch::x86_64::*;
 
 use image::GenericImageView;
 
@@ -41,25 +41,43 @@ unsafe fn sin_cos(angle: __m128) -> (__m128, __m128) {
         let k = _mm_cvtps_epi32(_mm_mul_ps(angle, inv_pi_2));
         let k_f = _mm_cvtepi32_ps(k);
 
-        let p1 = _mm_set1_ps(-1.5707963267); 
+        let p1 = _mm_set1_ps(-1.5707963267);
         let p2 = _mm_set1_ps(-4.37114e-8);
         let mut x = _mm_fmadd_ps(k_f, p1, angle);
         x = _mm_fmadd_ps(k_f, p2, x);
         let x2 = _mm_mul_ps(x, x);
 
         // 2. Polynomials (Same as your logic, just ensured Sn/Cn order)
-        let sin_poly = _mm_mul_ps(x, _mm_fmadd_ps(x2, _mm_fmadd_ps(x2, _mm_set1_ps(-0.0001984127), _mm_set1_ps(0.0083333333)), _mm_fmadd_ps(x2, _mm_set1_ps(-0.1666666666), _mm_set1_ps(1.0))));
-        let cos_poly = _mm_fmadd_ps(x2, _mm_fmadd_ps(x2, _mm_fmadd_ps(x2, _mm_set1_ps(-0.0013888888), _mm_set1_ps(0.0416666666)), _mm_set1_ps(-0.5)), _mm_set1_ps(1.0));
+        let sin_poly = _mm_mul_ps(
+            x,
+            _mm_fmadd_ps(
+                x2,
+                _mm_fmadd_ps(x2, _mm_set1_ps(-0.0001984127), _mm_set1_ps(0.0083333333)),
+                _mm_fmadd_ps(x2, _mm_set1_ps(-0.1666666666), _mm_set1_ps(1.0)),
+            ),
+        );
+        let cos_poly = _mm_fmadd_ps(
+            x2,
+            _mm_fmadd_ps(
+                x2,
+                _mm_fmadd_ps(x2, _mm_set1_ps(-0.0013888888), _mm_set1_ps(0.0416666666)),
+                _mm_set1_ps(-0.5),
+            ),
+            _mm_set1_ps(1.0),
+        );
 
         // 3. Swap and Sign Logic
         // Bit 0 of k: Swap sin/cos
         let swap_mask = _mm_castsi128_ps(_mm_slli_epi32(k, 31)); // Move bit 0 to bit 31
-        
+
         // Bit 1 of k: Sin sign
         let sin_sign = _mm_and_si128(_mm_slli_epi32(k, 30), sign_bit);
-        
+
         // (k+1) bit 1: Cos sign
-        let cos_sign = _mm_and_si128(_mm_slli_epi32(_mm_add_epi32(k, _mm_set1_epi32(1)), 30), sign_bit);
+        let cos_sign = _mm_and_si128(
+            _mm_slli_epi32(_mm_add_epi32(k, _mm_set1_epi32(1)), 30),
+            sign_bit,
+        );
 
         let res_sin = _mm_blendv_ps(sin_poly, cos_poly, swap_mask);
         let res_cos = _mm_blendv_ps(cos_poly, sin_poly, swap_mask);
@@ -76,9 +94,10 @@ impl KaleidoBackend for __m128 {
 
     #[cfg(test)]
     fn load_f32s(input: &[f32]) -> Vec<Self> {
-        input.chunks_exact(Self::NUM_FLOATS).map(|chunk| unsafe {
-            _mm_loadu_ps(chunk.as_ptr())
-        }).collect()
+        input
+            .chunks_exact(Self::NUM_FLOATS)
+            .map(|chunk| unsafe { _mm_loadu_ps(chunk.as_ptr()) })
+            .collect()
     }
 
     #[cfg(test)]
@@ -95,12 +114,7 @@ impl KaleidoBackend for __m128 {
     fn load_coords(x: u32, y: u32) -> (Self, Self) {
         let x = x as f32;
         let y = y as f32;
-        unsafe {
-            (
-                _mm_set_ps(x + 3.0, x + 2.0, x + 1.0, x),
-                _mm_set1_ps(y),
-            )
-        }
+        unsafe { (_mm_set_ps(x + 3.0, x + 2.0, x + 1.0, x), _mm_set1_ps(y)) }
     }
 
     fn normalize_coords(&mut self, center: Self) {
@@ -117,33 +131,27 @@ impl KaleidoBackend for __m128 {
             let swap_mask = _mm_cmp_ps(
                 _mm_and_ps(*self, abs_mask), // |y|
                 _mm_and_ps(other, abs_mask), // |x|
-                _CMP_GT_OS
+                _CMP_GT_OS,
             );
 
             let atan_input = _mm_div_ps(
                 _mm_blendv_ps(*self, other, swap_mask), // pick the lowest between |y| and |x| for each number
-                _mm_blendv_ps(other, *self, swap_mask)  // and the highest.
+                _mm_blendv_ps(other, *self, swap_mask), // and the highest.
             );
 
             let mut result = atan(atan_input);
 
             result = _mm_blendv_ps(
                 result,
-                _mm_sub_ps(
-                    _mm_or_ps(pi_2, _mm_and_ps(atan_input, sign_mask)),
-                    result
-                ),
-                swap_mask
+                _mm_sub_ps(_mm_or_ps(pi_2, _mm_and_ps(atan_input, sign_mask)), result),
+                swap_mask,
             );
 
             let x_sign_mask = _mm_castsi128_ps(_mm_srai_epi32(_mm_castps_si128(other), 31));
 
             result = _mm_add_ps(
-                _mm_and_ps(
-                    _mm_xor_ps(pi, _mm_and_ps(sign_mask, *self)),
-                    x_sign_mask
-                ),
-                result
+                _mm_and_ps(_mm_xor_ps(pi, _mm_and_ps(sign_mask, *self)), x_sign_mask),
+                result,
             );
 
             result
@@ -152,14 +160,15 @@ impl KaleidoBackend for __m128 {
 
     fn map_to_polar(dx: Self, dy: Self, zoom: f32) -> (Self, Self) {
         unsafe {
-            let r = _mm_sqrt_ps(_mm_add_ps(
-                _mm_mul_ps(dx, dx),
-                _mm_mul_ps(dy, dy)
-            ));
+            let r = _mm_sqrt_ps(_mm_add_ps(_mm_mul_ps(dx, dx), _mm_mul_ps(dy, dy)));
             let r_sampled = _mm_div_ps(r, _mm_set1_ps(zoom));
             let mut theta = dy.atan2_k(dx);
             let less_than_zero_mask = _mm_cmp_ps(theta, _mm_set1_ps(0.0), _CMP_LT_OS);
-            theta = _mm_blendv_ps(theta, _mm_add_ps(theta, _mm_set1_ps(2.0 * core::f32::consts::PI)), less_than_zero_mask);
+            theta = _mm_blendv_ps(
+                theta,
+                _mm_add_ps(theta, _mm_set1_ps(2.0 * core::f32::consts::PI)),
+                less_than_zero_mask,
+            );
             (r_sampled, theta)
         }
     }
@@ -168,7 +177,7 @@ impl KaleidoBackend for __m128 {
         unsafe {
             let slice_angle_vec = _mm_set1_ps(slice_angle);
             let inv_slice_angle = _mm_set1_ps(1.0 / slice_angle);
-            
+
             // 1. floor(theta / slice_angle)
             let floor = _mm_floor_ps(_mm_mul_ps(theta, inv_slice_angle));
 
@@ -190,7 +199,12 @@ impl KaleidoBackend for __m128 {
         }
     }
 
-    fn compute_source_pixel_coords(computed_angle: Self, r_sampled: Self, triangle_center_x: Self, triangle_center_y: Self) -> (Self, Self) {
+    fn compute_source_pixel_coords(
+        computed_angle: Self,
+        r_sampled: Self,
+        triangle_center_x: Self,
+        triangle_center_y: Self,
+    ) -> (Self, Self) {
         unsafe {
             let (sin, cos) = sin_cos(computed_angle);
             let sx = _mm_fmadd_ps(r_sampled, cos, triangle_center_x);
@@ -199,14 +213,28 @@ impl KaleidoBackend for __m128 {
         }
     }
 
-    fn store_pixel(output: &mut [u8], _x: u32, sx: Self, sy: Self, source: &DynamicImage, sw: u32, sh: u32) {
+    fn store_pixel(
+        output: &mut [u8],
+        _x: u32,
+        sx: Self,
+        sy: Self,
+        source: &DynamicImage,
+        sw: u32,
+        sh: u32,
+    ) {
         unsafe {
             let zero = _mm_set1_ps(0.0);
             let sw_v = _mm_set1_ps(sw as f32);
             let sh_v = _mm_set1_ps(sh as f32);
             let v_mask = _mm_and_ps(
-                _mm_and_ps(_mm_cmp_ps::<_CMP_GE_OS>(sx, zero), _mm_cmp_ps::<_CMP_LT_OS>(sx, sw_v)),
-                _mm_and_ps(_mm_cmp_ps::<_CMP_GE_OS>(sy, zero), _mm_cmp_ps::<_CMP_LT_OS>(sy, sh_v))
+                _mm_and_ps(
+                    _mm_cmp_ps::<_CMP_GE_OS>(sx, zero),
+                    _mm_cmp_ps::<_CMP_LT_OS>(sx, sw_v),
+                ),
+                _mm_and_ps(
+                    _mm_cmp_ps::<_CMP_GE_OS>(sy, zero),
+                    _mm_cmp_ps::<_CMP_LT_OS>(sy, sh_v),
+                ),
             );
 
             let sx_i = _mm_cvtps_epi32(sx);

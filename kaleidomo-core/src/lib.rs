@@ -5,26 +5,29 @@ use image::{ImageBuffer, Rgba};
 use rayon::prelude::*;
 use std::f32::consts::PI;
 
-use crate::backends::{KaleidoBackend, Register, inner_loop};
+pub use image;
+
+pub use crate::backends::{KaleidoBackend, Register, inner_loop};
 
 #[derive(Clone)]
 pub enum KaleidoType {
     Radial,
     Square,
-    Isoceles,
+    Diamond,
     Hexagonal,
+    HexagonalFlatTop,
 }
 
 #[derive(Clone)]
 pub struct KaleidoSettings {
-    pub count: u32,        // Number of reflections (e.g., 8)
-    pub output_size: u32,  // Width/Height of square output
-    pub zoom: f32,         // How much of the triangle to show
+    pub count: u32,       // Number of reflections (e.g., 8)
+    pub output_size: u32, // Width/Height of square output
+    pub zoom: f32,        // How much of the triangle to show
     pub tile_count: f32,
     pub triangle_center_x: f32, // Center of the triangle in source image
     pub triangle_center_y: f32,
     pub triangle_rotation_rad: f32, // Rotation of the triangle in radians
-    pub kaleido_type: KaleidoType, // Type of kaleidoscope (radial, square, etc.)
+    pub kaleido_type: KaleidoType,  // Type of kaleidoscope (radial, square, etc.)
 }
 
 pub fn render_kaleidoscope(
@@ -40,7 +43,8 @@ pub fn render_kaleidoscope(
     let mut pixels = vec![0u8; (size * size * 4) as usize];
 
     // Rayon parallelizes the rows automatically
-    pixels.par_chunks_exact_mut((size * 4) as usize)
+    pixels
+        .par_chunks_exact_mut((size * 4) as usize)
         .enumerate()
         .for_each(|(y, row)| {
             for x in 0..size {
@@ -55,7 +59,9 @@ pub fn render_kaleidoscope(
 
                 // 3. Kaleidoscope logic
                 // Ensure theta is positive [0, 2pi]
-                if theta < 0.0 { theta += 2.0 * PI; }
+                if theta < 0.0 {
+                    theta += 2.0 * PI;
+                }
 
                 let slice_idx = (theta / slice_angle).floor();
                 let local_theta = if slice_idx as i32 % 2 != 0 {
@@ -111,13 +117,13 @@ pub fn render_kaleidoscope_with_auto_backend(
         } else if is_x86_feature_detected!("sse2") {
             return render_kaleidoscope_with_backend::<backends::sse2::__m128>(source, settings);
         } else {
-            return render_kaleidoscope_with_backend::<f32>(source, settings)
+            return render_kaleidoscope_with_backend::<f32>(source, settings);
         }
     }
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
-        //render_kaleidoscope_with_backend::<Register>(source, settings)
-        render_kaleidoscope_with_backend::<f32>(source, settings)
+        render_kaleidoscope_with_backend::<Register>(source, settings)
+        //render_kaleidoscope_with_backend::<f32>(source, settings)
     }
 }
 
@@ -135,10 +141,21 @@ pub fn render_kaleidoscope_with_backend<B: KaleidoBackend>(
     let mut pixels = vec![0u8; (size * size * 4) as usize];
 
     // Rayon parallelizes the rows automatically
-    pixels.par_chunks_exact_mut((size * 4) as usize)
+    pixels
+        .par_chunks_exact_mut((size * 4) as usize)
         .enumerate()
         .for_each(|(y, row)| {
-            inner_loop::<B>(y, row, settings.zoom, source, &settings, center, slice_angle, sw, sh);
+            inner_loop::<B>(
+                y,
+                row,
+                settings.zoom,
+                source,
+                &settings,
+                center,
+                slice_angle,
+                sw,
+                sh,
+            );
         });
 
     ImageBuffer::from_raw(size, size, pixels).unwrap()
@@ -160,9 +177,7 @@ mod tests {
                 source_pixels.extend_from_slice(&[x as u8, y as u8, 128, 255]);
             }
         }
-        let source = DynamicImage::ImageRgba8(
-            RgbaImage::from_raw(sw, sh, source_pixels).unwrap()
-        );
+        let source = DynamicImage::ImageRgba8(RgbaImage::from_raw(sw, sh, source_pixels).unwrap());
 
         // 2. Setup Kaleidoscope settings
         let settings = KaleidoSettings {
@@ -172,15 +187,15 @@ mod tests {
             triangle_center_x: 50.0,
             triangle_center_y: 50.0,
             triangle_rotation_rad: 0.0,
-            kaleido_type: KaleidoType::Radial,
+            kaleido_type: KaleidoType::HexagonalFlatTop,
             tile_count: 4.0,
         };
 
         // 3. Render using Scalar Backend
-        // Note: You may need to expose these functions or make them generic 
+        // Note: You may need to expose these functions or make them generic
         // to call specific backends in the same test.
         //let scalar_image = render_kaleidoscope_with_backend::<f32>(&source, settings.clone());
-        let scalar_image = render_kaleidoscope(&source, settings.clone());
+        let scalar_image = render_kaleidoscope_with_backend::<f32>(&source, settings.clone());
 
         // 4. Render using Aarch64 (Neon) Backend
         let simd_image = render_kaleidoscope_with_backend::<Register>(&source, settings.clone());
@@ -190,7 +205,8 @@ mod tests {
         let threshold = 1; // Allow for 1-bit rounding difference in color channels
 
         for (p_scalar, p_simd) in scalar_image.pixels().zip(simd_image.pixels()) {
-            for i in 0..4 { // Check R, G, B, A
+            for i in 0..4 {
+                // Check R, G, B, A
                 let diff = (p_scalar[i] as i16 - p_simd[i] as i16).abs();
                 if diff > threshold {
                     diff_count += 1;
@@ -201,8 +217,12 @@ mod tests {
         let total_pixels = settings.output_size * settings.output_size;
         let error_rate = diff_count as f32 / (total_pixels * 4) as f32;
 
-        // We allow a very small error rate due to float precision differences 
+        // We allow a very small error rate due to float precision differences
         // in trig approximations (Polynomial vs libm)
-        assert!(error_rate < 0.001, "Neon output diverged from Scalar! Error rate: {:.4}%", error_rate * 100.0);
+        assert!(
+            error_rate < 0.001,
+            "Neon output diverged from Scalar! Error rate: {:.4}%",
+            error_rate * 100.0
+        );
     }
 }

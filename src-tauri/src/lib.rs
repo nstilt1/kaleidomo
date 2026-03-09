@@ -38,8 +38,9 @@ async fn export_kaleidoscope(
         kaleido_type: match kaleido_type.to_lowercase().as_str() {
             "radial" => kaleidomo_core::KaleidoType::Radial,
             "square" => kaleidomo_core::KaleidoType::Square,
-            "isoceles" => kaleidomo_core::KaleidoType::Isoceles,
+            "diamond" => kaleidomo_core::KaleidoType::Diamond,
             "hexagonal" => kaleidomo_core::KaleidoType::Hexagonal,
+            "hexagonal_flat_top" => kaleidomo_core::KaleidoType::HexagonalFlatTop,
             _ => return Err("Invalid kaleidoscope type".into()),
         },
     };
@@ -88,8 +89,9 @@ async fn generate_kaleidoscope(
         kaleido_type: match kaleido_type.to_lowercase().as_str() {
             "radial" => kaleidomo_core::KaleidoType::Radial,
             "square" => kaleidomo_core::KaleidoType::Square,
-            "isoceles" => kaleidomo_core::KaleidoType::Isoceles,
+            "diamond" => kaleidomo_core::KaleidoType::Diamond,
             "hexagonal" => kaleidomo_core::KaleidoType::Hexagonal,
+            "hexagonal_flat_top" => kaleidomo_core::KaleidoType::HexagonalFlatTop,
             _ => return Err("Invalid kaleidoscope type".into()),
         },
     };

@@ -315,9 +315,10 @@ function App() {
                 <SelectGroup>
                   <SelectLabel>Geometry</SelectLabel>
                   <SelectItem value="radial">Radial</SelectItem>
-                  <SelectItem value="square">Square</SelectItem>
-                  <SelectItem value="isoceles">Isoceles</SelectItem>
-                  <SelectItem value="hexagonal">Hexagonal</SelectItem>
+                  <SelectItem value="square">Square Tiling</SelectItem>
+                  <SelectItem value="diamond">Diamond Tiling</SelectItem>
+                  <SelectItem value="hexagonal">Hexagon Tiling</SelectItem>
+                  <SelectItem value="hexagonal_flat_top">Hexagon Tiling (Flat Top)</SelectItem>
                 </SelectGroup>
               </SelectContent>
             </Select>
@@ -339,7 +340,7 @@ function App() {
           </div>
 
           <div className="space-y-4">
-            <div className="flex justify-between items-center"><label>Tile Count</label><span>{settings.tile_count}px</span></div>
+            <div className="flex justify-between items-center"><label>Tile Count</label><span>{settings.tile_count}</span></div>
             <Slider value={[settings.tile_count]} min={0.1} max={64.0} step={0.1} onValueChange={([v]) => setSettings(s => ({...s, tile_count: v}))} />
           </div>
 
