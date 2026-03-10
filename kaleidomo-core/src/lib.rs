@@ -161,6 +161,170 @@ pub fn render_kaleidoscope_with_backend<B: KaleidoBackend>(
     ImageBuffer::from_raw(size, size, pixels).unwrap()
 }
 
+use std::fs::File;
+use std::io::{BufWriter, Write};
+
+use openh264::encoder::Encoder;
+use openh264::formats::{RgbaSliceU8, YUVBuffer};
+use openh264::encoder::EncoderConfig;
+
+trait FrameSink {
+    fn write_rgba_frame(&mut self, rgba: &[u8]) -> std::io::Result<()>;
+    fn finish(self) -> std::io::Result<()>;
+}
+
+use std::path::Path;
+
+use openh264::encoder::{
+    BitRate, FrameRate, IntraFramePeriod, RateControlMode, UsageType,
+};
+use openh264::OpenH264API;
+
+pub struct H264Sink<W: Write> {
+    width: usize,
+    height: usize,
+    encoder: Encoder,
+    writer: W,
+}
+
+impl H264Sink<BufWriter<File>> {
+    pub fn create_file<P: AsRef<Path>>(
+        path: P,
+        width: usize,
+        height: usize,
+        fps: u32,
+        bitrate_bps: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let file = File::create(path)?;
+        let writer = BufWriter::new(file);
+        Self::new(writer, width, height, fps, bitrate_bps)
+    }
+}
+
+impl<W: Write> H264Sink<W> {
+    pub fn new(
+        writer: W,
+        width: usize,
+        height: usize,
+        fps: u32,
+        bitrate_bps: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        if width == 0 || height == 0 {
+            return Err("width and height must be non-zero".into());
+        }
+
+        // OpenH264 uses 4:2:0 internally here, so even dimensions are required.
+        if width % 2 != 0 || height % 2 != 0 {
+            return Err("width and height must both be even".into());
+        }
+
+        let config = EncoderConfig::new()
+            .bitrate(BitRate::from_bps(bitrate_bps))
+            .max_frame_rate(FrameRate::from_hz(fps as f32))
+            .usage_type(UsageType::ScreenContentRealTime)
+            .rate_control_mode(RateControlMode::Bitrate)
+            .skip_frames(false)
+            .intra_frame_period(IntraFramePeriod::from_num_frames(fps));
+
+        let encoder = Encoder::with_api_config(OpenH264API::from_source(), config)?;
+
+        Ok(Self {
+            width,
+            height,
+            encoder,
+            writer,
+        })
+    }
+
+    pub fn write_rgba_frame(&mut self, rgba: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        let expected_len = self.width * self.height * 4;
+        if rgba.len() != expected_len {
+            return Err(format!(
+                "invalid RGBA buffer length: got {}, expected {}",
+                rgba.len(),
+                expected_len
+            )
+            .into());
+        }
+
+        let rgba_source = RgbaSliceU8::new(rgba, (self.width, self.height));
+        let yuv = YUVBuffer::from_rgb_source(rgba_source);
+
+        let bitstream = self.encoder.encode(&yuv)?;
+        bitstream.write(&mut self.writer)?;
+
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> std::io::Result<W> {
+        self.writer.flush()?;
+        Ok(self.writer)
+    }
+}
+
+pub fn render_video(
+    source: &DynamicImage,
+    mut settings: KaleidoSettings,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let width = settings.output_size as usize;
+    let height = settings.output_size as usize;
+    let fps = 30u32;
+    let total_frames = 360u32;
+    let center = width as f32 / 2.0;
+    let slice_angle = (2.0 * PI) / settings.count as f32;
+
+    let mut rgba = vec![0u8; width * height * 4];
+    let mut sink = H264Sink::create_file(
+        "out.h264",
+        width,
+        height,
+        fps,
+        8_000_000,
+    )?;
+
+    for frame in 0..total_frames {
+        settings.triangle_rotation_rad = (settings.triangle_rotation_rad + (2.0 * PI / total_frames as f32)) % (2.0 * PI);
+        rgba
+            .par_chunks_exact_mut((width * 4) as usize)
+            .enumerate()
+            .for_each(|(y, row)| {
+                inner_loop::<Register>(
+                    y,
+                    row,
+                    settings.zoom,
+                    source,
+                    &settings,
+                    center,
+                    slice_angle,
+                    source.width(),
+                    source.height(),
+                );
+            });
+        sink.write_rgba_frame(&rgba)?;
+    }
+
+    sink.finish()?;
+    Ok(())
+}
+
+pub struct EncodedAccessUnit {
+    pub annex_b: Vec<u8>,
+    pub is_keyframe: bool,
+}
+
+pub trait VideoMuxer {
+    fn write_h264_access_unit(
+        &mut self,
+        annex_b: &[u8],
+        frame_index: u32,
+        fps: u32,
+    ) -> Result<(), Box<dyn std::error::Error>>;
+
+    fn finish(self) -> Result<(), Box<dyn std::error::Error>>;
+}
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
