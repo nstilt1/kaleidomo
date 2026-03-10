@@ -17,7 +17,10 @@ pub mod avx2;
 ))]
 pub mod sse2;
 
-#[cfg(any(not(any(target_arch = "aarch64", target_arch = "x86_64")), test, feature = "soft_backend"))]
+#[cfg(any(
+    not(target_arch = "aarch64"), 
+    test, 
+    feature = "soft_backend"))]
 mod scalar;
 
 pub trait KaleidoBackend: Sized + Copy {
@@ -125,6 +128,28 @@ pub trait KaleidoBackend: Sized + Copy {
     unsafe fn reflect_across_line(x: Self, y: Self, lx: Self, ly: Self) -> (Self, Self);
 
     unsafe fn hex_round(q: Self, r: Self) -> (Self, Self);
+
+    unsafe fn store_pixel_rgba8(
+        output: &mut [u8],
+        sx: Self,
+        sy: Self,
+        source: &[u8],
+        sw: u32,
+        sh: u32,
+    );
+
+    unsafe fn source_space_rotation(
+        local_x: Self,
+        local_y: Self,
+        triangle_rotation_rad: Self,
+        triangle_center_x: Self,
+        triangle_center_y: Self,
+        radius: Self,
+        two_pi: Self,
+        slice_angle: Self,
+        center: Self,
+        zoom: Self,
+    ) -> (Self, Self);
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -226,7 +251,8 @@ pub fn inner_loop<B: KaleidoBackend>(
                     ),
                 };
 
-                B::store_pixel(buff, x, sx, sy, source, source_width, source_height);
+                B::store_pixel_rgba8(buff, sx, sy, source.as_bytes(), source_width, source_height);
+                //B::store_pixel(buff, x, sx, sy, source, source_width, source_height);
             });
         }
 }

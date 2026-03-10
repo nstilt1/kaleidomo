@@ -89,6 +89,28 @@ impl KaleidoBackend for f32 {
         }
     }
 
+    #[inline(always)]
+    unsafe fn store_pixel_rgba8(
+        output: &mut [u8],
+        sx: Self,
+        sy: Self,
+        source: &[u8],
+        sw: u32,
+        sh: u32,
+    ) {
+        let x = sx.round() as i32;
+        let y = sy.round() as i32;
+
+        if x >= 0 && y >= 0 && (x as u32) < sw && (y as u32) < sh {
+            let idx = ((y as u32 * sw + x as u32) * 4) as usize;
+
+            output[0] = source[idx];
+            output[1] = source[idx + 1];
+            output[2] = source[idx + 2];
+            output[3] = source[idx + 3];
+        }
+    }
+
     //fn fold_square(input: Self, tile_size: Self) -> Self {
     //    let period = tile_size * 2.0;
     //    ((input % period + period) % period - tile_size).abs()
@@ -122,27 +144,9 @@ impl KaleidoBackend for f32 {
         let local_x = (dx + half).rem_euclid(tile_size) - half;
         let local_y = (dy + half).rem_euclid(tile_size) - half;
 
-        // Normalize into a canonical square domain.
-        let x = local_x / half;
-        let y = local_y / half;
-
-        // Fold into the canonical mirrored wedge using fixed-cost Cartesian ops.
-        let (fx, fy) = unsafe { Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi) };
-
-        // Source scale depends only on zoom, not tile_count.
-        let source_scale = center / zoom.max(0.0001);
-
-        let sx_local = fx * source_scale;
-        let sy_local = fy * source_scale;
-
-        // Apply source-space rotation.
-        let sin_r = triangle_rotation_rad.sin();
-        let cos_r = triangle_rotation_rad.cos();
-
-        let rx = sx_local * cos_r - sy_local * sin_r;
-        let ry = sx_local * sin_r + sy_local * cos_r;
-
-        (triangle_center_x + rx, triangle_center_y + ry)
+        unsafe {
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, half, two_pi, slice_angle, center, zoom)
+        }
     }
 
     #[inline]
@@ -172,26 +176,9 @@ impl KaleidoBackend for f32 {
         let local_u = (u + half).rem_euclid(tile) - half;
         let local_v = (v + half).rem_euclid(tile) - half;
 
-        // Normalize to a canonical local domain independent of tile_count.
-        let x = local_u / half;
-        let y = local_v / half;
-
-        // Fold into the canonical mirrored wedge.
-        let (fx, fy) = unsafe { Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi) };
-
-        // Source sampling scale depends only on zoom.
-        let source_scale = center / zoom.max(0.0001);
-
-        let sx_local = fx * source_scale;
-        let sy_local = fy * source_scale;
-
-        let sin_r = rotation.sin();
-        let cos_r = rotation.cos();
-
-        let rx = sx_local * cos_r - sy_local * sin_r;
-        let ry = sx_local * sin_r + sy_local * cos_r;
-
-        (tx + rx, ty + ry)
+        unsafe {
+            Self::source_space_rotation(local_u, local_v, rotation, tx, ty, half, two_pi, slice_angle, center, zoom)
+        }
     }
 
     #[inline]
@@ -227,26 +214,9 @@ impl KaleidoBackend for f32 {
         let local_x = dx - hex_cx;
         let local_y = dy - hex_cy;
 
-        // Normalize local point so tile_count only changes on-screen tile size.
-        let x = local_x / hex_radius;
-        let y = local_y / hex_radius;
-
-        // Fold into the canonical mirrored wedge.
-        let (fx, fy) = unsafe { Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi) };
-
-        // Source sampling scale depends only on zoom.
-        let source_scale = center / zoom.max(0.0001);
-
-        let sx_local = fx * source_scale;
-        let sy_local = fy * source_scale;
-
-        let sin_r = triangle_rotation_rad.sin();
-        let cos_r = triangle_rotation_rad.cos();
-
-        let rx = sx_local * cos_r - sy_local * sin_r;
-        let ry = sx_local * sin_r + sy_local * cos_r;
-
-        (triangle_center_x + rx, triangle_center_y + ry)
+        unsafe {
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, center, zoom)
+        }
     }
 
     #[inline]
@@ -283,26 +253,9 @@ impl KaleidoBackend for f32 {
         let local_x = dx - hex_cx;
         let local_y = dy - hex_cy;
 
-        // Normalize local point so tile_count only changes on-screen tile size.
-        let x = local_x / hex_radius;
-        let y = local_y / hex_radius;
-
-        // Fold into the canonical mirrored wedge.
-        let (fx, fy) = unsafe { Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi) };
-
-        // Source sampling scale depends only on zoom.
-        let source_scale = center / zoom.max(0.0001);
-
-        let sx_local = fx * source_scale;
-        let sy_local = fy * source_scale;
-
-        let sin_r = triangle_rotation_rad.sin();
-        let cos_r = triangle_rotation_rad.cos();
-
-        let rx = sx_local * cos_r - sy_local * sin_r;
-        let ry = sx_local * sin_r + sy_local * cos_r;
-
-        (triangle_center_x + rx, triangle_center_y + ry)
+        unsafe {
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, center, zoom)
+        }
     }
 
     #[inline]
@@ -326,7 +279,7 @@ impl KaleidoBackend for f32 {
     }
 
     #[inline]
-    unsafe fn fold_point_into_wedge_fixed(x: f32, y: f32, slice_angle: Self, two_pi: Self) -> (f32, f32) {
+    unsafe fn fold_point_into_wedge_fixed(x: Self, y: Self, slice_angle: Self, two_pi: Self) -> (f32, f32) {
         let mut theta = y.atan2(x);
         if theta < 0.0 {
             theta += two_pi;
@@ -355,9 +308,45 @@ impl KaleidoBackend for f32 {
 
     #[inline]
     unsafe fn reflect_across_line(x: f32, y: f32, lx: f32, ly: f32) -> (f32, f32) {
-        let dot = x * lx + y * ly;
-        let rx = 2.0 * dot * lx - x;
-        let ry = 2.0 * dot * ly - y;
+        let dot = 2.0 * (x * lx + y * ly);
+        let rx = dot * lx - x;
+        let ry = dot * ly - y;
         (rx, ry)
+    }
+
+    #[inline]
+    unsafe fn source_space_rotation(
+            local_x: Self,
+            local_y: Self,
+            triangle_rotation_rad: Self,
+            triangle_center_x: Self,
+            triangle_center_y: Self,
+            radius: Self,
+            two_pi: Self,
+            slice_angle: Self,
+            center: Self,
+            zoom: Self,
+        ) -> (Self, Self) {
+        // Normalize into a canonical square domain.
+        let x = local_x / radius;
+        let y = local_y / radius;
+
+        // Fold into the canonical mirrored wedge using fixed-cost Cartesian ops.
+        let (fx, fy) = unsafe { Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi) };
+
+        // Source scale depends only on zoom, not tile_count.
+        let source_scale = center / zoom.max(0.0001);
+
+        let sx_local = fx * source_scale;
+        let sy_local = fy * source_scale;
+
+        // Apply source-space rotation.
+        let sin_r = triangle_rotation_rad.sin();
+        let cos_r = triangle_rotation_rad.cos();
+
+        let rx = sx_local * cos_r - sy_local * sin_r;
+        let ry = sx_local * sin_r + sy_local * cos_r;
+
+        (triangle_center_x + rx, triangle_center_y + ry)
     }
 }

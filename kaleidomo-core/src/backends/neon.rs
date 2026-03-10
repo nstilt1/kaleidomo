@@ -286,6 +286,54 @@ impl KaleidoBackend for float32x4_t {
         }
     }
 
+    #[inline]
+    #[target_feature(enable = "neon")]
+    unsafe fn store_pixel_rgba8(
+        output: &mut [u8],
+        sx: Self,
+        sy: Self,
+        source: &[u8],
+        sw: u32,
+        sh: u32,
+    ) {
+        unsafe {
+            let zero = vdupq_n_f32(0.0);
+            let sw_v = vdupq_n_f32(sw as f32);
+            let sh_v = vdupq_n_f32(sh as f32);
+
+            let v_mask = vandq_u32(
+                vandq_u32(vcgeq_f32(sx, zero), vcltq_f32(sx, sw_v)),
+                vandq_u32(vcgeq_f32(sy, zero), vcltq_f32(sy, sh_v)),
+            );
+
+            if vmaxvq_u32(v_mask) == 0 {
+                return;
+            }
+
+            let sx_i = vcvtq_u32_f32(sx);
+            let sy_i = vcvtq_u32_f32(sy);
+
+            let mut xs = [0u32; 4];
+            let mut ys = [0u32; 4];
+            let mut m = [0u32; 4];
+
+            vst1q_u32(xs.as_mut_ptr(), sx_i);
+            vst1q_u32(ys.as_mut_ptr(), sy_i);
+            vst1q_u32(m.as_mut_ptr(), v_mask);
+
+            for i in 0..4 {
+                if m[i] != 0 {
+                    let idx = ((ys[i] * sw + xs[i]) * 4) as usize;
+                    let out = i * 4;
+
+                    let src = source.as_ptr().add(idx) as *const u32;
+                    let dst = output.as_mut_ptr().add(out) as *mut u32;
+                    *dst = *src;
+                }
+            }
+        }
+    }
+
     // fn fold_square(input: Self, count: u32, tile_size: Self) -> Self {
     //     unsafe {
     //         let period = vmulq_f32(tile_size, vdupq_n_f32(2.0));
@@ -317,25 +365,7 @@ impl KaleidoBackend for float32x4_t {
             let local_x = vsubq_f32(modulo(vaddq_f32(dx, half), tile_size), half);
             let local_y = vsubq_f32(modulo(vaddq_f32(dy, half), tile_size), half);
 
-            let x = vdivq_f32(local_x, half);
-            let y = vdivq_f32(local_y, half);
-
-            let (fx, fy) = Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi);
-
-            let source_scale = vdivq_f32(center, zoom);
-
-            let sx_local = vmulq_f32(fx, source_scale);
-            let sy_local = vmulq_f32(fy, source_scale);
-
-            let (sin_r, cos_r) = sin_cos(triangle_rotation_rad);
-
-            let rx = vfmaq_f32(vnegq_f32(vmulq_f32(sy_local, sin_r)), sx_local, cos_r);
-            let ry = vfmaq_f32(vmulq_f32(sy_local, cos_r), sx_local, sin_r);
-
-            (
-                vaddq_f32(triangle_center_x, rx),
-                vaddq_f32(triangle_center_y, ry),
-            )
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, half, two_pi, slice_angle, center, zoom)
         }
     }
     #[target_feature(enable = "neon")]
@@ -364,25 +394,7 @@ impl KaleidoBackend for float32x4_t {
             let local_u = vsubq_f32(modulo(vaddq_f32(u, half), tile), half);
             let local_v = vsubq_f32(modulo(vaddq_f32(v, half), tile), half);
 
-            let x = vdivq_f32(local_u, half);
-            let y = vdivq_f32(local_v, half);
-
-            let (fx, fy) = Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi);
-
-            let source_scale = vdivq_f32(center, zoom);
-
-            let sx_local = vmulq_f32(fx, source_scale);
-            let sy_local = vmulq_f32(fy, source_scale);
-
-            let (sin_r, cos_r) = sin_cos(triangle_rotation_rad);
-
-            let rx = vfmaq_f32(vnegq_f32(vmulq_f32(sy_local, sin_r)), sx_local, cos_r);
-            let ry = vfmaq_f32(vmulq_f32(sy_local, cos_r), sx_local, sin_r);
-
-            (
-                vaddq_f32(triangle_center_x, rx),
-                vaddq_f32(triangle_center_y, ry),
-            )
+            Self::source_space_rotation(local_u, local_v, triangle_rotation_rad, triangle_center_x, triangle_center_y, half, two_pi, slice_angle, center, zoom)
         }
     }
     #[target_feature(enable = "neon")]
@@ -425,25 +437,7 @@ impl KaleidoBackend for float32x4_t {
             let local_x = vsubq_f32(dx, hex_cx);
             let local_y = vsubq_f32(dy, hex_cy);
 
-            let x = vdivq_f32(local_x, hex_radius);
-            let y = vdivq_f32(local_y, hex_radius);
-
-            let (fx, fy) = Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi);
-
-            let source_scale = vdivq_f32(center, zoom);
-
-            let sx_local = vmulq_f32(fx, source_scale);
-            let sy_local = vmulq_f32(fy, source_scale);
-
-            let (sin_r, cos_r) = sin_cos(triangle_rotation_rad);
-
-            let rx = vfmaq_f32(vnegq_f32(vmulq_f32(sy_local, sin_r)), sx_local, cos_r);
-            let ry = vfmaq_f32(vmulq_f32(sy_local, cos_r), sx_local, sin_r);
-
-            (
-                vaddq_f32(triangle_center_x, rx),
-                vaddq_f32(triangle_center_y, ry),
-            )
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, center, zoom)
         }
     }
 
@@ -497,25 +491,7 @@ impl KaleidoBackend for float32x4_t {
             let local_x = vsubq_f32(dx, hex_cx);
             let local_y = vsubq_f32(dy, hex_cy);
 
-            let x = vdivq_f32(local_x, hex_radius);
-            let y = vdivq_f32(local_y, hex_radius);
-
-            let (fx, fy) = Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi);
-
-            let source_scale = vdivq_f32(center, zoom);
-
-            let sx_local = vmulq_f32(fx, source_scale);
-            let sy_local = vmulq_f32(fy, source_scale);
-
-            let (sin_r, cos_r) = sin_cos(triangle_rotation_rad);
-
-            let rx = vfmaq_f32(vnegq_f32(vmulq_f32(sy_local, sin_r)), sx_local, cos_r);
-            let ry = vfmaq_f32(vmulq_f32(sy_local, cos_r), sx_local, sin_r);
-
-            (
-                vaddq_f32(triangle_center_x, rx),
-                vaddq_f32(triangle_center_y, ry),
-            )
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, center, zoom)
         }
     }
 
@@ -579,12 +555,47 @@ impl KaleidoBackend for float32x4_t {
     #[target_feature(enable = "neon")]
     #[inline]
     unsafe fn reflect_across_line(x: Self, y: Self, lx: Self, ly: Self) -> (Self, Self) {
+        let dot = vfmaq_f32(vmulq_f32(x, lx), y, ly);
+        let two_dot = vmulq_n_f32(dot, 2.0);
+        let rx = vsubq_f32(vmulq_f32(two_dot, lx), x);
+        let ry = vsubq_f32(vmulq_f32(two_dot, ly), y);
+        (rx, ry)
+    }
+
+    #[target_feature(enable = "neon")]
+    #[inline]
+    unsafe fn source_space_rotation(
+            local_x: Self,
+            local_y: Self,
+            triangle_rotation_rad: Self,
+            triangle_center_x: Self,
+            triangle_center_y: Self,
+            radius: Self,
+            two_pi: Self,
+            slice_angle: Self,
+            center: Self,
+            zoom: Self,
+        ) -> (Self, Self) {
         unsafe {
-            let two = Self::load_with_single_f32(2.0);
-            let dot = vfmaq_f32(vmulq_f32(x, lx), y, ly);
-            let rx = vsubq_f32(vmulq_f32(two, vmulq_f32(dot, lx)), x);
-            let ry = vsubq_f32(vmulq_f32(two, vmulq_f32(dot, ly)), y);
-            (rx, ry)
+            let x = vdivq_f32(local_x, radius);
+            let y = vdivq_f32(local_y, radius);
+
+            let (fx, fy) = Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi);
+
+            let source_scale = vdivq_f32(center, zoom);
+
+            let sx_local = vmulq_f32(fx, source_scale);
+            let sy_local = vmulq_f32(fy, source_scale);
+
+            let (sin_r, cos_r) = sin_cos(triangle_rotation_rad);
+
+            let rx = vfmaq_f32(vnegq_f32(vmulq_f32(sy_local, sin_r)), sx_local, cos_r);
+            let ry = vfmaq_f32(vmulq_f32(sy_local, cos_r), sx_local, sin_r);
+
+            (
+                vaddq_f32(triangle_center_x, rx),
+                vaddq_f32(triangle_center_y, ry),
+            )
         }
     }
 }

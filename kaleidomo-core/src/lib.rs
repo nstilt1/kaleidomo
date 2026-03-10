@@ -187,7 +187,7 @@ mod tests {
             triangle_center_x: 50.0,
             triangle_center_y: 50.0,
             triangle_rotation_rad: 0.0,
-            kaleido_type: KaleidoType::HexagonalFlatTop,
+            kaleido_type: KaleidoType::Hexagonal,
             tile_count: 4.0,
         };
 
