@@ -23,7 +23,10 @@ pub enum KaleidoType {
 #[derive(Clone)]
 pub struct KaleidoSettings {
     pub count: u32,       // Number of reflections (e.g., 8)
-    pub output_size: u32, // Width/Height of square output
+    pub output_size_w: u32,
+    pub output_size_h: u32,
+    pub offset_x: u32,
+    pub offset_y: u32,
     pub zoom: f32,        // How much of the triangle to show
     pub tile_count: f32,
     pub triangle_center_x: f32, // Center of the triangle in source image
@@ -38,22 +41,23 @@ pub fn render_kaleidoscope(
     settings: KaleidoSettings,
 ) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
     let (sw, sh) = source.dimensions();
-    let size = settings.output_size;
-    let center = size as f32 / 2.0;
+    let width_over_2 = settings.output_size_w as f32 / 2.0;
+    let center_x = settings.output_size_w as f32 / 2.0 + settings.offset_x as f32;
+    let center_y = settings.output_size_h as f32 / 2.0 + settings.offset_y as f32;
     let slice_angle = (2.0 * PI) / settings.count as f32;
 
     // Create a flat vector for the pixels
-    let mut pixels = vec![0u8; (size * size * 4) as usize];
+    let mut pixels = vec![0u8; (settings.output_size_w * settings.output_size_h * 4) as usize];
 
     // Rayon parallelizes the rows automatically
     pixels
-        .par_chunks_exact_mut((size * 4) as usize)
+        .par_chunks_exact_mut((settings.output_size_w * 4) as usize)
         .enumerate()
         .for_each(|(y, row)| {
-            for x in 0..size {
+            for x in 0..settings.output_size_w {
                 // 1. Normalize coordinates relative to center
-                let dx = x as f32 - center;
-                let dy = y as f32 - center;
+                let dx = x as f32 - center_x;
+                let dy = y as f32 - center_y;
 
                 // 2. Map to Polar
                 let r = (dx * dx + dy * dy).sqrt();
@@ -106,7 +110,7 @@ pub fn render_kaleidoscope(
             }
         });
 
-    ImageBuffer::from_raw(size, size, pixels).unwrap()
+    ImageBuffer::from_raw(settings.output_size_w, settings.output_size_h, pixels).unwrap()
 }
 
 pub fn render_kaleidoscope_with_auto_backend(
@@ -136,25 +140,29 @@ pub fn render_kaleidoscope_with_backend<B: KaleidoBackend + DaydreamBackend>(
     settings: KaleidoSettings,
 ) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
     let (sw, sh) = source.dimensions();
-    let size = settings.output_size;
-    let center = size as f32 / 2.0;
+    let width_over_2 = settings.output_size_w as f32 / 2.0;
+    let center_x = settings.output_size_w as f32 / 2.0 + settings.offset_x as f32;
+    let center_y = settings.output_size_h as f32 / 2.0 + settings.offset_y as f32;
     let slice_angle = (2.0 * PI) / settings.count as f32;
 
     // Create a flat vector for the pixels
-    let mut pixels = vec![0u8; (size * size * 4) as usize];
+    let mut pixels = vec![0u8; (settings.output_size_w * settings.output_size_h * 4) as usize];
 
     // Rayon parallelizes the rows automatically
     pixels
-        .par_chunks_exact_mut((size * 4) as usize)
+        .par_chunks_exact_mut((settings.output_size_w * 4) as usize)
         .enumerate()
         .for_each(|(y, row)| {
             inner_loop::<B>(
+            //inner_loop::<f32>(
                 y,
                 row,
                 settings.zoom,
                 source,
                 &settings,
-                center,
+                width_over_2,
+                center_x,
+                center_y,
                 slice_angle,
                 sw,
                 sh,
@@ -162,7 +170,7 @@ pub fn render_kaleidoscope_with_backend<B: KaleidoBackend + DaydreamBackend>(
             );
         });
 
-    ImageBuffer::from_raw(size, size, pixels).unwrap()
+    ImageBuffer::from_raw(settings.output_size_w, settings.output_size_h, pixels).unwrap()
 }
 
 use openh264::encoder::Encoder;
@@ -340,18 +348,18 @@ fn render_video<B: KaleidoBackend + DaydreamBackend>(
     mut settings: KaleidoSettings,
     path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let width = settings.output_size as usize;
-    let height = settings.output_size as usize;
     let fps = 30u32;
     let total_frames = 360u32;
-    let center = width as f32 / 2.0;
+    let width_over_2 = settings.output_size_w as f32 / 2.0;
+    let center_x = settings.output_size_w as f32 / 2.0 + settings.offset_x as f32;
+    let center_y = settings.output_size_h as f32 / 2.0 + settings.offset_y as f32;
     let slice_angle = (2.0 * PI) / settings.count as f32;
 
-    let mut rgba = vec![0u8; width * height * 4];
+    let mut rgba = vec![0u8; (settings.output_size_w * settings.output_size_h * 4) as usize];
     let mut sink = Mp4H264Sink::create(
         path,
-        width,
-        height,
+        settings.output_size_w as usize,
+        settings.output_size_h as usize,
         fps,
         8_000_000,
     )?;
@@ -359,7 +367,7 @@ fn render_video<B: KaleidoBackend + DaydreamBackend>(
     for frame in 0..total_frames {
         settings.triangle_rotation_rad = (settings.triangle_rotation_rad + (2.0 * PI / total_frames as f32)) % (2.0 * PI);
         rgba
-            .par_chunks_exact_mut((width * 4) as usize)
+            .par_chunks_exact_mut((settings.output_size_w * 4) as usize)
             .enumerate()
             .for_each(|(y, row)| {
                 inner_loop::<Register>(
@@ -368,7 +376,9 @@ fn render_video<B: KaleidoBackend + DaydreamBackend>(
                     settings.zoom,
                     source,
                     &settings,
-                    center,
+                    width_over_2,
+                    center_x,
+                    center_y,
                     slice_angle,
                     source.width(),
                     source.height(),
@@ -404,7 +414,10 @@ mod tests {
 
         // 2. Setup Kaleidoscope settings
         let settings = KaleidoSettings {
-            output_size: 64, // Keep it small for fast tests
+            output_size_w: 64, // Keep it small for fast tests
+            output_size_h: 64,
+            offset_x: 0,
+            offset_y: 0,
             count: 6,        // Hexagonal symmetry
             zoom: 1.0,
             triangle_center_x: 50.0,
@@ -438,7 +451,7 @@ mod tests {
             }
         }
 
-        let total_pixels = settings.output_size * settings.output_size;
+        let total_pixels = settings.output_size_h * settings.output_size_w;
         let error_rate = diff_count as f32 / (total_pixels * 4) as f32;
 
         // We allow a very small error rate due to float precision differences

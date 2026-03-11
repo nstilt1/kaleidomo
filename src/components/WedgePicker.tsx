@@ -4,8 +4,8 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 interface PickerProps {
   imagePath: string;
   count: number;
-  settings: { x: number; y: number; rotation: number, resolution: number, zoom: number, tile_count: number, hue_rotate: number }; // Pass settings as prop
-  onUpdate: (s: { x: number; y: number; rotation: number, resolution: number, zoom: number, tile_count: number, hue_rotate: number }) => void;
+  settings: { x: number; y: number; rotation: number, resolution: number, zoom: number, tile_count: number, hue_rotate: number, ratio_num: number, ratio_den: number, offset_x: number, offset_y: number, }; // Pass settings as prop
+  onUpdate: (s: { x: number; y: number; rotation: number, resolution: number, zoom: number, tile_count: number, hue_rotate: number, ratio_num: number, ratio_den: number, offset_x: number, offset_y: number }) => void;
 }
 
 export const WedgePicker: React.FC<PickerProps> = ({ imagePath, count, settings, onUpdate }) => {
@@ -94,6 +94,10 @@ export const WedgePicker: React.FC<PickerProps> = ({ imagePath, count, settings,
       zoom: settings.zoom,
       tile_count: settings.tile_count,
       hue_rotate: settings.hue_rotate,
+      ratio_num: settings.ratio_num,
+      ratio_den: settings.ratio_den,
+      offset_x: settings.offset_x,
+      offset_y: settings.offset_y,
     });
   };
 

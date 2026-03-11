@@ -350,7 +350,9 @@ impl KaleidoBackend for float32x4_t {
     unsafe fn map_square(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -360,14 +362,14 @@ impl KaleidoBackend for float32x4_t {
         triangle_center_y: Self,
     ) -> (Self, Self) {
         unsafe {
-            let screen_size = vmulq_n_f32(center, 2.0);
+            let screen_size = vmulq_n_f32(width_over_2, 2.0);
             let tile_size = vdivq_f32(screen_size, tile_count);
             let half = vmulq_n_f32(tile_size, 0.5);
 
             let local_x = vsubq_f32(modulo(vaddq_f32(dx, half), tile_size), half);
             let local_y = vsubq_f32(modulo(vaddq_f32(dy, half), tile_size), half);
 
-            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, half, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, half, two_pi, slice_angle, width_over_2, zoom)
         }
     }
     #[target_feature(enable = "neon")]
@@ -375,7 +377,9 @@ impl KaleidoBackend for float32x4_t {
     unsafe fn map_diamond(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -385,7 +389,7 @@ impl KaleidoBackend for float32x4_t {
         triangle_center_y: Self,
     ) -> (Self, Self) {
         unsafe {
-            let screen_size = vmulq_n_f32(center, 2.0);
+            let screen_size = vmulq_n_f32(width_over_2, 2.0);
             let tile = vdivq_f32(screen_size, tile_count);
             let half = vmulq_n_f32(tile, 0.5);
 
@@ -396,7 +400,7 @@ impl KaleidoBackend for float32x4_t {
             let local_u = vsubq_f32(modulo(vaddq_f32(u, half), tile), half);
             let local_v = vsubq_f32(modulo(vaddq_f32(v, half), tile), half);
 
-            Self::source_space_rotation(local_u, local_v, triangle_rotation_rad, triangle_center_x, triangle_center_y, half, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_u, local_v, triangle_rotation_rad, triangle_center_x, triangle_center_y, half, two_pi, slice_angle, width_over_2, zoom)
         }
     }
     #[target_feature(enable = "neon")]
@@ -404,7 +408,9 @@ impl KaleidoBackend for float32x4_t {
     unsafe fn map_hexagonal(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -415,7 +421,7 @@ impl KaleidoBackend for float32x4_t {
         sqrt3: Self,
     ) -> (Self, Self) {
         unsafe {
-            let screen_size = vmulq_n_f32(center, 2.0);
+            let screen_size = vmulq_n_f32(width_over_2, 2.0);
 
             let hex_radius = vdivq_f32(screen_size, vmulq_f32(sqrt3, tile_count));
             let one_over_three = vdupq_n_f32(1.0 / 3.0);
@@ -439,7 +445,7 @@ impl KaleidoBackend for float32x4_t {
             let local_x = vsubq_f32(dx, hex_cx);
             let local_y = vsubq_f32(dy, hex_cy);
 
-            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, width_over_2, zoom)
         }
     }
 
@@ -448,7 +454,9 @@ impl KaleidoBackend for float32x4_t {
     unsafe fn map_hexagonal_flat_top(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -459,7 +467,7 @@ impl KaleidoBackend for float32x4_t {
         sqrt3: Self,
     ) -> (Self, Self) {
         unsafe {
-            let screen_size = vmulq_n_f32(center, 2.0);
+            let screen_size = vmulq_n_f32(width_over_2, 2.0);
 
             let hex_radius = vdivq_f32(screen_size, vmulq_n_f32(tile_count, 1.5));
             let one_over_three = vdupq_n_f32(1.0 / 3.0);
@@ -493,7 +501,7 @@ impl KaleidoBackend for float32x4_t {
             let local_x = vsubq_f32(dx, hex_cx);
             let local_y = vsubq_f32(dy, hex_cy);
 
-            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, width_over_2, zoom)
         }
     }
 
@@ -575,7 +583,7 @@ impl KaleidoBackend for float32x4_t {
             radius: Self,
             two_pi: Self,
             slice_angle: Self,
-            center: Self,
+            width_over_2: Self,
             zoom: Self,
         ) -> (Self, Self) {
         unsafe {
@@ -584,7 +592,7 @@ impl KaleidoBackend for float32x4_t {
 
             let (fx, fy) = Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi);
 
-            let source_scale = vdivq_f32(center, zoom);
+            let source_scale = vdivq_f32(width_over_2, zoom);
 
             let sx_local = vmulq_f32(fx, source_scale);
             let sy_local = vmulq_f32(fy, source_scale);
@@ -800,47 +808,74 @@ impl DaydreamBackend for float32x4_t {
     }
     #[target_feature(enable = "neon")]
     #[inline]
-    unsafe fn store_pixel_hue_shift(buff: &mut [u8], x: u32, sx: Self, sy: Self, source: &image::DynamicImage, source_width: u32, source_height: u32, hue_shift_vec: Self, two_fifty_five: Self, hundred: Self, zero: Self, six: Self, sixty: Self, one: Self, two: Self, four: Self, three_sixty: Self, five: Self, three: Self) {
+    unsafe fn store_pixel_hue_shift(
+        buff: &mut [u8],
+        x: u32,
+        sx: Self,
+        sy: Self,
+        source: &image::DynamicImage,
+        source_width: u32,
+        source_height: u32,
+        hue_shift_vec: Self,
+        two_fifty_five: Self,
+        hundred: Self,
+        zero: Self,
+        six: Self,
+        sixty: Self,
+        one: Self,
+        two: Self,
+        four: Self,
+        three_sixty: Self,
+        five: Self,
+        three: Self,
+    ) {
         unsafe {
-            // 1. Check bounds on floats first to match 'sx >= 0.0 && sx < sw'
-            let zero = vdupq_n_f32(0.0);
+            let zero_f = vdupq_n_f32(0.0);
             let sw_v = vdupq_n_f32(source_width as f32);
             let sh_v = vdupq_n_f32(source_height as f32);
 
             let v_mask = vandq_u32(
-                vandq_u32(vcgeq_f32(sx, zero), vcltq_f32(sx, sw_v)),
-                vandq_u32(vcgeq_f32(sy, zero), vcltq_f32(sy, sh_v)),
+                vandq_u32(vcgeq_f32(sx, zero_f), vcltq_f32(sx, sw_v)),
+                vandq_u32(vcgeq_f32(sy, zero_f), vcltq_f32(sy, sh_v)),
             );
 
             if vmaxvq_u32(v_mask) == 0 {
                 return;
             }
 
-            // 2. Use truncation (round toward zero) to match 'as u32'
-            let sx_i = vcvtq_u32_f32(sx);
-            let sy_i = vcvtq_u32_f32(sy);
+            let max_x = vdupq_n_f32(source_width.saturating_sub(1) as f32);
+            let max_y = vdupq_n_f32(source_height.saturating_sub(1) as f32);
+
+            let sx_safe = vmaxq_f32(zero_f, vminq_f32(sx, max_x));
+            let sy_safe = vmaxq_f32(zero_f, vminq_f32(sy, max_y));
+
+            let sx_i = vcvtq_u32_f32(sx_safe);
+            let sy_i = vcvtq_u32_f32(sy_safe);
 
             let mut xs = [0u32; 4];
             let mut ys = [0u32; 4];
             let mut m = [0u32; 4];
+
             vst1q_u32(xs.as_mut_ptr(), sx_i);
             vst1q_u32(ys.as_mut_ptr(), sy_i);
             vst1q_u32(m.as_mut_ptr(), v_mask);
 
-            let pixels = [
-                source.get_pixel(xs[0], ys[0]).0,
-                source.get_pixel(xs[1], ys[1]).0,
-                source.get_pixel(xs[2], ys[2]).0,
-                source.get_pixel(xs[3], ys[3]).0
-            ];
-            
+            let mut pixels = [[0u8; 4]; 4];
+            for i in 0..4 {
+                if m[i] != 0 {
+                    pixels[i] = source.get_pixel(xs[i], ys[i]).0;
+                }
+            }
+
             let (r, g, b, a) = Self::load_pixels(&pixels);
 
-            let (mut h, s, v) = Self::rgb_to_hsv(r, g, b, two_fifty_five, hundred, zero, six, sixty, one, two, four);
+            let (mut h, s, v) =
+                Self::rgb_to_hsv(r, g, b, two_fifty_five, hundred, zero, six, sixty, one, two, four);
 
             h = Self::adjust_hue(h, hue_shift_vec, three_sixty);
 
-            let (r, g, b) = Self::hsv_to_rgb(h, s, v, hundred, sixty, two_fifty_five, zero, five, four, three, two, one);
+            let (r, g, b) =
+                Self::hsv_to_rgb(h, s, v, hundred, sixty, two_fifty_five, zero, five, four, three, two, one);
 
             let pixels = Self::extract_pixels(r, g, b, a);
 

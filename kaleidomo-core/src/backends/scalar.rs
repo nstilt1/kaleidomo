@@ -129,7 +129,9 @@ impl KaleidoBackend for f32 {
     unsafe fn map_square(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -138,7 +140,7 @@ impl KaleidoBackend for f32 {
         triangle_center_x: Self,
         triangle_center_y: Self,
     ) -> (Self, Self) {
-        let screen_size = center * 2.0;
+        let screen_size = width_over_2 * 2.0;
         let tile_size = screen_size / tile_count.max(0.0001);
         let half = tile_size * 0.5;
 
@@ -147,7 +149,7 @@ impl KaleidoBackend for f32 {
         let local_y = (dy + half).rem_euclid(tile_size) - half;
 
         unsafe {
-            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, half, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, half, two_pi, slice_angle, width_over_2, zoom)
         }
     }
 
@@ -155,7 +157,9 @@ impl KaleidoBackend for f32 {
     unsafe fn map_diamond(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -164,7 +168,7 @@ impl KaleidoBackend for f32 {
         tx: Self,
         ty: Self,
     ) -> (Self, Self) {
-        let screen_size = center * 2.0;
+        let screen_size = width_over_2 * 2.0;
         let tile = screen_size / tile_count.max(0.0001);
         let half = tile * 0.5;
 
@@ -179,7 +183,7 @@ impl KaleidoBackend for f32 {
         let local_v = (v + half).rem_euclid(tile) - half;
 
         unsafe {
-            Self::source_space_rotation(local_u, local_v, rotation, tx, ty, half, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_u, local_v, rotation, tx, ty, half, two_pi, slice_angle, width_over_2, zoom)
         }
     }
 
@@ -187,7 +191,9 @@ impl KaleidoBackend for f32 {
     unsafe fn map_hexagonal(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -197,7 +203,7 @@ impl KaleidoBackend for f32 {
         triangle_center_y: Self,
         sqrt3: Self,
     ) -> (Self, Self) {
-        let screen_size = center * 2.0;
+        let screen_size = width_over_2 * 2.0;
 
         // Pointy-top hex radius. This gives roughly tile_count hexes across.
         let hex_radius = screen_size / (tile_count.max(0.0001) * sqrt3);
@@ -217,7 +223,7 @@ impl KaleidoBackend for f32 {
         let local_y = dy - hex_cy;
 
         unsafe {
-            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, width_over_2, zoom)
         }
     }
 
@@ -225,7 +231,9 @@ impl KaleidoBackend for f32 {
     unsafe fn map_hexagonal_flat_top(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -235,7 +243,7 @@ impl KaleidoBackend for f32 {
         triangle_center_y: Self,
         sqrt3: Self,
     ) -> (Self, Self) {
-        let screen_size = center * 2.0;
+        let screen_size = width_over_2 * 2.0;
 
         // Flat-top hex radius / side length.
         // This is still a reasonable "roughly tile_count across" control.
@@ -256,7 +264,7 @@ impl KaleidoBackend for f32 {
         let local_y = dy - hex_cy;
 
         unsafe {
-            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_x, local_y, triangle_rotation_rad, triangle_center_x, triangle_center_y, hex_radius, two_pi, slice_angle, width_over_2, zoom)
         }
     }
 
@@ -326,7 +334,7 @@ impl KaleidoBackend for f32 {
             radius: Self,
             two_pi: Self,
             slice_angle: Self,
-            center: Self,
+            width_over_2: Self,
             zoom: Self,
         ) -> (Self, Self) {
         // Normalize into a canonical square domain.
@@ -337,7 +345,7 @@ impl KaleidoBackend for f32 {
         let (fx, fy) = unsafe { Self::fold_point_into_wedge_fixed(x, y, slice_angle, two_pi) };
 
         // Source scale depends only on zoom, not tile_count.
-        let source_scale = center / zoom.max(0.0001);
+        let source_scale = width_over_2 / zoom.max(0.0001);
 
         let sx_local = fx * source_scale;
         let sy_local = fy * source_scale;

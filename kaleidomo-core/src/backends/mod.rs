@@ -17,7 +17,7 @@ pub mod avx2;
 ))]
 pub mod sse2;
 
-#[cfg(any(not(target_arch = "aarch64"), test, feature = "soft_backend"))]
+//#[cfg(any(not(target_arch = "aarch64"), test, feature = "soft_backend"))]
 mod scalar;
 
 pub trait KaleidoBackend: Sized + Copy {
@@ -65,7 +65,9 @@ pub trait KaleidoBackend: Sized + Copy {
     unsafe fn map_square(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -78,7 +80,9 @@ pub trait KaleidoBackend: Sized + Copy {
     unsafe fn map_diamond(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -91,7 +95,9 @@ pub trait KaleidoBackend: Sized + Copy {
     unsafe fn map_hexagonal(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -105,7 +111,9 @@ pub trait KaleidoBackend: Sized + Copy {
     unsafe fn map_hexagonal_flat_top(
         dx: Self,
         dy: Self,
-        center: Self,
+        width_over_2: Self,
+        center_x: Self,
+        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -144,7 +152,7 @@ pub trait KaleidoBackend: Sized + Copy {
         radius: Self,
         two_pi: Self,
         slice_angle: Self,
-        center: Self,
+        width_over_2: Self,
         zoom: Self,
     ) -> (Self, Self);
 }
@@ -216,7 +224,9 @@ pub fn inner_loop<B: KaleidoBackend + DaydreamBackend>(
     zoom: f32,
     source: &DynamicImage,
     settings: &KaleidoSettings,
-    center: f32,
+    width_over_2: f32,
+    center_x: f32,
+    center_y: f32,
     slice_angle: f32,
     source_width: u32,
     source_height: u32,
@@ -225,7 +235,9 @@ pub fn inner_loop<B: KaleidoBackend + DaydreamBackend>(
     unsafe {
         let triangle_center_x = B::load_with_single_f32(settings.triangle_center_x);
         let triangle_center_y = B::load_with_single_f32(settings.triangle_center_y);
-        let center = B::load_with_single_f32(center);
+        let center_x = B::load_with_single_f32(center_x);
+        let center_y = B::load_with_single_f32(center_y);
+        let width_over_2 = B::load_with_single_f32(width_over_2);
         let z = B::load_with_single_f32(zoom);
         let tile_count = B::load_with_single_f32(settings.tile_count);
         let slice_angle = B::load_with_single_f32(slice_angle);
@@ -251,8 +263,8 @@ pub fn inner_loop<B: KaleidoBackend + DaydreamBackend>(
             .for_each(|(x, buff)| {
                 let x = x as u32 * B::NUM_FLOATS as u32;
                 let (mut dx, mut dy) = B::load_coords(x as u32, y as u32);
-                dx.normalize_coords(center);
-                dy.normalize_coords(center);
+                dx.normalize_coords(center_x);
+                dy.normalize_coords(center_y);
                 let (sx, sy) = match settings.kaleido_type {
                     KaleidoType::Radial => {
                         let (r_sampled, theta) = B::map_to_polar(dx, dy, zoom);
@@ -268,7 +280,9 @@ pub fn inner_loop<B: KaleidoBackend + DaydreamBackend>(
                     KaleidoType::Square => B::map_square(
                         dx,
                         dy,
-                        center,
+                        width_over_2,
+                        center_x,
+                        center_y,
                         slice_angle,
                         two_pi,
                         tile_count,
@@ -280,7 +294,9 @@ pub fn inner_loop<B: KaleidoBackend + DaydreamBackend>(
                     KaleidoType::Diamond => B::map_diamond(
                         dx,
                         dy,
-                        center,
+                        width_over_2,
+                        center_x,
+                        center_y,
                         slice_angle,
                         two_pi,
                         tile_count,
@@ -292,7 +308,9 @@ pub fn inner_loop<B: KaleidoBackend + DaydreamBackend>(
                     KaleidoType::Hexagonal => B::map_hexagonal(
                         dx,
                         dy,
-                        center,
+                        width_over_2,
+                        center_x,
+                        center_y,
                         slice_angle,
                         two_pi,
                         tile_count,
@@ -305,7 +323,9 @@ pub fn inner_loop<B: KaleidoBackend + DaydreamBackend>(
                     KaleidoType::HexagonalFlatTop => B::map_hexagonal_flat_top(
                         dx,
                         dy,
-                        center,
+                        width_over_2,
+                        center_x,
+                        center_y,
                         slice_angle,
                         two_pi,
                         tile_count,

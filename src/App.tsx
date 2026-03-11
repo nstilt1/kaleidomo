@@ -20,13 +20,17 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 
+function roundToNearestMultiple(value: number, multiple: number): number {
+  return Math.round(value / multiple) * multiple;
+}
+
 function App() {
   // State definitions
   const [imagePath, setImagePath] = useState<string>("");
   const [_imageSrc, setImageSrc] = useState<string>(""); // For previewing original
   const [outputSrc, setOutputSrc] = useState<string>(""); // Result from Rust
   const [count, setCount] = useState<number>(6);
-  const [settings, setSettings] = useState({ x: 100, y: 100, rotation: 0, resolution: 512, zoom: 2, tile_count: 1.0, hue_rotate: 0 });
+  const [settings, setSettings] = useState({ x: 100, y: 100, rotation: 0, resolution: 512, zoom: 2, tile_count: 1.0, hue_rotate: 0, ratio_num: 9, ratio_den: 16, offset_x: 0, offset_y: 0 });
   const [greetMsg, setGreetMsg] = useState("");
   const [name, setName] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -71,6 +75,10 @@ function App() {
           zoom: 2,
           tile_count: 1.0,
           hue_rotate: 0,
+          ratio_num: 9,
+          ratio_den: 16,
+          offset_x: 0,
+          offset_y: 0,
         });
       };
     }
@@ -85,7 +93,10 @@ function App() {
         y: settings.y,
         rotation: settings.rotation,
         count: count,
-        outputSize: settings.resolution,
+        outputSizeH: settings.resolution,
+        outputSizeW: calculate_width(settings),
+        offsetX: settings.offset_x,
+        offsetY: settings.offset_y,
         zoom: settings.zoom,
         kaleidoType: kaleidoType,
         tileCount: settings.tile_count,
@@ -129,6 +140,11 @@ function App() {
     }
   };
 
+  const calculate_width = (settings: { resolution: number; ratio_num: number; ratio_den: number }) => {
+    const exactWidth = (settings.resolution * settings.ratio_den) / settings.ratio_num;
+    return roundToNearestMultiple(exactWidth, 8);
+  }
+
   const handleExport = async () => {
     if (!imagePath) return;
     
@@ -140,10 +156,14 @@ function App() {
         rotation: settings.rotation,
         zoom: settings.zoom,
         count: count,
-        resolution: settings.resolution,
+        outputSizeH: settings.resolution,
+        outputSizeW: calculate_width(settings),
+        offsetX: settings.offset_x,
+        offsetY: settings.offset_y,
         kaleidoType: kaleidoType,
         tileCount: settings.tile_count,
         hueRotation: settings.hue_rotate,
+        
       });
       alert(message);
     } catch (e) {
@@ -164,7 +184,10 @@ function App() {
         rotation: settings.rotation,
         zoom: settings.zoom,
         count: count,
-        outputSize: settings.resolution,
+        outputSizeH: settings.resolution,
+        outputSizeW: calculate_width(settings),
+        offsetX: settings.offset_x,
+        offsetY: settings.offset_y,
         kaleidoType: kaleidoType,
         tileCount: settings.tile_count,
         hueRotation: settings.hue_rotate,
@@ -353,17 +376,33 @@ function App() {
             <div className="flex justify-between items-center"><label>Slices</label><span>{count}</span></div>
             <Slider value={[count]} min={3} max={24} onValueChange={([v]) => setCount(v)} />
             
-            <div className="flex justify-between items-center"><label>Zoom</label><span>{settings.zoom.toFixed(2)}x</span></div>
+            <div className="flex justify-between items-center"><label>Sample Radius</label><span>{settings.zoom.toFixed(2)}x</span></div>
             <Slider value={[settings.zoom]} min={0.1} max={32.0} step={0.01} onValueChange={([v]) => setSettings(s => ({...s, zoom: v}))} />
 
             <div className="flex justify-between items-center"><label>Rotation</label><span>{settings.rotation.toFixed(2)} radians</span></div>
             <Slider value={[settings.rotation]} min={0.0} max={2 * Math.PI} step={0.01} onValueChange={([v]) => setSettings(s => ({...s, rotation: v}))} />
+            
+            <div className="flex justify-between items-center"><label>Offset X</label><span>{settings.offset_x} px</span></div>
+            <Slider value={[settings.offset_x]} min={0} max={2000} step={1} onValueChange={([v]) => setSettings(s => ({...s, offset_x: v}))} />
+            
+            <div className="flex justify-between items-center"><label>Offset Y</label><span>{settings.offset_y} px</span></div>
+            <Slider value={[settings.offset_y]} min={0} max={2000} step={1} onValueChange={([v]) => setSettings(s => ({...s, offset_y: v}))} />
           </div>
 
           {/* Group 2: Output */}
           <div className="space-y-4">
-            <div className="flex justify-between items-center"><label>Resolution</label><span>{settings.resolution}px</span></div>
+            <div className="flex justify-between items-center"><label>Output Height</label><span>{settings.resolution}px</span></div>
             <Slider value={[settings.resolution]} min={256} max={8192} step={256} onValueChange={([v]) => setSettings(s => ({...s, resolution: v}))} />
+          </div>
+
+          <div className="space-y-4">
+            <div className="flex justify-between items-center"><label>Width Ratio</label><span>{settings.ratio_num}/{settings.ratio_den}</span></div>
+            <Slider value={[settings.ratio_num]} min={1} max={36} step={1} onValueChange={([v]) => setSettings(s => ({...s, ratio_num: v}))} />
+          </div>
+
+          <div className="space-y-4">
+            <div className="flex justify-between items-center"><label>Height Ratio</label><span>{settings.ratio_num}/{settings.ratio_den}</span></div>
+            <Slider value={[settings.ratio_den]} min={1} max={36} step={1} onValueChange={([v]) => setSettings(s => ({...s, ratio_den: v}))} />
           </div>
 
           <div className="space-y-4">
@@ -372,7 +411,7 @@ function App() {
           </div>
 
           <div className="space-y-4">
-            <div className="flex justify-between items-center"><label>Tile Count</label><span>{settings.hue_rotate} degrees</span></div>
+            <div className="flex justify-between items-center"><label>Hue Shift</label><span>{settings.hue_rotate} degrees</span></div>
             <Slider value={[settings.hue_rotate]} min={0} max={360} step={1} onValueChange={([v]) => setSettings(s => ({...s, hue_rotate: v}))} />
           </div>
 

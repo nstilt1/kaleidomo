@@ -9,7 +9,10 @@ async fn export_kaleidoscope(
     rotation: f32, 
     zoom: f32,
     count: u32,
-    resolution: u32,
+    output_size_h: u32,
+    output_size_w: u32,
+    offset_x: u32,
+    offset_y: u32,
     kaleido_type: String,
     tile_count: f32,
     hue_rotation: u32,
@@ -30,7 +33,10 @@ async fn export_kaleidoscope(
     
     let settings = kaleidomo_core::KaleidoSettings {
         count,
-        output_size: resolution,
+        output_size_h,
+        output_size_w,
+        offset_x,
+        offset_y,
         zoom,
         tile_count,
         triangle_center_x: x,
@@ -72,7 +78,10 @@ async fn generate_kaleidoscope(
     y: f32,
     rotation: f32,
     count: u32,
-    output_size: u32,
+    output_size_h: u32,
+    output_size_w: u32,
+    offset_x: u32,
+    offset_y: u32,
     zoom: f32,
     kaleido_type: String,
     tile_count: f32,
@@ -83,7 +92,10 @@ async fn generate_kaleidoscope(
 
     let settings = kaleidomo_core::KaleidoSettings {
         count,
-        output_size, // High-res preview
+        output_size_h, // High-res preview
+        output_size_w,
+        offset_x,
+        offset_y,
         zoom,
         tile_count,
         triangle_center_x: x,
@@ -119,7 +131,10 @@ async fn generate_video(
     y: f32,
     rotation: f32,
     count: u32,
-    output_size: u32,
+    output_size_h: u32,
+    output_size_w: u32,
+    offset_x: u32,
+    offset_y: u32,
     zoom: f32,
     kaleido_type: String,
     tile_count: f32,
@@ -140,7 +155,10 @@ async fn generate_video(
 
     let settings = kaleidomo_core::KaleidoSettings {
         count,
-        output_size, // High-res preview
+        output_size_h, // High-res preview
+        output_size_w,
+        offset_x,
+        offset_y,
         zoom,
         tile_count,
         triangle_center_x: x,
