@@ -26,7 +26,7 @@ function App() {
   const [_imageSrc, setImageSrc] = useState<string>(""); // For previewing original
   const [outputSrc, setOutputSrc] = useState<string>(""); // Result from Rust
   const [count, setCount] = useState<number>(6);
-  const [settings, setSettings] = useState({ x: 100, y: 100, rotation: 0, resolution: 512, zoom: 2, tile_count: 1.0 });
+  const [settings, setSettings] = useState({ x: 100, y: 100, rotation: 0, resolution: 512, zoom: 2, tile_count: 1.0, hue_rotate: 0 });
   const [greetMsg, setGreetMsg] = useState("");
   const [name, setName] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -70,6 +70,7 @@ function App() {
           resolution: 512,
           zoom: 2,
           tile_count: 1.0,
+          hue_rotate: 0,
         });
       };
     }
@@ -88,6 +89,7 @@ function App() {
         zoom: settings.zoom,
         kaleidoType: kaleidoType,
         tileCount: settings.tile_count,
+        hueRotation: settings.hue_rotate,
       });
       setOutputSrc(result);
     } catch (e) {
@@ -141,6 +143,31 @@ function App() {
         resolution: settings.resolution,
         kaleidoType: kaleidoType,
         tileCount: settings.tile_count,
+        hueRotation: settings.hue_rotate,
+      });
+      alert(message);
+    } catch (e) {
+      if (e !== "Export cancelled") {
+        console.error("Export failed", e);
+      }
+    }
+  };
+
+  const handleVideo = async () => {
+    if (!imagePath) return;
+    
+    try {
+      const message = await invoke('generate_video', {
+        path: imagePath,
+        x: settings.x,
+        y: settings.y,
+        rotation: settings.rotation,
+        zoom: settings.zoom,
+        count: count,
+        outputSize: settings.resolution,
+        kaleidoType: kaleidoType,
+        tileCount: settings.tile_count,
+        hueRotation: settings.hue_rotate,
       });
       alert(message);
     } catch (e) {
@@ -344,9 +371,15 @@ function App() {
             <Slider value={[settings.tile_count]} min={0.1} max={64.0} step={0.1} onValueChange={([v]) => setSettings(s => ({...s, tile_count: v}))} />
           </div>
 
+          <div className="space-y-4">
+            <div className="flex justify-between items-center"><label>Tile Count</label><span>{settings.hue_rotate} degrees</span></div>
+            <Slider value={[settings.hue_rotate]} min={0} max={360} step={1} onValueChange={([v]) => setSettings(s => ({...s, hue_rotate: v}))} />
+          </div>
+
           <div className="flex flex-col gap-2 pt-4">
             <Button onClick={handleRender} variant="outline">Refresh Preview</Button>
             <Button onClick={handleExport} className="bg-primary">Export PNG</Button>
+            <Button onClick={handleVideo} className="bg-primary">Export MP4</Button>
           </div>
 
           <div className="mt-auto grid grid-cols-2 gap-2">

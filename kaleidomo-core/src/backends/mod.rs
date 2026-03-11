@@ -17,10 +17,7 @@ pub mod avx2;
 ))]
 pub mod sse2;
 
-#[cfg(any(
-    not(target_arch = "aarch64"), 
-    test, 
-    feature = "soft_backend"))]
+#[cfg(any(not(target_arch = "aarch64"), test, feature = "soft_backend"))]
 mod scalar;
 
 pub trait KaleidoBackend: Sized + Copy {
@@ -152,6 +149,60 @@ pub trait KaleidoBackend: Sized + Copy {
     ) -> (Self, Self);
 }
 
+pub trait DaydreamBackend: KaleidoBackend {
+    type IntegerRegister: Sized + Copy;
+    /// Loads integer pixel coordinates into RGB registers.
+    unsafe fn load_pixels(input: &[[u8; 4]]) -> (Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister);
+    /// Takes an (R, G, B) color in the range [0, 255] and converts it to
+    /// (H, S, V) where H is in [0, 360] and S, V are in [0, 1].
+    unsafe fn rgb_to_hsv(
+        r: Self::IntegerRegister, 
+        g: Self::IntegerRegister, 
+        b: Self::IntegerRegister, 
+        two_fifty_five: Self, 
+        hundred: Self, 
+        zero: Self, 
+        six: Self, 
+        sixty: Self,
+        one: Self,
+        two: Self,
+        four: Self,
+    ) -> (Self, Self, Self);
+    /// Takes an (H, S, V) color where H is in [0, 360] and S, V are in [0, 1], 
+    /// and converts it to (R, G, B) in the range [0, 255].
+    unsafe fn hsv_to_rgb(
+        h: Self, 
+        s: Self, 
+        v: Self,
+        hundred: Self,
+        sixty: Self,
+        two_fifty_five: Self,
+        zero: Self,
+        five: Self,
+        four: Self,
+        three: Self,
+        two: Self,
+        one: Self,
+    ) -> (Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister);
+    
+    /// Adjusts the hue by + hue_shift degrees.
+    unsafe fn adjust_hue(
+        h: Self,
+        hue_shift: Self,
+        three_sixty: Self,
+    ) -> Self;
+
+    unsafe fn extract_pixels(
+        r: Self::IntegerRegister, 
+        g: Self::IntegerRegister, 
+        b: Self::IntegerRegister,
+        a: Self::IntegerRegister,
+    ) -> [[u8; 4]; Self::NUM_FLOATS];
+
+    /// Stores a pixel in the output buffer, applying a hue shift to the source pixel before sampling.
+    unsafe fn store_pixel_hue_shift(buff: &mut [u8], x: u32, sx: Self, sy: Self, source: &DynamicImage, source_width: u32, source_height: u32, hue_shift_vec: Self, two_fifty_five: Self, hundred: Self, zero: Self, six: Self, sixty: Self, one: Self, two: Self, four: Self, three_sixty: Self, five: Self, three: Self);
+}
+
 #[cfg(target_arch = "aarch64")]
 pub type Register = core::arch::aarch64::float32x4_t;
 #[cfg(target_arch = "x86_64")]
@@ -159,7 +210,7 @@ pub type Register = core::arch::x86_64::__m256;
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub type Register = f32;
 
-pub fn inner_loop<B: KaleidoBackend>(
+pub fn inner_loop<B: KaleidoBackend + DaydreamBackend>(
     y: usize,
     row: &mut [u8],
     zoom: f32,
@@ -169,6 +220,7 @@ pub fn inner_loop<B: KaleidoBackend>(
     slice_angle: f32,
     source_width: u32,
     source_height: u32,
+    hue_rotate: u32,
 ) {
     unsafe {
         let triangle_center_x = B::load_with_single_f32(settings.triangle_center_x);
@@ -180,6 +232,20 @@ pub fn inner_loop<B: KaleidoBackend>(
         let two_pi = B::load_with_single_f32(2.0 * core::f32::consts::PI);
         let sqrt3 = B::load_with_single_f32(3.0f32.sqrt());
         let triangle_rotation_rad = B::load_with_single_f32(settings.triangle_rotation_rad);
+        let hue_shift = hue_rotate % 360;
+        let hue_shift_vec = B::load_with_single_f32(hue_shift as f32);
+        let two_fifty_five = B::load_with_single_f32(255.0);
+        let hundred = B::load_with_single_f32(100.0);
+        let zero = B::load_with_single_f32(0.0);
+        let six = B::load_with_single_f32(6.0);
+        let sixty = B::load_with_single_f32(60.0);
+        let one = B::load_with_single_f32(1.0);
+        let two = B::load_with_single_f32(2.0);
+        let four = B::load_with_single_f32(4.0);
+        let three = B::load_with_single_f32(3.0);
+        let three_sixty = B::load_with_single_f32(360.0);
+        let five = B::load_with_single_f32(5.0);
+
         row.chunks_exact_mut(B::NUM_FLOATS * size_of::<f32>())
             .enumerate()
             .for_each(|(x, buff)| {
@@ -251,8 +317,12 @@ pub fn inner_loop<B: KaleidoBackend>(
                     ),
                 };
 
-                B::store_pixel_rgba8(buff, sx, sy, source.as_bytes(), source_width, source_height);
-                //B::store_pixel(buff, x, sx, sy, source, source_width, source_height);
+                //B::store_pixel_rgba8(buff, sx, sy, source.as_bytes(), source_width, source_height);
+                if hue_shift != 0 {
+                    B::store_pixel_hue_shift(buff, x, sx, sy, source, source_width, source_height, hue_shift_vec, two_fifty_five, hundred, zero, six, sixty, one, two, four, three_sixty, five, three);
+                } else {
+                    B::store_pixel(buff, x, sx, sy, source, source_width, source_height);
+                }
             });
         }
 }

@@ -2,6 +2,8 @@ use core::arch::aarch64::*;
 
 use image::GenericImageView;
 
+use crate::backends::DaydreamBackend;
+
 use super::KaleidoBackend;
 
 /// Computes atan using a polynomial approximation, returning a value in radians.
@@ -92,7 +94,7 @@ unsafe fn sin_cos(angle: float32x4_t) -> (float32x4_t, float32x4_t) {
 /// Computes x mod y for float32x4_t vectors, handling negative values correctly.
 #[target_feature(enable = "neon")]
 #[inline]
-unsafe fn modulo(x: float32x4_t, y: float32x4_t) -> float32x4_t {
+fn modulo(x: float32x4_t, y: float32x4_t) -> float32x4_t {
     let div = vdivq_f32(x, y);
     let div_floor = vrndmq_f32(div);
     vfmsq_f32(x, div_floor, y)
@@ -596,6 +598,259 @@ impl KaleidoBackend for float32x4_t {
                 vaddq_f32(triangle_center_x, rx),
                 vaddq_f32(triangle_center_y, ry),
             )
+        }
+    }
+}
+
+impl DaydreamBackend for float32x4_t {
+    type IntegerRegister = uint32x4_t;
+
+    #[target_feature(enable = "neon")]
+    #[inline]
+    unsafe fn load_pixels(input: &[[u8; 4]]) -> (Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister) {
+        unsafe {
+            let r = [input[0][0] as u32, input[1][0] as u32, input[2][0] as u32, input[3][0] as u32];
+            let g = [input[0][1] as u32, input[1][1] as u32, input[2][1] as u32, input[3][1] as u32];
+            let b = [input[0][2] as u32, input[1][2] as u32, input[2][2] as u32, input[3][2] as u32];
+            let a = [input[0][3] as u32, input[1][3] as u32, input[2][3] as u32, input[3][3] as u32];
+            (
+                vld1q_u32(r.as_ptr()),
+                vld1q_u32(g.as_ptr()),
+                vld1q_u32(b.as_ptr()),
+                vld1q_u32(a.as_ptr())
+            )
+        }
+    }
+
+    #[target_feature(enable = "neon")]
+    #[inline]
+    unsafe fn rgb_to_hsv(r: Self::IntegerRegister, g: Self::IntegerRegister, b: Self::IntegerRegister, two_fifty_five: Self, hundred: Self, zero: Self, six: Self, sixty: Self, one: Self, two: Self, four: Self) -> (Self, Self, Self) {
+        let r = vdivq_f32(vcvtq_f32_u32(r), two_fifty_five);
+        let g = vdivq_f32(vcvtq_f32_u32(g), two_fifty_five);
+        let b = vdivq_f32(vcvtq_f32_u32(b), two_fifty_five);
+        // Scalar tie-breaking:
+        //
+        // if r >= g {
+        //     if r >= b { ...r max... } else { ...b max... }
+        // } else {
+        //     if g >= b { ...g max... } else { ...b max... }
+        // }
+        //
+        // So ties prefer r over g, r over b, and g over b.
+
+        let r_max_mask = vandq_u32(vcgeq_f32(r, g), vcgeq_f32(r, b));
+        let g_max_mask = vandq_u32(vcgtq_f32(g, r), vcgeq_f32(g, b));
+        let b_max_mask = vmvnq_u32(vorrq_u32(r_max_mask, g_max_mask));
+
+        let c_max = vmaxq_f32(vmaxq_f32(r, g), b);
+        let c_min = vminq_f32(vminq_f32(r, g), b);
+        let delta = vsubq_f32(c_max, c_min);
+
+        // Match the scalar tuples:
+        //
+        // r max -> (c_max=r, c_min=min(g,b), sub_1=g, sub_2=b, add=0)
+        // g max -> (c_max=g, c_min=r or b,   sub_1=b, sub_2=r, add=2)
+        // b max -> (c_max=b, c_min=r or g,   sub_1=r, sub_2=g, add=4)
+
+        let sub_1_rb = vbslq_f32(r_max_mask, g, r);
+        let sub_1 = vbslq_f32(g_max_mask, b, sub_1_rb);
+
+        let sub_2_rb = vbslq_f32(r_max_mask, b, g);
+        let sub_2 = vbslq_f32(g_max_mask, r, sub_2_rb);
+
+        let add_rb = vbslq_f32(r_max_mask, zero, four);
+        let add = vbslq_f32(g_max_mask, two, add_rb);
+
+        let delta_zero_mask = vceqq_f32(delta, zero);
+        let cmax_zero_mask = vceqq_f32(c_max, zero);
+        let add_positive_mask = vcgtq_f32(add, zero);
+
+        // Avoid divide-by-zero in masked-off lanes.
+        let safe_delta = vbslq_f32(delta_zero_mask, one, delta);
+        let safe_cmax = vbslq_f32(cmax_zero_mask, one, c_max);
+
+        let sub = vsubq_f32(sub_1, sub_2);
+        let div = vdivq_f32(sub, safe_delta);
+
+        // Hue:
+        // if delta == 0 { 0 }
+        // else if add > 0 { 60 * (div + add) }
+        // else { 60 * div.rem_euclid(6) }
+        let h_add = vmulq_f32(sixty, vaddq_f32(div, add));
+        let h_mod = vmulq_f32(sixty, modulo(div, six));
+        let h_nonzero = vbslq_f32(add_positive_mask, h_add, h_mod);
+        let h = vbslq_f32(delta_zero_mask, zero, h_nonzero);
+
+        // Saturation:
+        // if c_max == 0 { c_max } else { delta / c_max }
+        let s_div = vdivq_f32(delta, safe_cmax);
+        let s = vbslq_f32(cmax_zero_mask, c_max, s_div);
+
+        // Value:
+        // (c_max * 100.0).round()
+        let v = vrndiq_f32(vmulq_f32(c_max, hundred));
+
+        (h, s, v)
+    }
+
+    #[target_feature(enable = "neon")]
+    #[inline]
+    unsafe fn hsv_to_rgb(mut h: Self, s: Self, mut v: Self, hundred: Self, sixty: Self, two_fifty_five: Self, zero: Self, five: Self, four: Self, three: Self, two: Self, one: Self) -> (Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister) {
+        h = vdivq_f32(h, sixty);
+        v = vdivq_f32(v, hundred);
+
+        let c = vmulq_f32(v, s);
+        let x = vmulq_f32(
+            c, 
+            vsubq_f32(
+                one, 
+                vabsq_f32(
+                    vsubq_f32(
+                        modulo(h, two), 
+                        one
+                    )
+                )
+            )
+        );
+        let m = vsubq_f32(v, c);
+
+        let lt1 = vcltq_f32(h, one);
+        let lt2 = vcltq_f32(h, two);
+        let lt3 = vcltq_f32(h, three);
+        let lt4 = vcltq_f32(h, four);
+        let lt5 = vcltq_f32(h, five);
+
+        // Match scalar:
+        //
+        // if h < 3 {
+        //   if h < 2 {
+        //     if h < 1 { (c, x, 0) } else { (x, c, 0) }
+        //   } else {
+        //     (0, c, x)
+        //   }
+        // } else {
+        //   if h < 5 {
+        //     if h < 4 { (0, x, c) } else { (x, 0, c) }
+        //   } else {
+        //     (c, 0, x)
+        //   }
+        // }
+
+        let rp_lt2 = vbslq_f32(lt1, c, x);      // h<1 ? c : x
+        let gp_lt2 = vbslq_f32(lt1, x, c);      // h<1 ? x : c
+        let bp_lt2 = zero;                      // both cases have b=0
+
+        let rp_lt3 = vbslq_f32(lt2, rp_lt2, zero);
+        let gp_lt3 = vbslq_f32(lt2, gp_lt2, c);
+        let bp_lt3 = vbslq_f32(lt2, bp_lt2, x);
+
+        let rp_lt5 = vbslq_f32(lt4, zero, x);   // h<4 ? 0 : x
+        let gp_lt5 = vbslq_f32(lt4, x, zero);   // h<4 ? x : 0
+        let bp_lt5 = c;                         // both cases have b=c
+
+        let rp_ge3 = vbslq_f32(lt5, rp_lt5, c);
+        let gp_ge3 = vbslq_f32(lt5, gp_lt5, zero);
+        let bp_ge3 = vbslq_f32(lt5, bp_lt5, x);
+
+        let rp = vbslq_f32(lt3, rp_lt3, rp_ge3);
+        let gp = vbslq_f32(lt3, gp_lt3, gp_ge3);
+        let bp = vbslq_f32(lt3, bp_lt3, bp_ge3);
+
+        let r = vrndiq_f32(vmulq_f32(vaddq_f32(rp, m), two_fifty_five));
+        let g = vrndiq_f32(vmulq_f32(vaddq_f32(gp, m), two_fifty_five));
+        let b = vrndiq_f32(vmulq_f32(vaddq_f32(bp, m), two_fifty_five));
+
+        (
+            vcvtq_u32_f32(r), 
+            vcvtq_u32_f32(g), 
+            vcvtq_u32_f32(b)
+        )
+    }
+
+    unsafe fn adjust_hue(
+            h: Self,
+            hue_shift: Self,
+            three_sixty: Self,
+        ) -> Self {
+        unsafe {
+            return modulo(vaddq_f32(h, hue_shift), three_sixty);
+        }
+    }
+
+    #[target_feature(enable = "neon")]
+    #[inline]
+    unsafe fn extract_pixels(
+            r: Self::IntegerRegister, 
+            g: Self::IntegerRegister, 
+            b: Self::IntegerRegister,
+            a: Self::IntegerRegister,
+        ) -> [[u8; 4]; Self::NUM_FLOATS] {
+        unsafe {
+            let mut arr = [[0u8; 4]; Self::NUM_FLOATS];
+
+            for (i, reg) in [r, g, b, a].iter().enumerate() {
+                let mut temp = [0u32; 4];
+                vst1q_u32(temp.as_mut_ptr(), *reg);
+                for j in 0..4 {
+                    arr[j][i] = temp[j] as u8;
+                }
+            }
+            arr
+        }
+    }
+    #[target_feature(enable = "neon")]
+    #[inline]
+    unsafe fn store_pixel_hue_shift(buff: &mut [u8], x: u32, sx: Self, sy: Self, source: &image::DynamicImage, source_width: u32, source_height: u32, hue_shift_vec: Self, two_fifty_five: Self, hundred: Self, zero: Self, six: Self, sixty: Self, one: Self, two: Self, four: Self, three_sixty: Self, five: Self, three: Self) {
+        unsafe {
+            // 1. Check bounds on floats first to match 'sx >= 0.0 && sx < sw'
+            let zero = vdupq_n_f32(0.0);
+            let sw_v = vdupq_n_f32(source_width as f32);
+            let sh_v = vdupq_n_f32(source_height as f32);
+
+            let v_mask = vandq_u32(
+                vandq_u32(vcgeq_f32(sx, zero), vcltq_f32(sx, sw_v)),
+                vandq_u32(vcgeq_f32(sy, zero), vcltq_f32(sy, sh_v)),
+            );
+
+            if vmaxvq_u32(v_mask) == 0 {
+                return;
+            }
+
+            // 2. Use truncation (round toward zero) to match 'as u32'
+            let sx_i = vcvtq_u32_f32(sx);
+            let sy_i = vcvtq_u32_f32(sy);
+
+            let mut xs = [0u32; 4];
+            let mut ys = [0u32; 4];
+            let mut m = [0u32; 4];
+            vst1q_u32(xs.as_mut_ptr(), sx_i);
+            vst1q_u32(ys.as_mut_ptr(), sy_i);
+            vst1q_u32(m.as_mut_ptr(), v_mask);
+
+            let pixels = [
+                source.get_pixel(xs[0], ys[0]).0,
+                source.get_pixel(xs[1], ys[1]).0,
+                source.get_pixel(xs[2], ys[2]).0,
+                source.get_pixel(xs[3], ys[3]).0
+            ];
+            
+            let (r, g, b, a) = Self::load_pixels(&pixels);
+
+            let (mut h, s, v) = Self::rgb_to_hsv(r, g, b, two_fifty_five, hundred, zero, six, sixty, one, two, four);
+
+            h = Self::adjust_hue(h, hue_shift_vec, three_sixty);
+
+            let (r, g, b) = Self::hsv_to_rgb(h, s, v, hundred, sixty, two_fifty_five, zero, five, four, three, two, one);
+
+            let pixels = Self::extract_pixels(r, g, b, a);
+
+            for i in 0..4 {
+                if m[i] != 0 {
+                    let pixel = pixels[i];
+                    let base_idx = i * 4;
+                    buff[base_idx..base_idx + 4].copy_from_slice(&pixel);
+                }
+            }
         }
     }
 }

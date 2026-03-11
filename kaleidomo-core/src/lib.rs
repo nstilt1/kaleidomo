@@ -1,3 +1,5 @@
+#![feature(generic_const_exprs)]
+
 use image::{DynamicImage, GenericImageView};
 mod backends;
 
@@ -7,7 +9,7 @@ use std::f32::consts::PI;
 
 pub use image;
 
-pub use crate::backends::{KaleidoBackend, Register, inner_loop};
+pub use crate::backends::{KaleidoBackend, DaydreamBackend, Register, inner_loop};
 
 #[derive(Clone)]
 pub enum KaleidoType {
@@ -28,6 +30,7 @@ pub struct KaleidoSettings {
     pub triangle_center_y: f32,
     pub triangle_rotation_rad: f32, // Rotation of the triangle in radians
     pub kaleido_type: KaleidoType,  // Type of kaleidoscope (radial, square, etc.)
+    pub hue_rotation: u32, // Hue rotation in degrees (0-360)
 }
 
 pub fn render_kaleidoscope(
@@ -128,7 +131,7 @@ pub fn render_kaleidoscope_with_auto_backend(
 }
 
 #[inline(always)]
-pub fn render_kaleidoscope_with_backend<B: KaleidoBackend>(
+pub fn render_kaleidoscope_with_backend<B: KaleidoBackend + DaydreamBackend>(
     source: &DynamicImage,
     settings: KaleidoSettings,
 ) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
@@ -155,14 +158,12 @@ pub fn render_kaleidoscope_with_backend<B: KaleidoBackend>(
                 slice_angle,
                 sw,
                 sh,
+                settings.hue_rotation,
             );
         });
 
     ImageBuffer::from_raw(size, size, pixels).unwrap()
 }
-
-use std::fs::File;
-use std::io::{BufWriter, Write};
 
 use openh264::encoder::Encoder;
 use openh264::formats::{RgbaSliceU8, YUVBuffer};
@@ -173,37 +174,30 @@ trait FrameSink {
     fn finish(self) -> std::io::Result<()>;
 }
 
-use std::path::Path;
+use std::fs::{remove_file, File};
+use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
+use std::path::{Path, PathBuf};
 
+use minimp4::Mp4Muxer;
 use openh264::encoder::{
     BitRate, FrameRate, IntraFramePeriod, RateControlMode, UsageType,
 };
 use openh264::OpenH264API;
 
-pub struct H264Sink<W: Write> {
+pub struct Mp4H264Sink {
     width: usize,
     height: usize,
+    fps: u32,
+    output_mp4_path: PathBuf,
+    temp_h264_path: PathBuf,
     encoder: Encoder,
-    writer: W,
+    h264_writer: BufWriter<File>,
+    keep_temp_h264: bool,
 }
 
-impl H264Sink<BufWriter<File>> {
-    pub fn create_file<P: AsRef<Path>>(
-        path: P,
-        width: usize,
-        height: usize,
-        fps: u32,
-        bitrate_bps: u32,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let file = File::create(path)?;
-        let writer = BufWriter::new(file);
-        Self::new(writer, width, height, fps, bitrate_bps)
-    }
-}
-
-impl<W: Write> H264Sink<W> {
-    pub fn new(
-        writer: W,
+impl Mp4H264Sink {
+    pub fn create<P: AsRef<Path>>(
+        output_mp4_path: P,
         width: usize,
         height: usize,
         fps: u32,
@@ -213,10 +207,38 @@ impl<W: Write> H264Sink<W> {
             return Err("width and height must be non-zero".into());
         }
 
-        // OpenH264 uses 4:2:0 internally here, so even dimensions are required.
         if width % 2 != 0 || height % 2 != 0 {
             return Err("width and height must both be even".into());
         }
+
+        if fps == 0 {
+            return Err("fps must be non-zero".into());
+        }
+
+        let mut output_mp4_path = output_mp4_path.as_ref().to_path_buf();
+        match output_mp4_path.extension() {
+            Some(ext) => {
+                if ext != "mp4" {
+                    output_mp4_path.set_extension("mp4");
+                }
+            },
+            None => {
+                output_mp4_path.set_extension("mp4");
+            }
+        }
+
+        let temp_h264_path = {
+            let mut p = output_mp4_path.clone();
+            let ext = match p.extension().and_then(|e| e.to_str()) {
+                Some(ext) if !ext.is_empty() => format!("{ext}.tmp.h264"),
+                _ => String::from("tmp.h264"),
+            };
+            p.set_extension(ext);
+            p
+        };
+
+        let h264_file = File::create(&temp_h264_path)?;
+        let h264_writer = BufWriter::new(h264_file);
 
         let config = EncoderConfig::new()
             .bitrate(BitRate::from_bps(bitrate_bps))
@@ -231,9 +253,18 @@ impl<W: Write> H264Sink<W> {
         Ok(Self {
             width,
             height,
+            fps,
+            output_mp4_path,
+            temp_h264_path,
             encoder,
-            writer,
+            h264_writer,
+            keep_temp_h264: false,
         })
+    }
+
+    pub fn keep_temp_h264(mut self, keep: bool) -> Self {
+        self.keep_temp_h264 = keep;
+        self
     }
 
     pub fn write_rgba_frame(&mut self, rgba: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
@@ -251,20 +282,63 @@ impl<W: Write> H264Sink<W> {
         let yuv = YUVBuffer::from_rgb_source(rgba_source);
 
         let bitstream = self.encoder.encode(&yuv)?;
-        bitstream.write(&mut self.writer)?;
+        bitstream.write(&mut self.h264_writer)?;
 
         Ok(())
     }
 
-    pub fn finish(mut self) -> std::io::Result<W> {
-        self.writer.flush()?;
-        Ok(self.writer)
+    pub fn finish(mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.h264_writer.flush()?;
+        drop(self.h264_writer);
+
+        let mut h264_reader = BufReader::new(File::open(&self.temp_h264_path)?);
+        let mut h264_bytes = Vec::new();
+        h264_reader.read_to_end(&mut h264_bytes)?;
+
+        let mp4_file = File::create(&self.output_mp4_path)?;
+        let mut muxer = Mp4Muxer::new(mp4_file);
+        muxer.init_video(self.width as i32, self.height as i32, false, "video");
+        muxer.write_video_with_fps(&h264_bytes, self.fps);
+        muxer.close();
+
+        if !self.keep_temp_h264 {
+            let _ = remove_file(&self.temp_h264_path);
+        }
+
+        Ok(())
+    }
+
+    pub fn temp_h264_path(&self) -> &Path {
+        &self.temp_h264_path
     }
 }
 
-pub fn render_video(
+pub fn render_video_with_auto_backend(
+    source: &DynamicImage,
+    settings: KaleidoSettings,
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return render_video::<backends::avx2::__m256>(source, settings);
+        } else if is_x86_feature_detected!("sse2") {
+            return render_video::<backends::sse2::__m128>(source, settings);
+        } else {
+            return render_video::<f32>(source, settings);
+        }
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        render_video::<Register>(source, settings, path)
+        //render_video::<f32>(source, settings, path)
+    }
+}
+
+fn render_video<B: KaleidoBackend + DaydreamBackend>(
     source: &DynamicImage,
     mut settings: KaleidoSettings,
+    path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let width = settings.output_size as usize;
     let height = settings.output_size as usize;
@@ -274,8 +348,8 @@ pub fn render_video(
     let slice_angle = (2.0 * PI) / settings.count as f32;
 
     let mut rgba = vec![0u8; width * height * 4];
-    let mut sink = H264Sink::create_file(
-        "out.h264",
+    let mut sink = Mp4H264Sink::create(
+        path,
         width,
         height,
         fps,
@@ -298,6 +372,7 @@ pub fn render_video(
                     slice_angle,
                     source.width(),
                     source.height(),
+                    4 * frame,
                 );
             });
         sink.write_rgba_frame(&rgba)?;
@@ -305,22 +380,6 @@ pub fn render_video(
 
     sink.finish()?;
     Ok(())
-}
-
-pub struct EncodedAccessUnit {
-    pub annex_b: Vec<u8>,
-    pub is_keyframe: bool,
-}
-
-pub trait VideoMuxer {
-    fn write_h264_access_unit(
-        &mut self,
-        annex_b: &[u8],
-        frame_index: u32,
-        fps: u32,
-    ) -> Result<(), Box<dyn std::error::Error>>;
-
-    fn finish(self) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 
@@ -353,6 +412,7 @@ mod tests {
             triangle_rotation_rad: 0.0,
             kaleido_type: KaleidoType::Hexagonal,
             tile_count: 4.0,
+            hue_rotation: 0,
         };
 
         // 3. Render using Scalar Backend

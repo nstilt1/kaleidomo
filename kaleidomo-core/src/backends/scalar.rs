@@ -1,5 +1,7 @@
 use image::{DynamicImage, GenericImageView};
 
+use crate::backends::DaydreamBackend;
+
 use super::KaleidoBackend;
 
 impl KaleidoBackend for f32 {
@@ -348,5 +350,147 @@ impl KaleidoBackend for f32 {
         let ry = sx_local * sin_r + sy_local * cos_r;
 
         (triangle_center_x + rx, triangle_center_y + ry)
+    }
+}
+
+impl DaydreamBackend for f32 {
+    type IntegerRegister = u8;
+    #[inline]
+    unsafe fn load_pixels(input: &[[u8; 4]]) -> (Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister) {
+        (input[0][0], input[0][1], input[0][2], input[0][3])
+    }
+    #[inline]
+    unsafe fn rgb_to_hsv(
+        r: Self::IntegerRegister, 
+        g: Self::IntegerRegister, 
+        b: Self::IntegerRegister, 
+        two_fifty_five: Self, 
+        hundred: Self, 
+        zero: Self, 
+        six: Self, 
+        sixty: Self,
+        one: Self,
+        two: Self,
+        four: Self,
+    ) -> (Self, Self, Self) {
+        let (r, g, b) = (r as f32 / two_fifty_five, g as f32 / two_fifty_five, b as f32 / two_fifty_five);
+        let (c_max, c_min, sub_1, sub_2, add) = match r >= g {
+            // r >= g
+            true => match r >= b {
+                // r > g, r > b
+                true => {
+                    (r, match g >= b {
+                        // r >= g >= b
+                        true => b,
+                        // r >= b >= g
+                        false => g
+                    }, g, b, 0f32)
+                },
+                // b >= r >= g
+                false => (b, g, r, g, 4f32)
+            },
+            false => match g >= b {
+                // g >= b >= r
+                true => (g, r, b, r, 2f32),
+                // b >= g >= r
+                false => (b, r, r, g, 4f32)
+            }
+        };
+
+        let delta = c_max - c_min;
+        let h = match delta == 0f32 {
+            true => 0f32,
+            false => match add > 0f32 {
+                true => 60f32 * (((sub_1 - sub_2) / delta) + add),
+                false => 60f32 * (((sub_1 - sub_2) / delta).rem_euclid(6f32))
+            }
+        };
+
+        let s = match c_max == 0f32 {
+            true => c_max,
+            false => delta / c_max
+        };
+
+        (h, s, (c_max * 100f32).round())
+    }
+    #[inline]
+    unsafe fn hsv_to_rgb(mut h: Self, s: Self, mut v: Self, hundred: Self, sixty: Self, two_fifty_five: Self, zero: Self, five: Self, four: Self, three: Self, two: Self, one: Self) -> (Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister) {
+        h /= sixty;
+        v /= hundred;
+        
+        let c = v * s;
+        let x = c * (one - (h % two - one).abs());
+        let m = v - c;
+
+        let (rp, gp, bp) = match h < three {
+            true => match h < two {
+                true => match h < one {
+                    true => (c, x, zero),
+                    false => (x, c, zero)
+                },
+                false => (zero, c, x)
+            },
+            false => match h < five {
+                true => match h < four {
+                    true => (zero, x, c),
+                    false => (x, zero, c)
+                },
+                false => (c, zero, x)
+            }
+        };
+
+        (((rp + m) * two_fifty_five).round() as u8,
+        ((gp + m) * two_fifty_five).round() as u8,
+        ((bp + m) * two_fifty_five).round() as u8)
+    }
+    unsafe fn adjust_hue(
+            h: Self,
+            hue_shift: Self,
+            three_sixty: Self,
+        ) -> Self {
+        (h + hue_shift).rem_euclid(three_sixty)
+    }
+
+    #[inline]
+    unsafe fn extract_pixels(
+            r: Self::IntegerRegister, 
+            g: Self::IntegerRegister, 
+            b: Self::IntegerRegister,
+            a: Self::IntegerRegister,
+        ) -> [[u8; 4]; Self::NUM_FLOATS] {
+        [[r, g, b, 255]]
+    }
+
+    #[inline]
+    unsafe fn store_pixel_hue_shift(
+        output: &mut [u8],
+        _x: u32,
+        sx: Self,
+        sy: Self,
+        source: &DynamicImage,
+        sw: u32,
+        sh: u32,
+        hue_shift_vec: Self,
+        two_fifty_five: Self,
+        hundred: Self,
+        zero: Self,
+        six: Self,
+        sixty: Self,
+        one: Self,
+        two: Self,
+        four: Self,
+        three_sixty: Self,
+        five: Self,
+        three: Self,
+    ) {
+        unsafe {
+            let sx_i = sx.round() as u32;
+            let sy_i = sy.round() as u32;
+            if sx_i < sw && sy_i < sh {
+                let pixel = source.get_pixel(sx_i, sy_i);
+                let (h, s, v) = Self::rgb_to_hsv(pixel.0[0], pixel.0[1], pixel.0[2], 255.0, 100.0, 0.0, 6.0, 60.0, 1.0, 2.0, 4.0);
+                output[0..4].copy_from_slice(&pixel.0);
+            }
+        }
     }
 }

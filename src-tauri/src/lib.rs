@@ -12,6 +12,7 @@ async fn export_kaleidoscope(
     resolution: u32,
     kaleido_type: String,
     tile_count: f32,
+    hue_rotation: u32,
 ) -> Result<String, String> {
     // 1. Open the Save Dialog first (don't render if they hit cancel)
     let file_path = app.dialog()
@@ -43,6 +44,7 @@ async fn export_kaleidoscope(
             "hexagonal_flat_top" => kaleidomo_core::KaleidoType::HexagonalFlatTop,
             _ => return Err("Invalid kaleidoscope type".into()),
         },
+        hue_rotation
     };
 
     let result_buffer = kaleidomo_core::render_kaleidoscope_with_auto_backend(&img, settings);
@@ -74,6 +76,7 @@ async fn generate_kaleidoscope(
     zoom: f32,
     kaleido_type: String,
     tile_count: f32,
+    hue_rotation: u32,
 ) -> Result<String, String> {
     // 1. Load the image from the absolute path
     let img = image::open(&path).map_err(|e| e.to_string())?;
@@ -94,6 +97,7 @@ async fn generate_kaleidoscope(
             "hexagonal_flat_top" => kaleidomo_core::KaleidoType::HexagonalFlatTop,
             _ => return Err("Invalid kaleidoscope type".into()),
         },
+        hue_rotation,
     };
 
     let output = kaleidomo_core::render_kaleidoscope_with_auto_backend(&img, settings);
@@ -107,12 +111,66 @@ async fn generate_kaleidoscope(
     Ok(format!("data:image/png;base64,{}", base64_str))
 }
 
+#[tauri::command]
+async fn generate_video(
+    app: tauri::AppHandle,
+    path: String,
+    x: f32,
+    y: f32,
+    rotation: f32,
+    count: u32,
+    output_size: u32,
+    zoom: f32,
+    kaleido_type: String,
+    tile_count: f32,
+    hue_rotation: u32,
+) -> Result<String, String> {
+    let file_path = app.dialog()
+        .file()
+        .add_filter("MP4 Video", &["mp4"])
+        .set_file_name("my_kaleidoscope.mp4")
+        .blocking_save_file();
+    let file_path = if let Some(fp) = file_path {
+        fp
+    } else {
+        return Err("Video export cancelled".into());
+    };
+    // 1. Load the image from the absolute path
+    let img = image::open(&path).map_err(|e| e.to_string())?;
+
+    let settings = kaleidomo_core::KaleidoSettings {
+        count,
+        output_size, // High-res preview
+        zoom,
+        tile_count,
+        triangle_center_x: x,
+        triangle_center_y: y,
+        triangle_rotation_rad: rotation,
+        kaleido_type: match kaleido_type.to_lowercase().as_str() {
+            "radial" => kaleidomo_core::KaleidoType::Radial,
+            "square" => kaleidomo_core::KaleidoType::Square,
+            "diamond" => kaleidomo_core::KaleidoType::Diamond,
+            "hexagonal" => kaleidomo_core::KaleidoType::Hexagonal,
+            "hexagonal_flat_top" => kaleidomo_core::KaleidoType::HexagonalFlatTop,
+            _ => return Err("Invalid kaleidoscope type".into()),
+        },
+        hue_rotation,
+    };
+
+    match kaleidomo_core::render_video_with_auto_backend(&img, settings, &file_path.to_string()) {
+        Ok(_) => (),
+        Err(e) => return Err(format!("Video generation failed: {}", e)),
+    };
+
+    Ok(format!("data:video/mp4"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init()) // For saving later
         .plugin(tauri_plugin_dialog::init()) // For picking files
-        .invoke_handler(tauri::generate_handler![generate_kaleidoscope, export_kaleidoscope])
+        .invoke_handler(tauri::generate_handler![generate_kaleidoscope, generate_video, export_kaleidoscope])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
