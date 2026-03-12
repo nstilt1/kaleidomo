@@ -19,6 +19,120 @@ import {
 } from "@/components/ui/select"
 import { NumberSliderInput } from "./components/NumberSliderInput";
 import { AspectRatioPicker } from "./components/AspectRatioPicker";
+import { Menu, MenuItem, Submenu } from "@tauri-apps/api/menu";
+
+export async function setupAppMenu() {
+  const aboutSubmenu = await Submenu.new({
+    text: "App",
+    items: [],
+  });
+
+  const fileSubmenu = await Submenu.new({
+    text: "File",
+    items: [
+      await MenuItem.new({
+        id: "load-image-preset",
+        text: "Load Image Preset...",
+        action: () => {
+          window.dispatchEvent(new CustomEvent("menu-load-image-preset"));
+        },
+      }),
+      await MenuItem.new({
+        id: "save-image-preset",
+        text: "Save Image Preset",
+        action: () => {
+          window.dispatchEvent(new CustomEvent("menu-save-image-preset"));
+        },
+      }),
+      await MenuItem.new({
+        id: "load-video-preset",
+        text: "Load Video Preset...",
+        action: () => {
+          window.dispatchEvent(new CustomEvent("menu-load-video-preset"));
+        },
+      }),
+      await MenuItem.new({
+        id: "save-video-preset",
+        text: "Save Video Preset",
+        action: () => {
+          window.dispatchEvent(new CustomEvent("menu-save-video-preset"));
+        },
+      }),
+      await MenuItem.new({
+        id: "load-project-preset",
+        text: "Load Project...",
+        action: () => {
+          window.dispatchEvent(new CustomEvent("menu-load-project"));
+        },
+      }),
+      await MenuItem.new({
+        id: "save-project-preset",
+        text: "Save Project",
+        action: () => {
+          window.dispatchEvent(new CustomEvent("menu-save-project"));
+        },
+      }),
+    ],
+  });
+
+  const menu = await Menu.new({
+    items: [aboutSubmenu, fileSubmenu],
+  });
+
+  await menu.setAsAppMenu();
+}
+
+const promptForImageRelocation = async (
+  originalPath: string
+): Promise<string | null> => {
+  const relocated = await open({
+    multiple: false,
+    filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg"] }],
+    defaultPath: originalPath,
+  });
+
+  return typeof relocated === "string" ? relocated : null;
+};
+
+type LoadedImage = {
+  imagePath: string;
+  imageSrc: string;
+  width: number;
+  height: number;
+};
+
+const tryLoadImageFromPath = async (path: string): Promise<LoadedImage> => {
+  const assetUrl = convertFileSrc(path);
+  const img = new Image();
+  img.src = assetUrl;
+  await img.decode();
+
+  return {
+    imagePath: path,
+    imageSrc: assetUrl,
+    width: img.naturalWidth,
+    height: img.naturalHeight,
+  };
+};
+
+const loadImageFromPath = async (originalPath: string) => {
+  if (!originalPath) {
+    return null;
+  }
+
+  try {
+    return await tryLoadImageFromPath(originalPath);
+  } catch (err) {
+    console.warn("Failed to load saved image path, asking user to relocate.", err);
+
+    const relocated = await promptForImageRelocation(originalPath);
+    if (!relocated) {
+      return null;
+    }
+
+    return await tryLoadImageFromPath(relocated);
+  }
+};
 
 export function roundToNearestMultiple(value: number, multiple: number): number {
   return Math.round(value / multiple) * multiple;
@@ -148,6 +262,48 @@ function App() {
   const [imgWidth, setImgWidth] = useState<number>(0);
   const [imgHeight, setImgHeight] = useState<number>(0);
 
+  useEffect(() => {
+    void setupAppMenu();
+  }, []);
+
+  useEffect(() => {
+    const onLoadImagePreset = () => {
+      void loadImagePreset();
+    };
+
+    const onSaveImagePreset = () => {
+      void saveImagePreset();
+    }
+
+    const onLoadVideoPreset = () => {
+      void loadVideoPreset();
+    };
+
+    const onSaveVideoPreset = () => {
+      void saveVideoPreset();
+    }
+
+    const onLoadProject = () => {
+      void loadProject();
+    };
+
+    const onSaveProject = () => {
+      void saveProject();
+    }
+
+    window.addEventListener("menu-load-image-preset", onLoadImagePreset);
+    window.addEventListener("menu-save-image-preset", onSaveImagePreset);
+    window.addEventListener("menu-load-video-preset", onLoadVideoPreset);
+    window.addEventListener("menu-save-video-preset", onSaveVideoPreset);
+    window.addEventListener("menu-load-project", onLoadProject);
+    window.addEventListener("menu-save-project", onSaveProject);
+
+    return () => {
+      window.removeEventListener("menu-load-image-preset", onLoadImagePreset);
+      window.removeEventListener("menu-load-video-preset", onLoadVideoPreset);
+    };
+  }, []);
+
   async function greet() {
     if (!name.trim()) return;
     
@@ -222,7 +378,7 @@ function App() {
     });
   };
 
-    const resetVideoSettings = () => {
+  const resetVideoSettings = () => {
     setSettings({
       ...settings,
       frame_count: 360,
@@ -275,7 +431,7 @@ function App() {
 
   const saveImagePreset = async () => {
     const filePath = await save({
-      filters: [{ name: "JSON", extensions: ["json"] }],
+      filters: [{ name: "JSON", extensions: ["kmo-image.json"] }],
     });
 
     if (!filePath) {
@@ -294,7 +450,7 @@ function App() {
 
   const saveVideoPreset = async () => {
     const filePath = await save({
-      filters: [{ name: "JSON", extensions: ["json"] }],
+      filters: [{ name: "JSON", extensions: ["kmo-video.json"] }],
     });
 
     if (!filePath) {
@@ -332,25 +488,25 @@ function App() {
     return relocated;
   };
 
-  const loadImageFromPath = async (path: string) => {
-    const resolvedPath = await resolveImagePath(path);
-
-    if (!resolvedPath) {
+  const loadImageFromPath = async (
+    originalPath: string
+  ): Promise<LoadedImage | null> => {
+    if (!originalPath) {
       return null;
     }
 
-    const assetUrl = convertFileSrc(resolvedPath);
-    const img = new Image();
-    img.src = assetUrl;
+    try {
+      return await tryLoadImageFromPath(originalPath);
+    } catch (err) {
+      console.warn("Failed to load saved image path, asking user to relocate.", err);
 
-    await img.decode();
+      const relocated = await promptForImageRelocation(originalPath);
+      if (!relocated) {
+        return null;
+      }
 
-    return {
-      imagePath: resolvedPath,
-      imageSrc: assetUrl,
-      width: img.naturalWidth,
-      height: img.naturalHeight,
-    };
+      return await tryLoadImageFromPath(relocated);
+    }
   };
 
   const loadImagePreset = async () => {
@@ -487,7 +643,7 @@ function App() {
 
   // Save Project JSON
   const saveProject = async () => {
-    const filePath = await save({ filters: [{ name: 'JSON', extensions: ['json'] }] });
+    const filePath = await save({ filters: [{ name: "JSON", extensions: ['kmo.json'] }] });
     if (filePath) {
       const data = JSON.stringify({ imagePath, count, settings, kaleidoType });
       await writeTextFile(filePath, data);
@@ -665,14 +821,14 @@ function App() {
 
           <Button onClick={handlePickFile} className="w-full">Select Image</Button>
           <Button onClick={resetImageSettings} className="w-full">Reset Controls</Button>
-          <div className="mt-auto grid grid-cols-2 gap-2">
+          {/*<div className="mt-auto grid grid-cols-2 gap-2">*/}
             <Button variant="ghost" size="sm" onClick={loadImagePreset}>Load Image Preset</Button>
             <Button variant="ghost" size="sm" onClick={saveImagePreset}>Save Image Preset</Button>
-          </div>
-          <div className="mt-auto grid grid-cols-2 gap-2">
+          {/*</div>*/}
+          {/*<div className="mt-auto grid grid-cols-2 gap-2">*/}
             <Button variant="ghost" size="sm" onClick={loadProject}>Load Project</Button>
             <Button variant="ghost" size="sm" onClick={saveProject}>Save Project</Button>
-          </div>
+          {/*</div>*/}
           <hr className="opacity-20" />
 
           {/* Group 1: Geometry */}
@@ -829,21 +985,16 @@ function App() {
             <Button onClick={handleRender} variant="outline">Refresh Preview</Button>
             <Button onClick={handleExport} className="bg-primary">Export PNG</Button>
           </div>
-
-          <div className="mt-auto grid grid-cols-2 gap-2">
-            <Button variant="ghost" size="sm" onClick={loadImagePreset}>Load Image Preset</Button>
-            <Button variant="ghost" size="sm" onClick={saveImagePreset}>Save Image Preset</Button>
-          </div>
           <div className="mt-auto grid grid-cols-2 gap-2">
             <Button variant="ghost" size="sm" onClick={loadProject}>Load Project</Button>
             <Button variant="ghost" size="sm" onClick={saveProject}>Save Project</Button>
           </div>
 
           <hr className="opacity-20" />
-          <div className="mt-auto grid grid-cols-2 gap-2">
+          {/*<div className="mt-auto grid grid-cols-2 gap-2">*/}
             <Button variant="ghost" size="sm" onClick={loadVideoPreset}>Load Video Preset</Button>
             <Button variant="ghost" size="sm" onClick={saveVideoPreset}>Save Video Preset</Button>
-          </div>
+          {/*</div>*/}
           {/* Video settings */}
           <div className="space-y-4">
             <div className="flex justify-between items-center"><label>Video Settings</label>
@@ -964,10 +1115,6 @@ function App() {
           </div>
           <div className="flex flex-col gap-2 pt-4">
             <Button onClick={handleVideo} className="bg-primary">Export MP4</Button>
-          </div>
-          <div className="mt-auto grid grid-cols-2 gap-2">
-            <Button variant="ghost" size="sm" onClick={loadImagePreset}>Load Image Preset</Button>
-            <Button variant="ghost" size="sm" onClick={saveImagePreset}>Save Image Preset</Button>
           </div>
           <div className="mt-auto grid grid-cols-2 gap-2">
             <Button variant="ghost" size="sm" onClick={loadProject}>Load Project</Button>
