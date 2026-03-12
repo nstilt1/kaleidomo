@@ -25,8 +25,8 @@ pub struct KaleidoSettings {
     pub count: u32,       // Number of reflections (e.g., 8)
     pub output_size_w: u32,
     pub output_size_h: u32,
-    pub offset_x: u32,
-    pub offset_y: u32,
+    pub offset_x: i32,
+    pub offset_y: i32,
     pub zoom: f32,        // How much of the triangle to show
     pub tile_count: f32,
     pub triangle_center_x: f32, // Center of the triangle in source image
@@ -34,6 +34,31 @@ pub struct KaleidoSettings {
     pub triangle_rotation_rad: f32, // Rotation of the triangle in radians
     pub kaleido_type: KaleidoType,  // Type of kaleidoscope (radial, square, etc.)
     pub hue_rotation: u32, // Hue rotation in degrees (0-360)
+}
+
+pub struct VideoSettings {
+    /// Number of frames to render in the video
+    pub frame_count: u32,
+    /// Number of still frames at the end of the video
+    pub still_frame_ending: u32,
+    /// Frame rate
+    pub fps: u32,
+    /// Quality of the video (0.0 to 1.0)
+    pub quality: f32,
+    /// Rotation rate of triangle in degrees per frame
+    pub triangle_rotation_degrees_per_frame: f32,
+    /// Rotation rate of hue in degrees per frame
+    pub hue_rotation_degrees_per_frame: f32,
+    /// The maximum zoom
+    pub zoom_max: f32,
+    /// The minimum zoom
+    pub zoom_min: f32,
+    /// The zoom function: linear or sin
+    pub zoom_fn: String,
+    /// The angle of the zoom at frame 0 in the sawtooth/sin space
+    pub zoom_start_offset: f32,
+    /// The amount of times that zoom will loop in the video.
+    pub num_zoom_loops: u32,
 }
 
 pub fn render_kaleidoscope(
@@ -324,6 +349,7 @@ impl Mp4H264Sink {
 pub fn render_video_with_auto_backend(
     source: &DynamicImage,
     settings: KaleidoSettings,
+    video_settings: VideoSettings,
     path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -338,18 +364,54 @@ pub fn render_video_with_auto_backend(
     }
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     {
-        render_video::<Register>(source, settings, path)
+        render_video::<Register>(source, settings, video_settings, path)
         //render_video::<f32>(source, settings, path)
+    }
+}
+
+fn degrees_to_radians(degrees: f32) -> f32 {
+    degrees * (PI / 180.0)
+}
+
+fn zoom_modulation(video_settings: &VideoSettings, frame: u32) -> f32 {
+    let range = video_settings.zoom_max - video_settings.zoom_min;
+
+    match video_settings.zoom_fn.to_ascii_lowercase().as_str() {
+        "sin" => {
+            let phase = (frame as f32 / video_settings.frame_count as f32)
+                * video_settings.num_zoom_loops as f32
+                + video_settings.zoom_start_offset;
+
+            let angle = phase * 2.0 * PI;
+
+            let sin_norm = (f32::sin(angle) + 1.0) * 0.5;
+
+            video_settings.zoom_min + sin_norm * range
+        }
+
+        "sawtooth" => {
+            let phase = (frame as f32 / video_settings.frame_count as f32)
+                * video_settings.num_zoom_loops as f32
+                + video_settings.zoom_start_offset;
+
+            let phase = phase.fract();
+
+            let tri = 1.0 - (2.0 * phase - 1.0).abs();
+
+            video_settings.zoom_min + tri * range
+        }
+        _ => video_settings.zoom_min,
     }
 }
 
 fn render_video<B: KaleidoBackend + DaydreamBackend>(
     source: &DynamicImage,
     mut settings: KaleidoSettings,
+    video_settings: VideoSettings,
     path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let fps = 30u32;
-    let total_frames = 360u32;
+    let fps = video_settings.fps;
+    let total_frames = video_settings.frame_count;
     let width_over_2 = settings.output_size_w as f32 / 2.0;
     let center_x = settings.output_size_w as f32 / 2.0 + settings.offset_x as f32;
     let center_y = settings.output_size_h as f32 / 2.0 + settings.offset_y as f32;
@@ -361,11 +423,12 @@ fn render_video<B: KaleidoBackend + DaydreamBackend>(
         settings.output_size_w as usize,
         settings.output_size_h as usize,
         fps,
-        8_000_000,
+        (settings.output_size_w as f32 * settings.output_size_h as f32 * fps as f32 * video_settings.quality).round() as u32,
     )?;
 
+    let triangle_rotation_delta = degrees_to_radians(video_settings.triangle_rotation_degrees_per_frame);
     for frame in 0..total_frames {
-        settings.triangle_rotation_rad = (settings.triangle_rotation_rad + (2.0 * PI / total_frames as f32)) % (2.0 * PI);
+        settings.triangle_rotation_rad = (settings.triangle_rotation_rad + triangle_rotation_delta).rem_euclid(2.0 * PI);
         rgba
             .par_chunks_exact_mut((settings.output_size_w * 4) as usize)
             .enumerate()
@@ -373,7 +436,7 @@ fn render_video<B: KaleidoBackend + DaydreamBackend>(
                 inner_loop::<Register>(
                     y,
                     row,
-                    settings.zoom,
+                    zoom_modulation(&video_settings, frame),
                     source,
                     &settings,
                     width_over_2,
@@ -382,9 +445,14 @@ fn render_video<B: KaleidoBackend + DaydreamBackend>(
                     slice_angle,
                     source.width(),
                     source.height(),
-                    4 * frame,
+                    (settings.hue_rotation as f32 + frame as f32 * video_settings.hue_rotation_degrees_per_frame).round() as u32,
                 );
             });
+        sink.write_rgba_frame(&rgba)?;
+    }
+
+    // write still frames at the end
+    for still_frame in 0..video_settings.still_frame_ending {
         sink.write_rgba_frame(&rgba)?;
     }
 

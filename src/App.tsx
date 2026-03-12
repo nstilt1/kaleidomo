@@ -5,8 +5,6 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { Slider } from "@/components/ui/slider";
-import { saveConfig } from "./lib/utils";
 import { WedgePicker } from "./components/WedgePicker";
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { convertFileSrc } from '@tauri-apps/api/core';
@@ -19,9 +17,75 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { NumberSliderInput } from "./components/NumberSliderInput";
+import { AspectRatioPicker } from "./components/AspectRatioPicker";
 
-function roundToNearestMultiple(value: number, multiple: number): number {
+export function roundToNearestMultiple(value: number, multiple: number): number {
   return Math.round(value / multiple) * multiple;
+}
+
+type Settings = { 
+  x: number; 
+  y: number; 
+  rotation: number, 
+  resolution: number, 
+  zoom: number, 
+  tile_count: number, 
+  hue_rotate: number, 
+  ratio_num: number, 
+  ratio_den: number, offset_x: number, 
+  offset_y: number, 
+  aspect_ratio_mode: string, 
+  frame_count: number, 
+  still_frame_ending: number, 
+  fps: number, 
+  quality: number, 
+  triangle_rotation_degrees_per_frame: number, 
+  hue_rotation_degrees_per_frame: number, 
+  zoom_max: number, 
+  zoom_min: number, 
+  zoom_fn: string, 
+  zoom_start_offset: number, 
+  num_zoom_loops: number 
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+const DEFAULT_SETTINGS: Settings = {
+  x: 0,
+  y: 0,
+  rotation: 0,
+  resolution: 512,
+  zoom: 2,
+  tile_count: 1.0,
+  hue_rotate: 0,
+  ratio_num: 9,
+  ratio_den: 16,
+  offset_x: 0,
+  offset_y: 0,
+  aspect_ratio_mode: "preset",
+  frame_count: 360,
+  still_frame_ending: 0,
+  fps: 30,
+  quality: 0.1,
+  triangle_rotation_degrees_per_frame: 1.0,
+  hue_rotation_degrees_per_frame: 1.0,
+  zoom_max: 1.0,
+  zoom_min: 1.0,
+  zoom_fn: "sin",
+  zoom_start_offset: 0.0,
+  num_zoom_loops: 1,
+};
+
+function mergeSettingsWithDefaults(value: unknown): Settings {
+  const raw = isRecord(value) ? value : {};
+
+  return {
+    ...DEFAULT_SETTINGS,
+    ...raw,
+  };
 }
 
 function App() {
@@ -30,12 +94,13 @@ function App() {
   const [_imageSrc, setImageSrc] = useState<string>(""); // For previewing original
   const [outputSrc, setOutputSrc] = useState<string>(""); // Result from Rust
   const [count, setCount] = useState<number>(6);
-  const [settings, setSettings] = useState({ x: 100, y: 100, rotation: 0, resolution: 512, zoom: 2, tile_count: 1.0, hue_rotate: 0, ratio_num: 9, ratio_den: 16, offset_x: 0, offset_y: 0 });
+  const [settings, setSettings] = useState({ x: 100, y: 100, rotation: 0, resolution: 512, zoom: 2, tile_count: 1.0, hue_rotate: 0, ratio_num: 9, ratio_den: 16, offset_x: 0, offset_y: 0, aspect_ratio_mode: "preset", frame_count: 360, still_frame_ending: 0, fps: 30, quality: 0.1, triangle_rotation_degrees_per_frame: 1.0, hue_rotation_degrees_per_frame: 1.0, zoom_max: 1.0, zoom_min: 1.0, zoom_fn: "sin", zoom_start_offset: 0.0, num_zoom_loops: 1 });
   const [greetMsg, setGreetMsg] = useState("");
   const [name, setName] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [preview, _setPreview] = useState<string | null>(null);
   const [kaleidoType, setKaleidoType] = useState<string>("radial");
+  const [imgWidth, setImgWidth] = useState<number>(0);
+  const [imgHeight, setImgHeight] = useState<number>(0);
 
   async function greet() {
     if (!name.trim()) return;
@@ -67,6 +132,11 @@ function App() {
       const img = new Image();
       img.src = assetUrl;
       img.onload = () => {
+        setImgWidth(img.naturalWidth);
+        setImgHeight(img.naturalHeight);
+      };
+      /*
+      img.onload = () => {
         setSettings({
           x: img.naturalWidth / 2,
           y: img.naturalHeight / 2,
@@ -79,9 +149,41 @@ function App() {
           ratio_den: 16,
           offset_x: 0,
           offset_y: 0,
+          aspect_ratio_mode: "preset",
+          
         });
       };
+        */
+      await handleRender();
     }
+  };
+
+  const resetSettings = () => {
+    setSettings({
+      x: imgWidth / 2,
+      y: imgHeight / 2,
+      rotation: 0,
+      resolution: 512,
+      zoom: 2,
+      tile_count: 1.0,
+      hue_rotate: 0,
+      ratio_num: 9,
+      ratio_den: 16,
+      offset_x: 0,
+      offset_y: 0,
+      aspect_ratio_mode: "preset",
+      frame_count: 360,
+      still_frame_ending: 0,
+      fps: 30,
+      quality: 0.1,
+      triangle_rotation_degrees_per_frame: 1.0,
+      hue_rotation_degrees_per_frame: 1.0,
+      zoom_max: 1.0,
+      zoom_min: 1.0,
+      zoom_fn: "sin",
+      zoom_start_offset: 0.0,
+      num_zoom_loops: 1,
+    });
   };
 
   // Generate Kaleidoscope (Rust Call)
@@ -116,7 +218,7 @@ function App() {
     }, 50); // 50ms delay creates a responsive 20fps feel
 
     return () => clearTimeout(timer);
-  }, [settings, count, kaleidoType]); // Re-run whenever wedge moves or count changes
+  }, [settings, count, kaleidoType, imagePath]); // Re-run whenever wedge moves or count changes
 
   // Save Project JSON
   const saveProject = async () => {
@@ -129,20 +231,69 @@ function App() {
 
   // Load Project JSON
   const loadProject = async () => {
-    const selected = await open({ filters: [{ name: 'JSON', extensions: ['json'] }] });
-    if (selected && typeof selected === 'string') {
+    const selected = await open({
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+
+    if (!selected || typeof selected !== "string") {
+      return;
+    }
+
+    try {
       const content = await readTextFile(selected);
-      const project = JSON.parse(content);
-      setImagePath(project.imagePath);
-      setCount(project.count);
-      setSettings(project.settings);
-      setKaleidoType(project.kaleidoType);
+      const parsed: unknown = JSON.parse(content);
+
+      if (!isRecord(parsed)) {
+        throw new Error("Project file is not a valid object.");
+      }
+
+      const imagePath =
+        typeof parsed.imagePath === "string" ? parsed.imagePath : "";
+
+      const count =
+        typeof parsed.count === "number" && Number.isFinite(parsed.count)
+          ? parsed.count
+          : 0;
+
+      const kaleidoType =
+        typeof parsed.kaleidoType === "string" ? parsed.kaleidoType : "default";
+
+      const settings = mergeSettingsWithDefaults(parsed.settings);
+
+      setCount(count);
+      setSettings(settings);
+      setKaleidoType(kaleidoType);
+
+      if (imagePath) {
+        setImagePath(imagePath);
+
+        const assetUrl = convertFileSrc(imagePath);
+        setImageSrc(assetUrl);
+
+        const img = new Image();
+        img.src = assetUrl;
+
+        try {
+          await img.decode();
+          setImgWidth(img.naturalWidth);
+          setImgHeight(img.naturalHeight);
+        } catch (err) {
+          console.error("Failed to load project image", err);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load project file", err);
     }
   };
 
   const calculate_width = (settings: { resolution: number; ratio_num: number; ratio_den: number }) => {
-    const exactWidth = (settings.resolution * settings.ratio_den) / settings.ratio_num;
-    return roundToNearestMultiple(exactWidth, 8);
+    const height = settings.resolution
+    const num = Math.max(1, settings.ratio_num)
+    const den = Math.max(1, settings.ratio_den)
+
+    const exactWidth = (height * num) / den
+
+    return roundToNearestMultiple(exactWidth, 8)
   }
 
   const handleExport = async () => {
@@ -163,7 +314,6 @@ function App() {
         kaleidoType: kaleidoType,
         tileCount: settings.tile_count,
         hueRotation: settings.hue_rotate,
-        
       });
       alert(message);
     } catch (e) {
@@ -191,6 +341,17 @@ function App() {
         kaleidoType: kaleidoType,
         tileCount: settings.tile_count,
         hueRotation: settings.hue_rotate,
+        frameCount: settings.frame_count,
+        stillFrameEnding: settings.still_frame_ending,
+        fps: settings.fps,
+        quality: settings.quality,
+        triangleRotationDegreesPerFrame: settings.triangle_rotation_degrees_per_frame,
+        hueRotationDegreesPerFrame: settings.hue_rotation_degrees_per_frame,
+        zoomMax: settings.zoom_max,
+        zoomMin: settings.zoom_min,
+        zoomFn: settings.zoom_fn,
+        zoomStartOffset: settings.zoom_start_offset,
+        numZoomLoops: settings.num_zoom_loops,
       });
       alert(message);
     } catch (e) {
@@ -284,62 +445,6 @@ function App() {
             </CardContent>
           </Card>
         </div>
-
-        {/* File picker and preview */}
-        <div className="p-8 flex flex-col items-center gap-4">
-          <Button onClick={handlePickFile}>Select & Process Image</Button>
-          {preview && <img src={preview} className="rounded-lg shadow-xl" alt="Preview" />}
-        </div>
-        <div className="flex h-screen bg-background text-foreground">
-          <aside className="w-80 p-6 border-r flex flex-col gap-6">
-            <h2 className="text-xl font-bold">Settings</h2>
-            
-            <div className="space-y-2">
-              <label>Slices: {count}</label>
-              <Slider 
-                value={[count]} 
-                min={3} max={24} step={1} 
-                onValueChange={([v]) => setCount(v)} 
-              />
-            </div>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <label>Rotation</label>
-                <span className="text-xs text-muted-foreground">
-                  {Math.round((settings.rotation * 180) / Math.PI)}°
-                </span>
-              </div>
-              <Slider 
-                value={[settings.rotation]} 
-                min={0} 
-                max={Math.PI * 2} 
-                step={0.01} 
-                onValueChange={([v]) => setSettings(prev => ({ ...prev, rotation: v }))} 
-              />
-            </div>
-
-            <Button onClick={() => saveConfig(settings, imagePath)} variant="outline">
-              💾 Save Project File
-            </Button>
-            
-            <Button onClick={handleRender} className="mt-auto">
-              Generate Kaleidoscope
-            </Button>
-          </aside>
-
-          <main className="flex-1 p-6 overflow-auto flex justify-center items-center bg-muted/30">
-            {imagePath ? (
-              <WedgePicker imagePath={imagePath} count={count} settings={settings} onUpdate={setSettings} />
-            ) : (
-              <div className="text-center italic">Upload an image to start</div>
-            )}
-          </main>
-        </div>
-
-        {/* Footer */}
-        <div className="text-center text-sm text-muted-foreground">
-          <p>Built with Tauri, React, TypeScript, shadcn/ui, and Tailwind CSS</p>
-        </div>
       </div>
 
       <div className="flex h-screen w-full bg-background text-foreground overflow-hidden">
@@ -350,8 +455,8 @@ function App() {
             <p className="text-xs text-muted-foreground">Native Rust Engine</p>
           </div>
 
-          <Button onClick={handlePickFile} className="w-full">Upload Image</Button>
-
+          <Button onClick={handlePickFile} className="w-full">Select Image</Button>
+          <Button onClick={resetSettings} className="w-full">Reset Controls</Button>
           <hr className="opacity-20" />
 
           {/* Group 1: Geometry */}
@@ -373,57 +478,269 @@ function App() {
               </SelectContent>
             </Select>
 
-            <div className="flex justify-between items-center"><label>Slices</label><span>{count}</span></div>
-            <Slider value={[count]} min={3} max={24} onValueChange={([v]) => setCount(v)} />
-            
-            <div className="flex justify-between items-center"><label>Sample Radius</label><span>{settings.zoom.toFixed(2)}x</span></div>
-            <Slider value={[settings.zoom]} min={0.1} max={32.0} step={0.01} onValueChange={([v]) => setSettings(s => ({...s, zoom: v}))} />
+            <NumberSliderInput
+              label="Slices"
+              value={count}
+              min={3}
+              max={24}
+              step={1}
+              onChange={(v) => setCount(v)}
+              roundToInteger={true}
+              />
 
-            <div className="flex justify-between items-center"><label>Rotation</label><span>{settings.rotation.toFixed(2)} radians</span></div>
-            <Slider value={[settings.rotation]} min={0.0} max={2 * Math.PI} step={0.01} onValueChange={([v]) => setSettings(s => ({...s, rotation: v}))} />
+            <NumberSliderInput
+              label="Sample Radius"
+              value={settings.zoom}
+              min={0.1}
+              max={32.0}
+              step={0.01}
+              unit="x"
+              onChange={(v) => setSettings(s => ({...s, zoom: v}))}
+              roundToInteger={false}
+              setExternalValue={(v) =>
+                setSettings((s) => ({
+                  ...s,
+                  zoom_min: v,
+                }))
+              }
+              setExternalValue2={(v) =>
+                setSettings((s) => ({
+                  ...s,
+                  zoom_max: v,
+                }))
+              }
+              externalValueName="Min Zoom"
+              externalValue2Name="Max Zoom"
+              />
+
+            <NumberSliderInput
+              label="Rotation"
+              value={settings.rotation}
+              min={0.0}
+              max={2 * Math.PI}
+              step={0.01}
+              onChange={(v) => setSettings(s => ({...s, rotation: v}))}
+              unit="radians"
+              roundToInteger={false}
+              />
+
+            <NumberSliderInput 
+              label="Offset X"
+              value={settings.offset_x}
+              min={-2000}
+              max={2000}
+              step={1}
+              onChange={(v) => setSettings(s => ({...s, offset_x: v}))}
+              unit="px"
+              roundToInteger={true}
+            />
             
-            <div className="flex justify-between items-center"><label>Offset X</label><span>{settings.offset_x} px</span></div>
-            <Slider value={[settings.offset_x]} min={0} max={2000} step={1} onValueChange={([v]) => setSettings(s => ({...s, offset_x: v}))} />
-            
-            <div className="flex justify-between items-center"><label>Offset Y</label><span>{settings.offset_y} px</span></div>
-            <Slider value={[settings.offset_y]} min={0} max={2000} step={1} onValueChange={([v]) => setSettings(s => ({...s, offset_y: v}))} />
+            <NumberSliderInput
+              label="Offset Y"
+              value={settings.offset_y}
+              min={-2000}
+              max={2000}
+              step={1}
+              onChange={(v) => setSettings(s => ({...s, offset_y: v}))}
+              unit="px"
+              roundToInteger={true}
+            />
           </div>
 
           {/* Group 2: Output */}
           <div className="space-y-4">
-            <div className="flex justify-between items-center"><label>Output Height</label><span>{settings.resolution}px</span></div>
-            <Slider value={[settings.resolution]} min={256} max={8192} step={256} onValueChange={([v]) => setSettings(s => ({...s, resolution: v}))} />
+            <NumberSliderInput
+              label="Output Height"
+              value={settings.resolution}
+              min={256}
+              max={8192}
+              step={8}
+              onChange={(v) => setSettings(s => ({...s, resolution: v}))}
+              unit="px"
+              roundToInteger={false}
+              roundToMultipleOf={8}
+            />
           </div>
 
           <div className="space-y-4">
-            <div className="flex justify-between items-center"><label>Width Ratio</label><span>{settings.ratio_num}/{settings.ratio_den}</span></div>
-            <Slider value={[settings.ratio_num]} min={1} max={36} step={1} onValueChange={([v]) => setSettings(s => ({...s, ratio_num: v}))} />
+            <AspectRatioPicker
+              numerator={settings.ratio_num}
+              denominator={settings.ratio_den}
+              mode={settings.aspect_ratio_mode}
+              onModeChange={(mode) =>
+                setSettings((s) => ({
+                  ...s,
+                  aspect_ratio_mode: mode,
+                }))
+              }
+                onChange={(numerator, denominator) => {
+                  setSettings((s) => ({
+                    ...s,
+                    ratio_num: numerator,
+                    ratio_den: denominator,
+                  }));
+                }}
+            />
           </div>
 
           <div className="space-y-4">
-            <div className="flex justify-between items-center"><label>Height Ratio</label><span>{settings.ratio_num}/{settings.ratio_den}</span></div>
-            <Slider value={[settings.ratio_den]} min={1} max={36} step={1} onValueChange={([v]) => setSettings(s => ({...s, ratio_den: v}))} />
+            <NumberSliderInput
+              label="Tile Count"
+              value={settings.tile_count}
+              min={0.1}
+              max={64.0}
+              step={0.1}
+              onChange={(v) => setSettings(s => ({...s, tile_count: v}))}
+              unit="tiles"
+              roundToInteger={false}
+              />
           </div>
 
           <div className="space-y-4">
-            <div className="flex justify-between items-center"><label>Tile Count</label><span>{settings.tile_count}</span></div>
-            <Slider value={[settings.tile_count]} min={0.1} max={64.0} step={0.1} onValueChange={([v]) => setSettings(s => ({...s, tile_count: v}))} />
-          </div>
-
-          <div className="space-y-4">
-            <div className="flex justify-between items-center"><label>Hue Shift</label><span>{settings.hue_rotate} degrees</span></div>
-            <Slider value={[settings.hue_rotate]} min={0} max={360} step={1} onValueChange={([v]) => setSettings(s => ({...s, hue_rotate: v}))} />
+            <NumberSliderInput
+              label="Color Shift"
+              value={settings.hue_rotate}
+              min={0}
+              max={360}
+              step={1}
+              onChange={(v) => setSettings(s => ({...s, hue_rotate: v}))}
+              unit="degrees"
+              roundToInteger={true}
+              />
           </div>
 
           <div className="flex flex-col gap-2 pt-4">
             <Button onClick={handleRender} variant="outline">Refresh Preview</Button>
             <Button onClick={handleExport} className="bg-primary">Export PNG</Button>
-            <Button onClick={handleVideo} className="bg-primary">Export MP4</Button>
           </div>
 
           <div className="mt-auto grid grid-cols-2 gap-2">
             <Button variant="ghost" size="sm" onClick={saveProject}>Save Project</Button>
             <Button variant="ghost" size="sm" onClick={loadProject}>Load Project</Button>
+          </div>
+
+          <hr className="opacity-20" />
+
+          {/* Group 1: Geometry */}
+          <div className="space-y-4">
+            <div className="flex justify-between items-center"><label>Video Settings</label>
+            </div>
+            <p>The generation might be running on your CPU, so 360 frames should be a good starting point.</p>
+            <NumberSliderInput
+              label="Frame Count"
+              value={settings.frame_count}
+              min={1}
+              max={3600}
+              step={1}
+              onChange={(v) => setSettings(s => ({...s, frame_count: v}))}
+              unit="frames"
+              roundToInteger={true}
+              />
+            <NumberSliderInput
+              label="# Still Frames at End"
+              value={settings.still_frame_ending}
+              min={0}
+              max={360}
+              step={1}
+              onChange={(v) => setSettings(s => ({...s, still_frame_ending: v}))}
+              unit="frames"
+              roundToInteger={true}
+              />
+            <NumberSliderInput
+              label="Frames Per Second (FPS)"
+              value={settings.fps}
+              min={1}
+              max={144}
+              step={1}
+              onChange={(v) => setSettings(s => ({...s, fps: v}))}
+              unit="frames per second"
+              roundToInteger={true}
+              />
+            <NumberSliderInput
+              label="Quality (bits per pixel per frame)"
+              value={settings.quality}
+              min={0.1}
+              max={0.3}
+              step={0.01}
+              onChange={(v) => setSettings(s => ({...s, quality: v}))}
+              unit="bpp/frame"
+              roundToInteger={false}
+              />
+            <NumberSliderInput
+              label="Angle rotation rate"
+              value={settings.triangle_rotation_degrees_per_frame}
+              min={-30.0}
+              max={30.0}
+              step={0.01}
+              onChange={(v) => setSettings(s => ({...s, triangle_rotation_degrees_per_frame: v}))}
+              unit="degrees per frame"
+              roundToInteger={false}
+              />
+            <NumberSliderInput
+              label="Color changing rate"
+              value={settings.hue_rotation_degrees_per_frame}
+              min={-30.0}
+              max={30.0}
+              step={0.01}
+              onChange={(v) => setSettings(s => ({...s, hue_rotation_degrees_per_frame: v}))}
+              unit="degrees per frame"
+              roundToInteger={false}
+              />
+            <NumberSliderInput
+              label="Max Zoom"
+              value={settings.zoom_max}
+              min={0.01}
+              max={32.0}
+              step={0.01}
+              onChange={(v) => setSettings(s => ({...s, zoom_max: v}))}
+              unit="x"
+              roundToInteger={false}
+              />
+            <NumberSliderInput
+              label="Min Zoom"
+              value={settings.zoom_min}
+              min={0.01}
+              max={32.0}
+              step={0.01}
+              onChange={(v) => setSettings(s => ({...s, zoom_min: v}))}
+              unit="x"
+              roundToInteger={false}
+              />
+            <Select onValueChange={(v) => setSettings(s => ({...s, zoom_fn: v}))} defaultValue={settings.zoom_fn}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Select zoom function" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectLabel>Zoom Function</SelectLabel>
+                  <SelectItem value="sin">Sine Wave</SelectItem>
+                  <SelectItem value="sawtooth">Linear/Triangle Wave</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <NumberSliderInput
+              label="Zoom Offset"
+              value={settings.zoom_start_offset}
+              min={0.0}
+              max={1.0}
+              step={0.01}
+              onChange={(v) => setSettings(s => ({...s, zoom_start_offset: v}))}
+              unit="cycles"
+              roundToInteger={false}
+              />
+            <NumberSliderInput
+              label="# of Zoom Cycles"
+              value={settings.num_zoom_loops}
+              min={1}
+              max={10}
+              step={1}
+              onChange={(v) => setSettings(s => ({...s, num_zoom_loops: v}))}
+              unit="cycles"
+              roundToInteger={true}
+              />
+          </div>
+          <div className="flex flex-col gap-2 pt-4">
+            <Button onClick={handleVideo} className="bg-primary">Export MP4</Button>
           </div>
         </aside>
 
@@ -451,6 +768,11 @@ function App() {
               <p className="text-muted-foreground italic">Click Generate to see result</p>
             )}
           </div>
+
+        {/* Footer */}
+        <div className="text-center text-sm text-muted-foreground">
+          <p>Built with Tauri, React, TypeScript, shadcn/ui, and Tailwind CSS</p>
+        </div>
         </main>
       </div>
     </div>

@@ -11,8 +11,8 @@ async fn export_kaleidoscope(
     count: u32,
     output_size_h: u32,
     output_size_w: u32,
-    offset_x: u32,
-    offset_y: u32,
+    offset_x: i32,
+    offset_y: i32,
     kaleido_type: String,
     tile_count: f32,
     hue_rotation: u32,
@@ -80,8 +80,8 @@ async fn generate_kaleidoscope(
     count: u32,
     output_size_h: u32,
     output_size_w: u32,
-    offset_x: u32,
-    offset_y: u32,
+    offset_x: i32,
+    offset_y: i32,
     zoom: f32,
     kaleido_type: String,
     tile_count: f32,
@@ -133,12 +133,23 @@ async fn generate_video(
     count: u32,
     output_size_h: u32,
     output_size_w: u32,
-    offset_x: u32,
-    offset_y: u32,
+    offset_x: i32,
+    offset_y: i32,
     zoom: f32,
     kaleido_type: String,
     tile_count: f32,
     hue_rotation: u32,
+    frame_count: u32,
+    still_frame_ending: u32,
+    fps: u32,
+    quality: f32,
+    triangle_rotation_degrees_per_frame: f32,
+    hue_rotation_degrees_per_frame: f32,
+    zoom_max: f32,
+    zoom_min: f32,
+    zoom_fn: String,
+    zoom_start_offset: f32,
+    num_zoom_loops: u32,
 ) -> Result<String, String> {
     let file_path = app.dialog()
         .file()
@@ -175,7 +186,21 @@ async fn generate_video(
         hue_rotation,
     };
 
-    match kaleidomo_core::render_video_with_auto_backend(&img, settings, &file_path.to_string()) {
+    let video_settings = kaleidomo_core::VideoSettings {
+        frame_count,
+        still_frame_ending,
+        fps,
+        quality,
+        triangle_rotation_degrees_per_frame,
+        hue_rotation_degrees_per_frame,
+        zoom_max,
+        zoom_min,
+        zoom_fn,
+        zoom_start_offset,
+        num_zoom_loops,
+    };
+
+    match kaleidomo_core::render_video_with_auto_backend(&img, settings, video_settings, &file_path.to_string()) {
         Ok(_) => (),
         Err(e) => return Err(format!("Video generation failed: {}", e)),
     };

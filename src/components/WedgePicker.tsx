@@ -4,8 +4,8 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 interface PickerProps {
   imagePath: string;
   count: number;
-  settings: { x: number; y: number; rotation: number, resolution: number, zoom: number, tile_count: number, hue_rotate: number, ratio_num: number, ratio_den: number, offset_x: number, offset_y: number, }; // Pass settings as prop
-  onUpdate: (s: { x: number; y: number; rotation: number, resolution: number, zoom: number, tile_count: number, hue_rotate: number, ratio_num: number, ratio_den: number, offset_x: number, offset_y: number }) => void;
+  settings: { x: number; y: number; rotation: number, resolution: number, zoom: number, tile_count: number, hue_rotate: number, ratio_num: number, ratio_den: number, offset_x: number, offset_y: number, aspect_ratio_mode: string, frame_count: number, still_frame_ending: number, fps: number, quality: number, triangle_rotation_degrees_per_frame: number, hue_rotation_degrees_per_frame: number, zoom_max: number, zoom_min: number, zoom_fn: string, zoom_start_offset: number, num_zoom_loops: number }; // Pass settings as prop
+  onUpdate: (s: { x: number; y: number; rotation: number, resolution: number, zoom: number, tile_count: number, hue_rotate: number, ratio_num: number, ratio_den: number, offset_x: number, offset_y: number, aspect_ratio_mode: string, frame_count: number, still_frame_ending: number, fps: number, quality: number, triangle_rotation_degrees_per_frame: number, hue_rotation_degrees_per_frame: number, zoom_max: number, zoom_min: number, zoom_fn: string, zoom_start_offset: number, num_zoom_loops: number }) => void;
 }
 
 export const WedgePicker: React.FC<PickerProps> = ({ imagePath, count, settings, onUpdate }) => {
@@ -98,6 +98,18 @@ export const WedgePicker: React.FC<PickerProps> = ({ imagePath, count, settings,
       ratio_den: settings.ratio_den,
       offset_x: settings.offset_x,
       offset_y: settings.offset_y,
+      aspect_ratio_mode: settings.aspect_ratio_mode,
+      frame_count: settings.frame_count,
+      still_frame_ending: settings.still_frame_ending,
+      fps: settings.fps,
+      quality: settings.quality,
+      triangle_rotation_degrees_per_frame: settings.triangle_rotation_degrees_per_frame,
+      hue_rotation_degrees_per_frame: settings.hue_rotation_degrees_per_frame,
+      zoom_max: settings.zoom_max,
+      zoom_min: settings.zoom_min,
+      zoom_fn: settings.zoom_fn,
+      zoom_start_offset: settings.zoom_start_offset,
+      num_zoom_loops: settings.num_zoom_loops
     });
   };
 
