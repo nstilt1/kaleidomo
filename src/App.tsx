@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { WedgePicker } from "./components/WedgePicker";
-import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import { exists, readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import {
   Select,
@@ -38,6 +38,7 @@ type Settings = {
   aspect_ratio_mode: string, 
   frame_count: number, 
   still_frame_ending: number, 
+  // video settings
   fps: number, 
   quality: number, 
   triangle_rotation_degrees_per_frame: number, 
@@ -52,6 +53,35 @@ type Settings = {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
+
+const IMAGE_SETTING_KEYS = [
+  "x",
+  "y",
+  "rotation",
+  "resolution",
+  "zoom",
+  "tile_count",
+  "hue_rotate",
+  "ratio_num",
+  "ratio_den",
+  "offset_x",
+  "offset_y",
+  "aspect_ratio_mode",
+] as const satisfies readonly (keyof Settings)[];
+
+const VIDEO_SETTING_KEYS = [
+  "frame_count",
+  "still_frame_ending",
+  "fps",
+  "quality",
+  "triangle_rotation_degrees_per_frame",
+  "hue_rotation_degrees_per_frame",
+  "zoom_max",
+  "zoom_min",
+  "zoom_fn",
+  "zoom_start_offset",
+  "num_zoom_loops",
+] as const satisfies readonly (keyof Settings)[];
 
 const DEFAULT_SETTINGS: Settings = {
   x: 0,
@@ -68,6 +98,7 @@ const DEFAULT_SETTINGS: Settings = {
   aspect_ratio_mode: "preset",
   frame_count: 360,
   still_frame_ending: 0,
+  // video settings
   fps: 30,
   quality: 0.1,
   triangle_rotation_degrees_per_frame: 1.0,
@@ -79,13 +110,28 @@ const DEFAULT_SETTINGS: Settings = {
   num_zoom_loops: 1,
 };
 
-function mergeSettingsWithDefaults(value: unknown): Settings {
-  const raw = isRecord(value) ? value : {};
+function pickSettings<K extends keyof Settings>(
+  source: Settings,
+  keys: readonly K[]
+): Partial<Settings> {
+  const out: Partial<Settings> = {};
+
+  for (const key of keys) {
+    out[key] = source[key];
+  }
+
+  return out;
+}
+
+function mergeSettingsWithBase(base: Settings, incoming: unknown): Settings {
+  if (!isRecord(incoming)) {
+    return base;
+  }
 
   return {
-    ...DEFAULT_SETTINGS,
-    ...raw,
-  };
+    ...base,
+    ...incoming,
+  } as Settings;
 }
 
 function App() {
@@ -158,8 +204,9 @@ function App() {
     }
   };
 
-  const resetSettings = () => {
+  const resetImageSettings = () => {
     setSettings({
+      ...settings,
       x: imgWidth / 2,
       y: imgHeight / 2,
       rotation: 0,
@@ -172,6 +219,12 @@ function App() {
       offset_x: 0,
       offset_y: 0,
       aspect_ratio_mode: "preset",
+    });
+  };
+
+    const resetVideoSettings = () => {
+    setSettings({
+      ...settings,
       frame_count: 360,
       still_frame_ending: 0,
       fps: 30,
@@ -220,16 +273,165 @@ function App() {
     return () => clearTimeout(timer);
   }, [settings, count, kaleidoType, imagePath]); // Re-run whenever wedge moves or count changes
 
-  // Save Project JSON
-  const saveProject = async () => {
-    const filePath = await save({ filters: [{ name: 'JSON', extensions: ['json'] }] });
-    if (filePath) {
-      const data = JSON.stringify({ imagePath, count, settings, kaleidoType });
-      await writeTextFile(filePath, data);
+  const saveImagePreset = async () => {
+    const filePath = await save({
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+
+    if (!filePath) {
+      return;
+    }
+
+    const data = JSON.stringify({
+      imagePath,
+      count,
+      settings: pickSettings(settings, IMAGE_SETTING_KEYS),
+      kaleidoType,
+    });
+
+    await writeTextFile(filePath, data);
+  };
+
+  const saveVideoPreset = async () => {
+    const filePath = await save({
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+
+    if (!filePath) {
+      return;
+    }
+
+    const data = JSON.stringify({
+      count,
+      settings: pickSettings(settings, VIDEO_SETTING_KEYS),
+      kaleidoType,
+    });
+
+    await writeTextFile(filePath, data);
+  };
+
+  const resolveImagePath = async (originalPath: string): Promise<string | null> => {
+    if (!originalPath) {
+      return null;
+    }
+
+    if (await exists(originalPath)) {
+      return originalPath;
+    }
+
+    const relocated = await open({
+      multiple: false,
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg"] }],
+      defaultPath: originalPath,
+    });
+
+    if (!relocated || typeof relocated !== "string") {
+      return null;
+    }
+
+    return relocated;
+  };
+
+  const loadImageFromPath = async (path: string) => {
+    const resolvedPath = await resolveImagePath(path);
+
+    if (!resolvedPath) {
+      return null;
+    }
+
+    const assetUrl = convertFileSrc(resolvedPath);
+    const img = new Image();
+    img.src = assetUrl;
+
+    await img.decode();
+
+    return {
+      imagePath: resolvedPath,
+      imageSrc: assetUrl,
+      width: img.naturalWidth,
+      height: img.naturalHeight,
+    };
+  };
+
+  const loadImagePreset = async () => {
+    const selected = await open({
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+
+    if (!selected || typeof selected !== "string") {
+      return;
+    }
+
+    try {
+      const content = await readTextFile(selected);
+      const parsed: unknown = JSON.parse(content);
+
+      if (!isRecord(parsed)) {
+        throw new Error("Preset file is not a valid object.");
+      }
+
+      const mergedSettings = mergeSettingsWithBase(settings, parsed.settings);
+      setSettings(mergedSettings);
+
+      if (typeof parsed.count === "number" && Number.isFinite(parsed.count)) {
+        setCount(parsed.count);
+      }
+
+      if (typeof parsed.kaleidoType === "string") {
+        setKaleidoType(parsed.kaleidoType);
+      }
+
+      if (typeof parsed.imagePath === "string" && parsed.imagePath) {
+        try {
+          const loadedImage = await loadImageFromPath(parsed.imagePath);
+
+          if (loadedImage) {
+            setImagePath(loadedImage.imagePath);
+            setImageSrc(loadedImage.imageSrc);
+            setImgWidth(loadedImage.width);
+            setImgHeight(loadedImage.height);
+          }
+        } catch (err) {
+          console.error("Failed to load preset image", err);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load image preset", err);
     }
   };
 
-  // Load Project JSON
+  const loadVideoPreset = async () => {
+    const selected = await open({
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+
+    if (!selected || typeof selected !== "string") {
+      return;
+    }
+
+    try {
+      const content = await readTextFile(selected);
+      const parsed: unknown = JSON.parse(content);
+
+      if (!isRecord(parsed)) {
+        throw new Error("Preset file is not a valid object.");
+      }
+
+      const mergedSettings = mergeSettingsWithBase(settings, parsed.settings);
+      setSettings(mergedSettings);
+
+      if (typeof parsed.count === "number" && Number.isFinite(parsed.count)) {
+        setCount(parsed.count);
+      }
+
+      if (typeof parsed.kaleidoType === "string") {
+        setKaleidoType(parsed.kaleidoType);
+      }
+    } catch (err) {
+      console.error("Failed to load video preset", err);
+    }
+  };
+
   const loadProject = async () => {
     const selected = await open({
       filters: [{ name: "JSON", extensions: ["json"] }],
@@ -247,42 +449,48 @@ function App() {
         throw new Error("Project file is not a valid object.");
       }
 
-      const imagePath =
+      const nextImagePath =
         typeof parsed.imagePath === "string" ? parsed.imagePath : "";
 
-      const count =
+      const nextCount =
         typeof parsed.count === "number" && Number.isFinite(parsed.count)
           ? parsed.count
           : 0;
 
-      const kaleidoType =
+      const nextKaleidoType =
         typeof parsed.kaleidoType === "string" ? parsed.kaleidoType : "default";
 
-      const settings = mergeSettingsWithDefaults(parsed.settings);
+      const nextSettings = mergeSettingsWithBase(DEFAULT_SETTINGS, parsed.settings);
 
-      setCount(count);
-      setSettings(settings);
-      setKaleidoType(kaleidoType);
+      setCount(nextCount);
+      setSettings(nextSettings);
+      setKaleidoType(nextKaleidoType);
 
-      if (imagePath) {
-        setImagePath(imagePath);
-
-        const assetUrl = convertFileSrc(imagePath);
-        setImageSrc(assetUrl);
-
-        const img = new Image();
-        img.src = assetUrl;
-
+      if (nextImagePath) {
         try {
-          await img.decode();
-          setImgWidth(img.naturalWidth);
-          setImgHeight(img.naturalHeight);
+          const loadedImage = await loadImageFromPath(nextImagePath);
+
+          if (loadedImage) {
+            setImagePath(loadedImage.imagePath);
+            setImageSrc(loadedImage.imageSrc);
+            setImgWidth(loadedImage.width);
+            setImgHeight(loadedImage.height);
+          }
         } catch (err) {
           console.error("Failed to load project image", err);
         }
       }
     } catch (err) {
       console.error("Failed to load project file", err);
+    }
+  };
+
+  // Save Project JSON
+  const saveProject = async () => {
+    const filePath = await save({ filters: [{ name: 'JSON', extensions: ['json'] }] });
+    if (filePath) {
+      const data = JSON.stringify({ imagePath, count, settings, kaleidoType });
+      await writeTextFile(filePath, data);
     }
   };
 
@@ -456,7 +664,15 @@ function App() {
           </div>
 
           <Button onClick={handlePickFile} className="w-full">Select Image</Button>
-          <Button onClick={resetSettings} className="w-full">Reset Controls</Button>
+          <Button onClick={resetImageSettings} className="w-full">Reset Controls</Button>
+          <div className="mt-auto grid grid-cols-2 gap-2">
+            <Button variant="ghost" size="sm" onClick={loadImagePreset}>Load Image Preset</Button>
+            <Button variant="ghost" size="sm" onClick={saveImagePreset}>Save Image Preset</Button>
+          </div>
+          <div className="mt-auto grid grid-cols-2 gap-2">
+            <Button variant="ghost" size="sm" onClick={loadProject}>Load Project</Button>
+            <Button variant="ghost" size="sm" onClick={saveProject}>Save Project</Button>
+          </div>
           <hr className="opacity-20" />
 
           {/* Group 1: Geometry */}
@@ -615,13 +831,20 @@ function App() {
           </div>
 
           <div className="mt-auto grid grid-cols-2 gap-2">
-            <Button variant="ghost" size="sm" onClick={saveProject}>Save Project</Button>
+            <Button variant="ghost" size="sm" onClick={loadImagePreset}>Load Image Preset</Button>
+            <Button variant="ghost" size="sm" onClick={saveImagePreset}>Save Image Preset</Button>
+          </div>
+          <div className="mt-auto grid grid-cols-2 gap-2">
             <Button variant="ghost" size="sm" onClick={loadProject}>Load Project</Button>
+            <Button variant="ghost" size="sm" onClick={saveProject}>Save Project</Button>
           </div>
 
           <hr className="opacity-20" />
-
-          {/* Group 1: Geometry */}
+          <div className="mt-auto grid grid-cols-2 gap-2">
+            <Button variant="ghost" size="sm" onClick={loadVideoPreset}>Load Video Preset</Button>
+            <Button variant="ghost" size="sm" onClick={saveVideoPreset}>Save Video Preset</Button>
+          </div>
+          {/* Video settings */}
           <div className="space-y-4">
             <div className="flex justify-between items-center"><label>Video Settings</label>
             </div>
@@ -742,6 +965,15 @@ function App() {
           <div className="flex flex-col gap-2 pt-4">
             <Button onClick={handleVideo} className="bg-primary">Export MP4</Button>
           </div>
+          <div className="mt-auto grid grid-cols-2 gap-2">
+            <Button variant="ghost" size="sm" onClick={loadImagePreset}>Load Image Preset</Button>
+            <Button variant="ghost" size="sm" onClick={saveImagePreset}>Save Image Preset</Button>
+          </div>
+          <div className="mt-auto grid grid-cols-2 gap-2">
+            <Button variant="ghost" size="sm" onClick={loadProject}>Load Project</Button>
+            <Button variant="ghost" size="sm" onClick={saveProject}>Save Project</Button>
+          </div>
+          <Button onClick={resetVideoSettings} className="w-full">Reset Video Settings</Button>
         </aside>
 
         {/* Main Content: Vertical Rows */}
