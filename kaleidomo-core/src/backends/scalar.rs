@@ -130,8 +130,6 @@ impl KaleidoBackend for f32 {
         dx: Self,
         dy: Self,
         width_over_2: Self,
-        center_x: Self,
-        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -158,8 +156,6 @@ impl KaleidoBackend for f32 {
         dx: Self,
         dy: Self,
         width_over_2: Self,
-        center_x: Self,
-        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -192,8 +188,6 @@ impl KaleidoBackend for f32 {
         dx: Self,
         dy: Self,
         width_over_2: Self,
-        center_x: Self,
-        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -232,8 +226,6 @@ impl KaleidoBackend for f32 {
         dx: Self,
         dy: Self,
         width_over_2: Self,
-        center_x: Self,
-        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -373,13 +365,13 @@ impl DaydreamBackend for f32 {
         g: Self::IntegerRegister, 
         b: Self::IntegerRegister, 
         two_fifty_five: Self, 
-        hundred: Self, 
-        zero: Self, 
-        six: Self, 
-        sixty: Self,
-        one: Self,
-        two: Self,
-        four: Self,
+        _hundred: Self, 
+        _zero: Self, 
+        _six: Self, 
+        _sixty: Self,
+        _one: Self,
+        _two: Self,
+        _four: Self,
     ) -> (Self, Self, Self) {
         let (r, g, b) = (r as f32 / two_fifty_five, g as f32 / two_fifty_five, b as f32 / two_fifty_five);
         let (c_max, c_min, sub_1, sub_2, add) = match r >= g {
@@ -466,7 +458,7 @@ impl DaydreamBackend for f32 {
             b: Self::IntegerRegister,
             a: Self::IntegerRegister,
         ) -> [[u8; 4]; Self::NUM_FLOATS] {
-        [[r, g, b, 255]]
+        [[r, g, b, a]]
     }
 
     #[inline]
@@ -479,25 +471,29 @@ impl DaydreamBackend for f32 {
         sw: u32,
         sh: u32,
         hue_shift_vec: Self,
-        two_fifty_five: Self,
-        hundred: Self,
-        zero: Self,
-        six: Self,
-        sixty: Self,
-        one: Self,
-        two: Self,
-        four: Self,
+        _two_fifty_five: Self,
+        _hundred: Self,
+        _zero: Self,
+        _six: Self,
+        _sixty: Self,
+        _one: Self,
+        _two: Self,
+        _four: Self,
         three_sixty: Self,
-        five: Self,
-        three: Self,
+        _five: Self,
+        _three: Self,
     ) {
         unsafe {
             let sx_i = sx.round() as u32;
             let sy_i = sy.round() as u32;
             if sx_i < sw && sy_i < sh {
                 let pixel = source.get_pixel(sx_i, sy_i);
-                let (h, s, v) = Self::rgb_to_hsv(pixel.0[0], pixel.0[1], pixel.0[2], 255.0, 100.0, 0.0, 6.0, 60.0, 1.0, 2.0, 4.0);
-                output[0..4].copy_from_slice(&pixel.0);
+                let (r, g, b, a) = (pixel.0[0], pixel.0[1], pixel.0[2], pixel.0[3]);
+                let (mut h, s, v) = Self::rgb_to_hsv(r, g, b, 255.0, 100.0, 0.0, 6.0, 60.0, 1.0, 2.0, 4.0);
+
+                h = Self::adjust_hue(h, hue_shift_vec, three_sixty);
+                let (r, g, b) = Self::hsv_to_rgb(h, s, v, 100.0, 60.0, 255.0, 0.0, 5.0, 4.0, 3.0, 2.0, 1.0);
+                output[0..4].copy_from_slice(&[r, g, b, a]);
             }
         }
     }

@@ -5,7 +5,7 @@ pub use core::arch::x86_64::*;
 
 use image::GenericImageView;
 
-use crate::{DynamicImage, KaleidoBackend};
+use crate::{DaydreamBackend, DynamicImage, KaleidoBackend};
 
 #[target_feature(enable = "avx2")]
 #[inline]
@@ -116,7 +116,7 @@ unsafe fn modulo(x: __m256, y: __m256) -> __m256 {
 }
 
 impl KaleidoBackend for __m256 {
-    const NUM_FLOATS: usize = 8;
+    const NUM_FLOATS: usize = size_of::<__m256>() / size_of::<f32>();
     #[target_feature(enable = "avx2")]
     #[inline]
     #[cfg(test)]
@@ -339,15 +339,15 @@ impl KaleidoBackend for __m256 {
             let sx_i = _mm256_cvtps_epi32(sx);
             let sy_i = _mm256_cvtps_epi32(sy);
 
-            let mut xs = [0i32; 8];
-            let mut ys = [0i32; 8];
-            let mut m = [0i32; 8];
+            let mut xs = [0i32; Self::NUM_FLOATS];
+            let mut ys = [0i32; Self::NUM_FLOATS];
+            let mut m = [0i32; Self::NUM_FLOATS];
 
             _mm256_storeu_si256(xs.as_mut_ptr() as *mut __m256i, sx_i);
             _mm256_storeu_si256(ys.as_mut_ptr() as *mut __m256i, sy_i);
             _mm256_storeu_si256(m.as_mut_ptr() as *mut __m256i, _mm256_castps_si256(v_mask));
 
-            for i in 0..8 {
+            for i in 0..Self::NUM_FLOATS {
                 if m[i] != 0 {
                     let x = xs[i] as usize;
                     let y = ys[i] as usize;
@@ -364,7 +364,7 @@ impl KaleidoBackend for __m256 {
     unsafe fn map_square(
             dx: Self,
             dy: Self,
-            center: Self,
+            width_over_2: Self,
             slice_angle: Self,
             two_pi: Self,
             tile_count: Self,
@@ -377,7 +377,7 @@ impl KaleidoBackend for __m256 {
             let two = Self::load_with_single_f32(2.0);
             let half = Self::load_with_single_f32(0.5);
             
-            let screen_size = _mm256_mul_ps(center, two);
+            let screen_size = _mm256_mul_ps(width_over_2, two);
             let tile_size = _mm256_div_ps(screen_size, tile_count);
             let half = _mm256_mul_ps(tile_size, half);
 
@@ -395,7 +395,7 @@ impl KaleidoBackend for __m256 {
                 ),
                 half
             );
-            Self::source_space_rotation(local_x, local_y, rotation, tx, ty, half, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_x, local_y, rotation, tx, ty, half, two_pi, slice_angle, width_over_2, zoom)
         }
     }
     #[target_feature(enable = "avx2")]
@@ -403,7 +403,7 @@ impl KaleidoBackend for __m256 {
     unsafe fn map_diamond(
             dx: Self,
             dy: Self,
-            center: Self,
+            width_over_2: Self,
             slice_angle: Self,
             two_pi: Self,
             tile_count: Self,
@@ -416,7 +416,7 @@ impl KaleidoBackend for __m256 {
             let two = Self::load_with_single_f32(2.0);
             let half = Self::load_with_single_f32(0.5);
 
-            let screen_size = _mm256_mul_ps(center, two);
+            let screen_size = _mm256_mul_ps(width_over_2, two);
             let tile = _mm256_div_ps(screen_size, tile_count);
             let half = _mm256_mul_ps(tile, half);
 
@@ -439,7 +439,7 @@ impl KaleidoBackend for __m256 {
                 half
             );
 
-            Self::source_space_rotation(local_u, local_v, rotation, tx, ty, half, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_u, local_v, rotation, tx, ty, half, two_pi, slice_angle, width_over_2, zoom)
         }
     }
     #[target_feature(enable = "avx2")]
@@ -447,7 +447,7 @@ impl KaleidoBackend for __m256 {
     unsafe fn map_hexagonal(
             dx: Self,
             dy: Self,
-            center: Self,
+            width_over_2: Self,
             slice_angle: Self,
             two_pi: Self,
             tile_count: Self,
@@ -463,7 +463,7 @@ impl KaleidoBackend for __m256 {
             let half = Self::load_with_single_f32(0.5);
             let one_point_five = Self::load_with_single_f32(1.5);
 
-            let screen_size = _mm256_mul_ps(center, two);
+            let screen_size = _mm256_mul_ps(width_over_2, two);
             let hex_radius = _mm256_div_ps(screen_size, _mm256_mul_ps(sqrt3, tile_count));
 
             let q = _mm256_div_ps(
@@ -499,7 +499,7 @@ impl KaleidoBackend for __m256 {
             let local_x = _mm256_sub_ps(dx, hex_cx);
             let local_y = _mm256_sub_ps(dy, hex_cy);
 
-            Self::source_space_rotation(local_x, local_y, rotation, tx, ty, hex_radius, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_x, local_y, rotation, tx, ty, hex_radius, two_pi, slice_angle, width_over_2, zoom)
         }
     }
     #[target_feature(enable = "avx2")]
@@ -507,7 +507,7 @@ impl KaleidoBackend for __m256 {
     unsafe fn map_hexagonal_flat_top(
             dx: Self,
             dy: Self,
-            center: Self,
+            width_over_2: Self,
             slice_angle: Self,
             two_pi: Self,
             tile_count: Self,
@@ -523,7 +523,7 @@ impl KaleidoBackend for __m256 {
             let half = Self::load_with_single_f32(0.5);
             let one_point_five = Self::load_with_single_f32(1.5);
 
-            let screen_size = _mm256_mul_ps(center, two);
+            let screen_size = _mm256_mul_ps(width_over_2, two);
             let hex_radius = _mm256_div_ps(screen_size, _mm256_mul_ps(one_point_five, tile_count));
 
             let q = _mm256_div_ps(
@@ -562,7 +562,7 @@ impl KaleidoBackend for __m256 {
             let local_y = _mm256_sub_ps(dy, hex_cy);
 
 
-            Self::source_space_rotation(local_x, local_y, rotation, tx, ty, hex_radius, two_pi, slice_angle, center, zoom)
+            Self::source_space_rotation(local_x, local_y, rotation, tx, ty, hex_radius, two_pi, slice_angle, width_over_2, zoom)
         }
     }
     #[target_feature(enable = "avx2")]
@@ -686,6 +686,314 @@ impl KaleidoBackend for __m256 {
                 _mm256_add_ps(rx, triangle_center_x),
                 _mm256_add_ps(ry, triangle_center_y)
             )
+        }
+    }
+}
+
+impl DaydreamBackend for __m256 {
+    type IntegerRegister = __m256i;
+
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn load_pixels(input: &[[u8; 4]]) -> (Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister) {
+        unsafe {
+            let mut r = [0u32; Self::NUM_FLOATS];
+            let mut g = [0u32; Self::NUM_FLOATS];
+            let mut b = [0u32; Self::NUM_FLOATS];
+            let mut a = [0u32; Self::NUM_FLOATS];
+
+            for i in 0..Self::NUM_FLOATS {
+                r[i] = input[i][0] as u32;
+                g[i] = input[i][1] as u32;
+                b[i] = input[i][2] as u32;
+                a[i] = input[i][3] as u32;
+            }
+
+            (
+                _mm256_loadu_si256(r.as_ptr() as *const __m256i),
+                _mm256_loadu_si256(g.as_ptr() as *const __m256i),
+                _mm256_loadu_si256(b.as_ptr() as *const __m256i),
+                _mm256_loadu_si256(a.as_ptr() as *const __m256i),
+            )
+        }
+    }
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn rgb_to_hsv(
+            r: Self::IntegerRegister, 
+            g: Self::IntegerRegister, 
+            b: Self::IntegerRegister, 
+            two_fifty_five: Self, 
+            hundred: Self, 
+            zero: Self, 
+            six: Self, 
+            sixty: Self,
+            one: Self,
+            two: Self,
+            four: Self,
+        ) -> (Self, Self, Self) {
+        unsafe {
+            let r = _mm256_div_ps(_mm256_cvtepi32_ps(r), two_fifty_five);
+            let g = _mm256_div_ps(_mm256_cvtepi32_ps(g), two_fifty_five);
+            let b = _mm256_div_ps(_mm256_cvtepi32_ps(b), two_fifty_five);
+            
+            let r_max_mask = _mm256_and_ps(_mm256_cmp_ps(r, g, _CMP_GT_OS), _mm256_cmp_ps(r, b, _CMP_GT_OS));
+            let g_max_mask = _mm256_and_ps(_mm256_cmp_ps(g, r, _CMP_GT_OS), _mm256_cmp_ps(g, b, _CMP_GT_OS));
+            //let b_max_mask = _mm256_and_ps(_mm256_cmp_ps(b, r, _CMP_GT_OS), _mm256_cmp_ps(b, g, _CMP_GT_OS));
+
+            let c_max = _mm256_max_ps(_mm256_max_ps(r, g), b);
+            let c_min = _mm256_min_ps(_mm256_min_ps(r, g), b);
+            let delta = _mm256_sub_ps(c_max, c_min);
+
+            let sub_1_rb = _mm256_blendv_ps(r, g, r_max_mask);
+            let sub_1 = _mm256_blendv_ps(sub_1_rb, b, g_max_mask);
+
+            let sub_2_rb = _mm256_blendv_ps(g, b, r_max_mask);
+            let sub_2 = _mm256_blendv_ps(sub_2_rb, r, g_max_mask);
+
+            let add_rb = _mm256_blendv_ps(four, zero, r_max_mask);
+            let add = _mm256_blendv_ps(add_rb, two, g_max_mask);
+
+            let delta_zero_mask = _mm256_cmp_ps(delta, zero, _CMP_EQ_OS);
+            let cmax_zero_mask = _mm256_cmp_ps(c_max, zero, _CMP_EQ_OS);
+            let add_positive_mask = _mm256_cmp_ps(add, zero, _CMP_GT_OS);
+
+            let safe_delta = _mm256_blendv_ps(delta, one, delta_zero_mask);
+            let safe_cmax = _mm256_blendv_ps(c_max, one, cmax_zero_mask);
+
+            let sub = _mm256_sub_ps(sub_1, sub_2);
+            let div = _mm256_div_ps(sub, safe_delta);
+
+            let h_add = _mm256_mul_ps(sixty, _mm256_add_ps(div, add));
+            let h_mod = _mm256_mul_ps(sixty, modulo(div, six));
+            let h_nonzero = _mm256_blendv_ps(h_mod, h_add, add_positive_mask);
+            let h = _mm256_blendv_ps(h_nonzero, zero, delta_zero_mask);
+
+            let s_div = _mm256_div_ps(delta, safe_cmax);
+            let s = _mm256_blendv_ps(s_div, c_max, cmax_zero_mask);
+            let v = _mm256_round_ps(_mm256_mul_ps(c_max, hundred), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+
+            (h, s, v)
+        }
+    }
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn hsv_to_rgb(
+            mut h: Self, 
+            s: Self, 
+            mut v: Self,
+            hundred: Self,
+            sixty: Self,
+            two_fifty_five: Self,
+            zero: Self,
+            five: Self,
+            four: Self,
+            three: Self,
+            two: Self,
+            one: Self,
+        ) -> (Self::IntegerRegister, Self::IntegerRegister, Self::IntegerRegister) {
+        unsafe {
+            h = _mm256_div_ps(h, sixty);
+            v = _mm256_div_ps(v, hundred);
+
+            let c = _mm256_mul_ps(v, s);
+            let abs_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+            let sub = _mm256_sub_ps(
+                modulo(h, two),
+                one
+            );
+            let abs = _mm256_and_ps(sub, abs_mask);
+            let x = _mm256_mul_ps(
+                c,
+                _mm256_sub_ps(
+                    one,
+                    abs
+                )
+            );
+            let m = _mm256_sub_ps(v, c);
+
+            let lt1 = _mm256_cmp_ps(h, one, _CMP_LT_OS);
+            let lt2 = _mm256_cmp_ps(h, two, _CMP_LT_OS);
+            let lt3 = _mm256_cmp_ps(h, three, _CMP_LT_OS);
+            let lt4 = _mm256_cmp_ps(h, four, _CMP_LT_OS);
+            let lt5 = _mm256_cmp_ps(h, five, _CMP_LT_OS);
+
+            let rp_lt2 = _mm256_blendv_ps(x, c, lt1);
+            let gp_lt2 = _mm256_blendv_ps(c, x, lt1);
+            let bp_lt2 = zero;
+
+            let rp_lt3 = _mm256_blendv_ps(zero, rp_lt2, lt2);
+            let gp_lt3 = _mm256_blendv_ps(c, gp_lt2, lt2);
+            let bp_lt3 = _mm256_blendv_ps(x, bp_lt2, lt2);
+
+            let rp_lt5 = _mm256_blendv_ps(x, zero, lt4);
+            let gp_lt5 = _mm256_blendv_ps(zero, x, lt4);
+            let bp_lt5 = c;
+
+            let rp_ge3 = _mm256_blendv_ps(c, rp_lt5, lt5);
+            let gp_ge3 = _mm256_blendv_ps(zero, gp_lt5, lt5);
+            let bp_ge3 = _mm256_blendv_ps(x, bp_lt5, lt5);
+
+            let rp = _mm256_blendv_ps(rp_ge3, rp_lt3, lt3);
+            let gp = _mm256_blendv_ps(gp_ge3, gp_lt3, lt3);
+            let bp = _mm256_blendv_ps(bp_ge3, bp_lt3, lt3);
+
+            let r = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_add_ps(rp, m), two_fifty_five));
+            let g = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_add_ps(gp, m), two_fifty_five));
+            let b = _mm256_cvtps_epi32(_mm256_mul_ps(_mm256_add_ps(bp, m), two_fifty_five));
+
+            (
+                r, g, b
+            )
+        }
+    }
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn adjust_hue(
+            h: Self,
+            hue_shift: Self,
+            three_sixty: Self,
+        ) -> Self {
+        unsafe {
+            return modulo(_mm256_add_ps(h, hue_shift), three_sixty);
+        }
+    }
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn extract_pixels(
+            r: Self::IntegerRegister, 
+            g: Self::IntegerRegister, 
+            b: Self::IntegerRegister,
+            a: Self::IntegerRegister,
+        ) -> [[u8; 4]; Self::NUM_FLOATS] {
+        unsafe {
+            let mut arr = [[0u8; 4]; Self::NUM_FLOATS];
+
+            for (i, reg) in [r, g, b, a].iter().enumerate() {
+                let mut temp = [0u32; Self::NUM_FLOATS];
+                _mm256_storeu_si256(temp.as_mut_ptr() as *mut __m256i, *reg);
+                for j in 0..Self::NUM_FLOATS {
+                    arr[j][i] = temp[j] as u8;
+                }
+            }
+            arr
+        }
+    }
+
+    #[target_feature(enable = "avx,avx2")]
+    #[inline]
+    unsafe fn store_pixel_hue_shift(
+        buff: &mut [u8],
+        _x: u32,
+        sx: Self,
+        sy: Self,
+        source: &image::DynamicImage,
+        source_width: u32,
+        source_height: u32,
+        hue_shift_vec: Self,
+        two_fifty_five: Self,
+        hundred: Self,
+        zero: Self,
+        six: Self,
+        sixty: Self,
+        one: Self,
+        two: Self,
+        four: Self,
+        three_sixty: Self,
+        five: Self,
+        three: Self,
+    ) {
+        use std::arch::x86_64::*;
+
+        unsafe {
+            let zero_f = _mm256_set1_ps(0.0);
+            let sw_v = _mm256_set1_ps(source_width as f32);
+            let sh_v = _mm256_set1_ps(source_height as f32);
+
+            // valid if:
+            //   0.0 <= sx < source_width
+            //   0.0 <= sy < source_height
+            let sx_ge_0 = _mm256_cmp_ps(sx, zero_f, _CMP_GE_OQ);
+            let sx_lt_w = _mm256_cmp_ps(sx, sw_v, _CMP_LT_OQ);
+            let sy_ge_0 = _mm256_cmp_ps(sy, zero_f, _CMP_GE_OQ);
+            let sy_lt_h = _mm256_cmp_ps(sy, sh_v, _CMP_LT_OQ);
+
+            let sx_valid = _mm256_and_ps(sx_ge_0, sx_lt_w);
+            let sy_valid = _mm256_and_ps(sy_ge_0, sy_lt_h);
+            let valid_mask = _mm256_and_ps(sx_valid, sy_valid);
+
+            // 8-bit lane mask; bit i = 1 means lane i is valid
+            let lane_mask = _mm256_movemask_ps(valid_mask) as u32;
+
+            // Clamp before converting to ints so that even invalid lanes
+            // produce safe coordinates. We still will not read invalid lanes.
+            let max_x = _mm256_set1_ps(source_width.saturating_sub(1) as f32);
+            let max_y = _mm256_set1_ps(source_height.saturating_sub(1) as f32);
+
+            let sx_safe = _mm256_max_ps(zero_f, _mm256_min_ps(sx, max_x));
+            let sy_safe = _mm256_max_ps(zero_f, _mm256_min_ps(sy, max_y));
+
+            // Truncate toward zero, matching the nonnegative-clamped behavior.
+            let sx_i = _mm256_cvttps_epi32(sx_safe);
+            let sy_i = _mm256_cvttps_epi32(sy_safe);
+
+            let mut xs_i32 = [0i32; Self::NUM_FLOATS];
+            let mut ys_i32 = [0i32; Self::NUM_FLOATS];
+
+            _mm256_storeu_si256(xs_i32.as_mut_ptr() as *mut __m256i, sx_i);
+            _mm256_storeu_si256(ys_i32.as_mut_ptr() as *mut __m256i, sy_i);
+
+            let mut pixels = [[0u8; 4]; Self::NUM_FLOATS];
+
+            for i in 0..Self::NUM_FLOATS {
+                if ((lane_mask >> i) & 1) != 0 {
+                    let px = source.get_pixel(xs_i32[i] as u32, ys_i32[i] as u32).0;
+                    pixels[i] = px;
+                }
+            }
+
+            let (r, g, b, a) = Self::load_pixels(&pixels);
+
+            let (mut h, s, v) = Self::rgb_to_hsv(
+                r,
+                g,
+                b,
+                two_fifty_five,
+                hundred,
+                zero,
+                six,
+                sixty,
+                one,
+                two,
+                four,
+            );
+
+            h = Self::adjust_hue(h, hue_shift_vec, three_sixty);
+
+            let (r, g, b) = Self::hsv_to_rgb(
+                h,
+                s,
+                v,
+                hundred,
+                sixty,
+                two_fifty_five,
+                zero,
+                five,
+                four,
+                three,
+                two,
+                one,
+            );
+
+            let pixels = Self::extract_pixels(r, g, b, a);
+
+            for i in 0..Self::NUM_FLOATS {
+                if ((lane_mask >> i) & 1) != 0 {
+                    let pixel = pixels[i];
+                    let base_idx = i * 4;
+                    buff[base_idx..base_idx + 4].copy_from_slice(&pixel);
+                }
+            }
         }
     }
 }

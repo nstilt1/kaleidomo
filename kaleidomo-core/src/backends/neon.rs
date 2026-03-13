@@ -351,8 +351,6 @@ impl KaleidoBackend for float32x4_t {
         dx: Self,
         dy: Self,
         width_over_2: Self,
-        center_x: Self,
-        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -378,8 +376,6 @@ impl KaleidoBackend for float32x4_t {
         dx: Self,
         dy: Self,
         width_over_2: Self,
-        center_x: Self,
-        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -409,8 +405,6 @@ impl KaleidoBackend for float32x4_t {
         dx: Self,
         dy: Self,
         width_over_2: Self,
-        center_x: Self,
-        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -455,8 +449,6 @@ impl KaleidoBackend for float32x4_t {
         dx: Self,
         dy: Self,
         width_over_2: Self,
-        center_x: Self,
-        center_y: Self,
         slice_angle: Self,
         two_pi: Self,
         tile_count: Self,
@@ -648,7 +640,7 @@ impl DaydreamBackend for float32x4_t {
 
         let r_max_mask = vandq_u32(vcgeq_f32(r, g), vcgeq_f32(r, b));
         let g_max_mask = vandq_u32(vcgtq_f32(g, r), vcgeq_f32(g, b));
-        let b_max_mask = vmvnq_u32(vorrq_u32(r_max_mask, g_max_mask));
+        //let b_max_mask = vmvnq_u32(vorrq_u32(r_max_mask, g_max_mask));
 
         let c_max = vmaxq_f32(vmaxq_f32(r, g), b);
         let c_min = vminq_f32(vminq_f32(r, g), b);
@@ -810,7 +802,7 @@ impl DaydreamBackend for float32x4_t {
     #[inline]
     unsafe fn store_pixel_hue_shift(
         buff: &mut [u8],
-        x: u32,
+        _x: u32,
         sx: Self,
         sy: Self,
         source: &image::DynamicImage,

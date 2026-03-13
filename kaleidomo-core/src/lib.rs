@@ -1,3 +1,4 @@
+#![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 
 use image::{DynamicImage, GenericImageView};
@@ -66,7 +67,7 @@ pub fn render_kaleidoscope(
     settings: KaleidoSettings,
 ) -> ImageBuffer<Rgba<u8>, Vec<u8>> {
     let (sw, sh) = source.dimensions();
-    let width_over_2 = settings.output_size_w as f32 / 2.0;
+    let _width_over_2 = settings.output_size_w as f32 / 2.0;
     let center_x = settings.output_size_w as f32 / 2.0 + settings.offset_x as f32;
     let center_y = settings.output_size_h as f32 / 2.0 + settings.offset_y as f32;
     let slice_angle = (2.0 * PI) / settings.count as f32;
@@ -202,13 +203,8 @@ use openh264::encoder::Encoder;
 use openh264::formats::{RgbaSliceU8, YUVBuffer};
 use openh264::encoder::EncoderConfig;
 
-trait FrameSink {
-    fn write_rgba_frame(&mut self, rgba: &[u8]) -> std::io::Result<()>;
-    fn finish(self) -> std::io::Result<()>;
-}
-
 use std::fs::{remove_file, File};
-use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use minimp4::Mp4Muxer;
@@ -355,11 +351,11 @@ pub fn render_video_with_auto_backend(
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         if is_x86_feature_detected!("avx2") {
-            return render_video::<backends::avx2::__m256>(source, settings);
+            return render_video::<backends::avx2::__m256>(source, settings, video_settings, path);
         } else if is_x86_feature_detected!("sse2") {
-            return render_video::<backends::sse2::__m128>(source, settings);
+            return render_video::<backends::sse2::__m128>(source, settings, video_settings, path);
         } else {
-            return render_video::<f32>(source, settings);
+            return render_video::<f32>(source, settings, video_settings, path);
         }
     }
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
@@ -452,7 +448,7 @@ fn render_video<B: KaleidoBackend + DaydreamBackend>(
     }
 
     // write still frames at the end
-    for still_frame in 0..video_settings.still_frame_ending {
+    for _still_frame in 0..video_settings.still_frame_ending {
         sink.write_rgba_frame(&rgba)?;
     }
 
@@ -493,7 +489,7 @@ mod tests {
             triangle_rotation_rad: 0.0,
             kaleido_type: KaleidoType::Hexagonal,
             tile_count: 4.0,
-            hue_rotation: 0,
+            hue_rotation: 30,
         };
 
         // 3. Render using Scalar Backend
