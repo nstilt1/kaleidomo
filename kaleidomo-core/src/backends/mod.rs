@@ -17,8 +17,10 @@ pub mod avx2;
 ))]
 pub mod sse2;
 
-//#[cfg(any(not(target_arch = "aarch64"), test, feature = "soft_backend"))]
+#[cfg(any(not(target_arch = "aarch64"), test, feature = "soft_backend"))]
 mod scalar;
+
+pub mod gpu;
 
 pub trait KaleidoBackend: Sized + Copy {
     /// The number of floats that the register can hold.

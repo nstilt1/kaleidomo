@@ -1,6 +1,7 @@
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 
+use anyhow::Context;
 use image::{DynamicImage, GenericImageView};
 mod backends;
 
@@ -10,6 +11,7 @@ use std::f32::consts::PI;
 
 pub use image;
 
+use crate::backends::gpu::GpuBackend;
 pub use crate::backends::{KaleidoBackend, DaydreamBackend, Register, inner_loop};
 
 #[derive(Clone)]
@@ -197,6 +199,25 @@ pub fn render_kaleidoscope_with_backend<B: KaleidoBackend + DaydreamBackend>(
         });
 
     ImageBuffer::from_raw(settings.output_size_w, settings.output_size_h, pixels).unwrap()
+}
+
+pub fn render_kaleidoscope_with_gpu(
+    gpu: &GpuBackend,
+    source: &DynamicImage,
+    settings: KaleidoSettings,
+) -> anyhow::Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
+    let rgba = source.to_rgba8();
+    let (sw, sh) = rgba.dimensions();
+
+    let output_pixels = pollster::block_on(gpu.process_img_with_gpu(
+        rgba.as_raw(),
+        sw,
+        sh,
+        &settings,
+    ))?;
+
+    ImageBuffer::from_raw(settings.output_size_w, settings.output_size_h, output_pixels)
+        .context("GPU returned an invalid output buffer length")
 }
 
 use openh264::encoder::Encoder;

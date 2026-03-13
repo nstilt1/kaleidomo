@@ -4,11 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.102"
+bytemuck = "1.25.0"
 image = "0.24.0"
 minimp4 = "0.1.2"
 openh264 = "0.9.3"
+pollster = "0.4.0"
 rayon = "1.10"
 serde = "1.0.228"
+wgpu = { version = "28.0.0", default-features = false, features = [
+    "std",
+    "wgsl",
+    "dx12",
+    "gles",
+    "metal",
+    "vulkan",
+] }
 
 [features]
 soft_backend = []
