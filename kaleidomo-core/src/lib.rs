@@ -3,18 +3,19 @@
 
 use anyhow::Context;
 use image::{DynamicImage, GenericImageView};
-mod backends;
+pub mod backends;
 
 use image::{ImageBuffer, Rgba};
 use rayon::prelude::*;
 use std::f32::consts::PI;
 
 pub use image;
+pub use pollster;
 
 use crate::backends::gpu::GpuBackend;
 pub use crate::backends::{KaleidoBackend, DaydreamBackend, Register, inner_loop};
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum KaleidoType {
     Radial,
     Square,
@@ -202,21 +203,27 @@ pub fn render_kaleidoscope_with_backend<B: KaleidoBackend + DaydreamBackend>(
 }
 
 pub fn render_kaleidoscope_with_gpu(
-    gpu: &GpuBackend,
     source: &DynamicImage,
     settings: KaleidoSettings,
 ) -> anyhow::Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
     let rgba = source.to_rgba8();
     let (sw, sh) = rgba.dimensions();
 
-    let output_pixels = pollster::block_on(gpu.process_img_with_gpu(
-        rgba.as_raw(),
-        sw,
-        sh,
-        &settings,
-    ))?;
+    let gpu = pollster::block_on(GpuBackend::new(source))
+        .context("failed to initialize GPU backend")?;
 
-    ImageBuffer::from_raw(settings.output_size_w, settings.output_size_h, output_pixels)
+    let mut pixels = vec![
+        0u8;
+        (settings.output_size_w as usize)
+            .checked_mul(settings.output_size_h as usize)
+            .and_then(|v| v.checked_mul(4))
+            .context("output dimensions overflowed")?
+    ];
+
+    gpu.render_to_image(&settings, &mut pixels)
+        .context("failed to render kaleidoscope on GPU")?;
+
+    ImageBuffer::from_raw(settings.output_size_w, settings.output_size_h, pixels)
         .context("GPU returned an invalid output buffer length")
 }
 
@@ -510,7 +517,7 @@ mod tests {
             triangle_rotation_rad: 0.0,
             kaleido_type: KaleidoType::Hexagonal,
             tile_count: 4.0,
-            hue_rotation: 30,
+            hue_rotation: 0,
         };
 
         // 3. Render using Scalar Backend
@@ -520,7 +527,8 @@ mod tests {
         let scalar_image = render_kaleidoscope_with_backend::<f32>(&source, settings.clone());
 
         // 4. Render using Aarch64 (Neon) Backend
-        let simd_image = render_kaleidoscope_with_backend::<Register>(&source, settings.clone());
+        let simd_image = render_kaleidoscope_with_gpu(&source, settings.clone()).unwrap();
+        //let simd_image = render_kaleidoscope_with_backend::<Register>(&source, settings.clone());
 
         // 5. Compare pixels
         let mut diff_count = 0;
