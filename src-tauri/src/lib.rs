@@ -1,7 +1,90 @@
 use tauri_plugin_dialog::DialogExt;
 
+use std::sync::Mutex;
+use kaleidomo_core::{KaleidoSettings, anyhow::Context, pollster};
+use image::DynamicImage;
+use kaleidomo_core::log::error;
+use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use kaleidomo_core::backends::gpu::GpuBackend;
+pub struct AppState {
+    gpu: Mutex<GpuBackend>,
+    pub use_gpu_acceleration: Mutex<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderResponse {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+#[tauri::command]
+async fn init_gpu(state: State<'_, AppState>) -> Result<(), String> {
+    let backend = GpuBackend::new()
+        .await
+        .map_err(|e| format!("failed to initialize GPU backend: {e}"))?;
+
+    let mut guard = state
+        .gpu
+        .lock()
+        .map_err(|_| "failed to lock GPU state".to_string())?;
+
+    *guard = backend;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_source_image_from_path(
+    state: State<'_, AppState>,
+    image_path: String,
+) -> Result<(), String> {
+    let image = image::open(&image_path)
+        .map_err(|e| format!("failed to open image '{}': {e}", image_path))?;
+
+    let mut guard = state
+        .gpu
+        .lock()
+        .map_err(|_| "failed to lock GPU state".to_string())?;
+
+    guard
+        .set_source_image(&image)
+        .map_err(|e| format!("failed to upload source image: {e}"))
+}
+
+#[tauri::command]
+fn render_kaleido_with_gpu(
+    state: State<'_, AppState>,
+    settings: KaleidoSettings,
+) -> Result<RenderResponse, String> {
+    let mut guard = state
+        .gpu
+        .lock()
+        .map_err(|_| "failed to lock GPU state".to_string())?;
+
+    let len = (settings.output_size_w as usize)
+        .checked_mul(settings.output_size_h as usize)
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| "output dimensions overflowed".to_string())?;
+
+    let mut output = vec![0u8; len];
+
+    guard
+        .render_into_buffer(&settings, &mut output)
+        .map_err(|e| format!("failed to render kaleidoscope: {e}"))?;
+
+    Ok(RenderResponse {
+        width: settings.output_size_w,
+        height: settings.output_size_h,
+        rgba: output,
+    })
+}
+
 #[tauri::command]
 async fn export_kaleidoscope(
+    state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
     path: String,
     x: f32,
@@ -53,11 +136,50 @@ async fn export_kaleidoscope(
         hue_rotation
     };
 
-    let result_buffer = kaleidomo_core::render_kaleidoscope_with_auto_backend(&img, settings);
+    let use_gpu = {
+        let guard = state
+            .use_gpu_acceleration
+            .lock()
+            .map_err(|_| "failed to lock GPU preference state".to_string())?;
+        *guard
+    };
 
-    // 3. Save directly to the chosen path
-    result_buffer.save(path_to_save.to_string())
-        .map_err(|e| format!("Failed to save image: {}", e))?;
+    if use_gpu {
+        let mut gpu = state
+            .gpu
+            .lock()
+            .map_err(|_| "failed to lock GPU backend".to_string())?;
+
+        gpu.set_source_image(&img).map_err(|e| e.to_string())?;
+
+        let mut pixels = vec![
+            0u8;
+            (output_size_w as usize)
+                .checked_mul(output_size_h as usize)
+                .and_then(|v| v.checked_mul(4))
+                .ok_or_else(|| "output dimensions overflowed".to_string())?
+        ];
+
+        gpu.render_into_buffer(&settings, &mut pixels)
+            .map_err(|e| e.to_string())?;
+
+        let result_buffer = image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
+            .ok_or_else(|| "failed to create image from GPU output".to_string())?;
+
+        result_buffer
+            .save(path_to_save.to_string())
+            .map_err(|e| format!("Failed to save image: {}", e))?;
+    } else {
+        let result_buffer =
+            kaleidomo_core::render_kaleidoscope_with_auto_backend(
+                &img,
+                settings,
+            );
+
+        result_buffer
+            .save(path_to_save.to_string())
+            .map_err(|e| format!("Failed to save image: {}", e))?;
+    }
 
     Ok(format!("Successfully exported to {}", path_to_save))
 }
@@ -68,11 +190,11 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
-use base64::{Engine as _, engine::general_purpose};
-use std::io::Cursor;
+use base64::Engine as _;
 
 #[tauri::command]
 async fn generate_kaleidoscope(
+    state: tauri::State<'_, AppState>,
     path: String,
     x: f32,
     y: f32,
@@ -112,14 +234,46 @@ async fn generate_kaleidoscope(
         hue_rotation,
     };
 
-    let output = kaleidomo_core::render_kaleidoscope_with_auto_backend(&img, settings);
+    let use_gpu = {
+        let guard = state
+            .use_gpu_acceleration
+            .lock()
+            .map_err(|_| "failed to lock GPU preference state".to_string())?;
+        *guard
+    };
+
+    let output = if use_gpu {
+        let mut gpu = state
+            .gpu
+            .lock()
+            .map_err(|_| "failed to lock GPU backend".to_string())?;
+
+        gpu.set_source_image(&img).map_err(|e| e.to_string())?;
+
+        let mut pixels = vec![
+            0u8;
+            (output_size_w as usize)
+                .checked_mul(output_size_h as usize)
+                .and_then(|v| v.checked_mul(4))
+                .ok_or_else(|| "output dimensions overflowed".to_string())?
+        ];
+
+        gpu.render_into_buffer(&settings, &mut pixels)
+            .map_err(|e| e.to_string())?;
+
+        image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
+            .ok_or_else(|| "failed to create image from GPU output".to_string())?
+    } else {
+        kaleidomo_core::render_kaleidoscope_with_auto_backend(&img, settings)
+    };
 
     // 3. Convert RgbaImage to Base64 so React can show it in an <img /> tag
-    let mut buffer = Cursor::new(Vec::new());
-    output.write_to(&mut buffer, image::ImageFormat::Png)
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    output
+        .write_to(&mut buffer, image::ImageFormat::Png)
         .map_err(|e| e.to_string())?;
-    
-    let base64_str = general_purpose::STANDARD.encode(buffer.into_inner());
+
+    let base64_str = base64::engine::general_purpose::STANDARD.encode(buffer.into_inner());
     Ok(format!("data:image/png;base64,{}", base64_str))
 }
 
@@ -208,12 +362,56 @@ async fn generate_video(
     Ok(format!("data:video/mp4"))
 }
 
+#[tauri::command]
+fn set_use_gpu_acceleration(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut guard = state
+        .use_gpu_acceleration
+        .lock()
+        .map_err(|_| "failed to lock GPU preference state".to_string())?;
+
+    *guard = enabled;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_use_gpu_acceleration(
+    state: tauri::State<'_, AppState>,
+) -> Result<bool, String> {
+    let guard = state
+        .use_gpu_acceleration
+        .lock()
+        .map_err(|_| "failed to lock GPU preference state".to_string())?;
+
+    Ok(*guard)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let backend = pollster::block_on(GpuBackend::new()).unwrap_or_else(|e| {
+        error!("failed to create initial GpuBackend: {e}");
+        panic!("failed to create initial GpuBackend: {e}");
+    });
+
     tauri::Builder::default()
+        .manage(AppState {
+            gpu: Mutex::new(backend),
+            use_gpu_acceleration: Mutex::new(true),
+        })
         .plugin(tauri_plugin_fs::init()) // For saving later
         .plugin(tauri_plugin_dialog::init()) // For picking files
-        .invoke_handler(tauri::generate_handler![generate_kaleidoscope, generate_video, export_kaleidoscope])
+        .invoke_handler(tauri::generate_handler![
+            generate_kaleidoscope, 
+            generate_video, 
+            export_kaleidoscope,
+            init_gpu,
+            set_source_image_from_path,
+            render_kaleido_with_gpu,
+            set_use_gpu_acceleration,
+            get_use_gpu_acceleration,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

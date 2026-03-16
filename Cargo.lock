@@ -2158,6 +2158,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "image",
+ "log",
  "minimp4",
  "openh264",
  "pollster",
