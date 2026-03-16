@@ -1,24 +1,43 @@
-use anyhow::{bail, Context, Result};
-use image::{DynamicImage};
+use std::num::NonZeroU64;
+use std::sync::mpsc;
+
+use anyhow::{anyhow, bail, Context, Result};
+use image::DynamicImage;
+use log::{debug, error, info, warn};
 use wgpu::util::DeviceExt;
 
 use crate::{KaleidoSettings, KaleidoType};
 
 pub struct GpuBackend {
-    device: wgpu::Device,
+    pub device: wgpu::Device,
     queue: wgpu::Queue,
-
-    pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::ComputePipeline,
 
-    input_texture: wgpu::Texture,
-    input_view: wgpu::TextureView,
-    input_width: u32,
-    input_height: u32,
+    source: Option<SourceImageGpu>,
+    output: Option<OutputResources>,
+    last_settings: Option<GpuKaleidoSettings>,
+}
+
+struct SourceImageGpu {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
+
+struct OutputResources {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    readback_buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    padded_bytes_per_row: u32,
+    cpu_buffer: Vec<u8>,
 }
 
 impl GpuBackend {
-    pub async fn new(source: &DynamicImage) -> Result<Self> {
+    pub async fn new() -> Result<Self> {
         let instance = wgpu::Instance::default();
 
         let adapter = instance
@@ -44,11 +63,13 @@ impl GpuBackend {
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("kaleidomo.wgsl"));
 
+        let settings_min_binding_size = non_zero_u64(std::mem::size_of::<GpuKaleidoSettings>() as u64)
+            .context("GpuKaleidoSettings size cannot be zero")?;
+
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("kaleidomo.bind_group_layout"),
                 entries: &[
-                    // 0: input texture
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::COMPUTE,
@@ -59,7 +80,6 @@ impl GpuBackend {
                         },
                         count: None,
                     },
-                    // 1: output storage texture
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::COMPUTE,
@@ -70,31 +90,24 @@ impl GpuBackend {
                         },
                         count: None,
                     },
-                    // 2: settings uniform buffer
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
-                            min_binding_size: Some(
-                                std::num::NonZeroU64::new(
-                                    std::mem::size_of::<GpuKaleidoSettings>() as u64
-                                )
-                                .unwrap(),
-                            ),
+                            min_binding_size: Some(settings_min_binding_size),
                         },
                         count: None,
                     },
                 ],
             });
 
-        let pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("kaleidomo.pipeline_layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                immediate_size: 0,
-            });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("kaleidomo.pipeline_layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            immediate_size: 0,
+        });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("kaleidomo.compute_pipeline"),
@@ -105,14 +118,33 @@ impl GpuBackend {
             cache: None,
         });
 
-        let rgba = source.to_rgba8();
-        let (input_width, input_height) = rgba.dimensions();
+        info!("GpuBackend initialized successfully");
 
-        let input_texture = device.create_texture(&wgpu::TextureDescriptor {
+        Ok(Self {
+            device,
+            queue,
+            bind_group_layout,
+            pipeline,
+            source: None,
+            output: None,
+            last_settings: None,
+        })
+    }
+
+    pub fn set_source_image(&mut self, source: &DynamicImage) -> Result<()> {
+        let rgba = source.to_rgba8();
+        let (width, height) = rgba.dimensions();
+
+        if width == 0 || height == 0 {
+            error!("set_source_image called with zero-sized image: {}x{}", width, height);
+            bail!("source image dimensions must be non-zero");
+        }
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("kaleidomo.input_texture"),
             size: wgpu::Extent3d {
-                width: input_width,
-                height: input_height,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -123,9 +155,9 @@ impl GpuBackend {
             view_formats: &[],
         });
 
-        queue.write_texture(
+        self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &input_texture,
+                texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -133,41 +165,68 @@ impl GpuBackend {
             rgba.as_raw(),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(input_width * 4),
-                rows_per_image: Some(input_height),
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
             },
             wgpu::Extent3d {
-                width: input_width,
-                height: input_height,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
         );
 
-        let input_view = input_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        Ok(Self {
-            device,
-            queue,
-            pipeline,
-            bind_group_layout,
-            input_texture,
-            input_view,
-            input_width,
-            input_height,
-        })
+        self.source = Some(SourceImageGpu {
+            texture,
+            view,
+            width,
+            height,
+        });
+
+        self.last_settings = None;
+
+        info!("Source image uploaded to GPU: {}x{}", width, height);
+        Ok(())
     }
 
-    pub fn process_img_with_gpu(&self, settings: &KaleidoSettings, output: &mut [u8]) -> Result<()> {
-        if settings.output_size_w == 0 || settings.output_size_h == 0 {
-            bail!("output size must be non-zero");
-        }
+    pub fn clear_source_image(&mut self) {
+        warn!("Clearing current source image from GPU state");
+        self.source = None;
+        self.last_settings = None;
+    }
 
-        let expected_len = (settings.output_size_w as usize)
-            .checked_mul(settings.output_size_h as usize)
-            .and_then(|v| v.checked_mul(4))
-            .context("output dimensions overflowed")?;
+    pub fn update_settings(&mut self, settings: &KaleidoSettings) -> Result<()> {
+        let source = match self.source.as_ref() {
+            Some(source) => source,
+            None => {
+                error!("update_settings called before a source image was set");
+                bail!("cannot update GPU settings without a source image");
+            }
+        };
 
+        self.last_settings = Some(GpuKaleidoSettings::from_parts(
+            settings,
+            source.width,
+            source.height,
+        ));
+
+        debug!(
+            "Updated cached GPU settings for output {}x{}",
+            settings.output_size_w, settings.output_size_h
+        );
+
+        Ok(())
+    }
+
+    pub fn render_into_buffer(&mut self, settings: &KaleidoSettings, output: &mut [u8]) -> Result<()> {
+        let expected_len = expected_rgba_len(settings.output_size_w, settings.output_size_h)?;
         if output.len() != expected_len {
+            error!(
+                "render_into_buffer output length mismatch: got {}, expected {}",
+                output.len(),
+                expected_len
+            );
             bail!(
                 "output buffer length mismatch: got {}, expected {} ({} * {} * 4)",
                 output.len(),
@@ -177,28 +236,19 @@ impl GpuBackend {
             );
         }
 
-        let output_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("kaleidomo.output_texture"),
-            size: wgpu::Extent3d {
-                width: settings.output_size_w,
-                height: settings.output_size_h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
+        self.ensure_output_resources(settings.output_size_w, settings.output_size_h)?;
 
-        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let source = match self.source.as_ref() {
+            Some(source) => source,
+            None => {
+                error!("render_into_buffer called with no source image selected");
+                bail!("no source image is currently loaded into the GPU backend");
+            }
+        };
 
-        let gpu_settings = GpuKaleidoSettings::from_parts(
-            settings,
-            self.input_width,
-            self.input_height,
-        );
+        let gpu_settings =
+            GpuKaleidoSettings::from_parts(settings, source.width, source.height);
+        self.last_settings = Some(gpu_settings);
 
         let settings_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("kaleidomo.settings_buffer"),
@@ -206,17 +256,25 @@ impl GpuBackend {
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
+        let output_resources = match self.output.as_ref() {
+            Some(resources) => resources,
+            None => {
+                error!("output resources unexpectedly missing after ensure_output_resources");
+                bail!("output resources were not available");
+            }
+        };
+
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kaleidomo.bind_group"),
             layout: &self.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.input_view),
+                    resource: wgpu::BindingResource::TextureView(&source.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&output_view),
+                    resource: wgpu::BindingResource::TextureView(&output_resources.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -225,24 +283,11 @@ impl GpuBackend {
             ],
         });
 
-        let bytes_per_pixel = 4u32;
-        let unpadded_bytes_per_row = settings.output_size_w * bytes_per_pixel;
-        let padded_bytes_per_row =
-            align_to(unpadded_bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let output_buffer_size = padded_bytes_per_row as u64 * settings.output_size_h as u64;
-
-        let readback_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("kaleidomo.readback_buffer"),
-            size: output_buffer_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("kaleidomo.command_encoder"),
-            });
+        let mut encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("kaleidomo.command_encoder"),
+                });
 
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -261,30 +306,137 @@ impl GpuBackend {
 
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &output_texture,
+                texture: &output_resources.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &readback_buffer,
+                buffer: &output_resources.readback_buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(settings.output_size_h),
+                    bytes_per_row: Some(output_resources.padded_bytes_per_row),
+                    rows_per_image: Some(output_resources.height),
                 },
             },
             wgpu::Extent3d {
-                width: settings.output_size_w,
-                height: settings.output_size_h,
+                width: output_resources.width,
+                height: output_resources.height,
                 depth_or_array_layers: 1,
             },
         );
 
         self.queue.submit(Some(encoder.finish()));
 
-        let slice = readback_buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
+        self.readback_into_output(output)
+    }
+
+    pub fn render_into_internal_buffer(&mut self, settings: &KaleidoSettings) -> Result<&[u8]> {
+        let expected_len = expected_rgba_len(settings.output_size_w, settings.output_size_h)?;
+        self.ensure_output_resources(settings.output_size_w, settings.output_size_h)?;
+
+        {
+            let output_resources = match self.output.as_mut() {
+                Some(resources) => resources,
+                None => {
+                    error!("output resources missing before internal render");
+                    bail!("output resources were not available");
+                }
+            };
+
+            if output_resources.cpu_buffer.len() != expected_len {
+                output_resources.cpu_buffer.resize(expected_len, 0);
+            }
+        }
+
+        let mut temp = vec![0u8; expected_len];
+        self.render_into_buffer(settings, &mut temp)?;
+
+        let output_resources = match self.output.as_mut() {
+            Some(resources) => resources,
+            None => {
+                error!("output resources missing after internal render");
+                bail!("output resources were not available");
+            }
+        };
+
+        output_resources.cpu_buffer.copy_from_slice(&temp);
+        Ok(&output_resources.cpu_buffer)
+    }
+
+    pub fn latest_output(&self) -> Option<&[u8]> {
+        self.output.as_ref().map(|o| o.cpu_buffer.as_slice())
+    }
+
+    fn ensure_output_resources(&mut self, width: u32, height: u32) -> Result<()> {
+        if width == 0 || height == 0 {
+            error!("ensure_output_resources called with zero-sized output: {}x{}", width, height);
+            bail!("output dimensions must be non-zero");
+        }
+
+        let needs_rebuild = match self.output.as_ref() {
+            Some(existing) => existing.width != width || existing.height != height,
+            None => true,
+        };
+
+        if !needs_rebuild {
+            return Ok(());
+        }
+
+        let padded_bytes_per_row = align_to(width * 4, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let readback_size = padded_bytes_per_row as u64 * height as u64;
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kaleidomo.output_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let readback_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kaleidomo.readback_buffer"),
+            size: readback_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let cpu_buffer = vec![0u8; expected_rgba_len(width, height)?];
+
+        self.output = Some(OutputResources {
+            texture,
+            view,
+            readback_buffer,
+            width,
+            height,
+            padded_bytes_per_row,
+            cpu_buffer,
+        });
+
+        info!("Allocated GPU output resources for {}x{}", width, height);
+        Ok(())
+    }
+
+    fn readback_into_output(&self, output: &mut [u8]) -> Result<()> {
+        let output_resources = match self.output.as_ref() {
+            Some(resources) => resources,
+            None => {
+                error!("readback_into_output called with no output resources allocated");
+                bail!("output resources are not allocated");
+            }
+        };
+
+        let slice = output_resources.readback_buffer.slice(..);
+        let (tx, rx) = mpsc::channel();
 
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
@@ -299,43 +451,31 @@ impl GpuBackend {
             .context("GPU readback buffer mapping failed")?;
 
         let mapped = slice.get_mapped_range();
+        let row_len = output_resources.width as usize * 4;
 
-        let row_len = settings.output_size_w as usize * 4;
-        for y in 0..settings.output_size_h as usize {
-            let src_offset = y * padded_bytes_per_row as usize;
+        for y in 0..output_resources.height as usize {
+            let src_offset = y * output_resources.padded_bytes_per_row as usize;
             let dst_offset = y * row_len;
             output[dst_offset..dst_offset + row_len]
                 .copy_from_slice(&mapped[src_offset..src_offset + row_len]);
         }
 
         drop(mapped);
-        readback_buffer.unmap();
+        output_resources.readback_buffer.unmap();
 
         Ok(())
     }
+}
 
-    pub fn render_to_image(
-        &self,
-        settings: &KaleidoSettings,
-        output: &mut [u8],
-    ) -> Result<()> {
-        let expected_len = (settings.output_size_w as usize)
-            .checked_mul(settings.output_size_h as usize)
-            .and_then(|v| v.checked_mul(4))
-            .context("output dimensions overflowed")?;
+fn expected_rgba_len(width: u32, height: u32) -> Result<usize> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| anyhow!("RGBA output dimensions overflowed"))
+}
 
-        if output.len() != expected_len {
-            bail!(
-                "output buffer length mismatch: got {}, expected {} ({} * {} * 4)",
-                output.len(),
-                expected_len,
-                settings.output_size_w,
-                settings.output_size_h
-            );
-        }
-
-        self.process_img_with_gpu(settings, output)
-    }
+fn non_zero_u64(value: u64) -> Result<NonZeroU64> {
+    NonZeroU64::new(value).ok_or_else(|| anyhow!("value must be non-zero"))
 }
 
 fn align_to(value: u32, alignment: u32) -> u32 {
@@ -377,17 +517,18 @@ pub struct GpuKaleidoSettings {
 }
 
 impl GpuKaleidoSettings {
-    fn from_parts(settings: &KaleidoSettings, source_width: u32, source_height: u32) -> Self {
+    pub fn from_parts(settings: &KaleidoSettings, source_width: u32, source_height: u32) -> Self {
         let zoom = settings.zoom;
-        let inv_zoom = if zoom != 0.0 { 1.0 / zoom } else { 0.0 };
-        let slice_angle = (2.0 * std::f32::consts::PI) / settings.count as f32;
+        let inv_zoom = if zoom.abs() > f32::EPSILON { 1.0 / zoom } else { 0.0 };
+        let safe_count = settings.count.max(1);
+        let slice_angle = (2.0 * std::f32::consts::PI) / safe_count as f32;
         let center_x = settings.output_size_w as f32 * 0.5 + settings.offset_x as f32;
         let center_y = settings.output_size_h as f32 * 0.5 + settings.offset_y as f32;
 
         Self {
             count: settings.count,
             output_size_w: settings.output_size_w,
-            output_size_h: settings.output_size_h, 
+            output_size_h: settings.output_size_h,
             kaleido_type: kaleido_type_to_u32(settings.kaleido_type),
 
             offset_x: settings.offset_x,

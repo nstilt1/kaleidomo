@@ -1,13 +1,17 @@
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
 
+pub use anyhow;
+pub use log;
 use anyhow::Context;
 use image::{DynamicImage, GenericImageView};
 pub mod backends;
 
 use image::{ImageBuffer, Rgba};
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::f32::consts::PI;
+pub use wgpu;
 
 pub use image;
 pub use pollster;
@@ -15,7 +19,7 @@ pub use pollster;
 use crate::backends::gpu::GpuBackend;
 pub use crate::backends::{KaleidoBackend, DaydreamBackend, Register, inner_loop};
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 pub enum KaleidoType {
     Radial,
     Square,
@@ -24,7 +28,8 @@ pub enum KaleidoType {
     HexagonalFlatTop,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KaleidoSettings {
     pub count: u32,       // Number of reflections (e.g., 8)
     pub output_size_w: u32,
@@ -209,9 +214,10 @@ pub fn render_kaleidoscope_with_gpu(
     let rgba = source.to_rgba8();
     let (sw, sh) = rgba.dimensions();
 
-    let gpu = pollster::block_on(GpuBackend::new(source))
+    let mut gpu = pollster::block_on(GpuBackend::new())
         .context("failed to initialize GPU backend")?;
-
+    gpu.set_source_image(source)?;
+    gpu.update_settings(&settings)?;
     let mut pixels = vec![
         0u8;
         (settings.output_size_w as usize)
@@ -220,7 +226,7 @@ pub fn render_kaleidoscope_with_gpu(
             .context("output dimensions overflowed")?
     ];
 
-    gpu.render_to_image(&settings, &mut pixels)
+    gpu.render_into_buffer(&settings, &mut pixels)
         .context("failed to render kaleidoscope on GPU")?;
 
     ImageBuffer::from_raw(settings.output_size_w, settings.output_size_h, pixels)
