@@ -16,7 +16,9 @@ pub use wgpu;
 pub use image;
 pub use pollster;
 
-use crate::backends::gpu::GpuBackend;
+pub use software_licensor_static_rust_lib::{LicenseData, lib_api::LicenseStatus};
+
+use crate::backends::gpu::{GpuBackend, GpuVideoRenderer};
 pub use crate::backends::{KaleidoBackend, DaydreamBackend, Register, inner_loop};
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -207,6 +209,7 @@ pub fn render_kaleidoscope_with_backend<B: KaleidoBackend + DaydreamBackend>(
     ImageBuffer::from_raw(settings.output_size_w, settings.output_size_h, pixels).unwrap()
 }
 
+#[cfg(test)]
 pub fn render_kaleidoscope_with_gpu(
     source: &DynamicImage,
     settings: KaleidoSettings,
@@ -330,7 +333,7 @@ impl Mp4H264Sink {
         self
     }
 
-    pub fn write_rgba_frame(&mut self, rgba: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn write_rgba_frame(&mut self, rgba: &[u8]) -> Result<YUVBuffer, Box<dyn std::error::Error>> {
         let expected_len = self.width * self.height * 4;
         if rgba.len() != expected_len {
             return Err(format!(
@@ -347,6 +350,12 @@ impl Mp4H264Sink {
         let bitstream = self.encoder.encode(&yuv)?;
         bitstream.write(&mut self.h264_writer)?;
 
+        Ok(yuv)
+    }
+
+    pub fn write_yuv_frame(&mut self, yuv: &YUVBuffer) -> Result<(), Box<dyn std::error::Error>> {
+        let bitstream = self.encoder.encode(yuv)?;
+        bitstream.write(&mut self.h264_writer)?;
         Ok(())
     }
 
@@ -457,6 +466,7 @@ fn render_video<B: KaleidoBackend + DaydreamBackend>(
     )?;
 
     let triangle_rotation_delta = degrees_to_radians(video_settings.triangle_rotation_degrees_per_frame);
+    let mut last_frame = YUVBuffer::new(settings.output_size_w as usize, settings.output_size_h as usize);
     for frame in 0..total_frames {
         settings.triangle_rotation_rad = (settings.triangle_rotation_rad + triangle_rotation_delta).rem_euclid(2.0 * PI);
         rgba
@@ -478,19 +488,148 @@ fn render_video<B: KaleidoBackend + DaydreamBackend>(
                     (settings.hue_rotation as f32 + frame as f32 * video_settings.hue_rotation_degrees_per_frame).round() as u32,
                 );
             });
-        sink.write_rgba_frame(&rgba)?;
+        last_frame = sink.write_rgba_frame(&rgba)?;
     }
 
     // write still frames at the end
     for _still_frame in 0..video_settings.still_frame_ending {
-        sink.write_rgba_frame(&rgba)?;
+        sink.write_yuv_frame(&last_frame)?;
     }
 
     sink.finish()?;
     Ok(())
 }
 
+pub fn render_video_gpu_traditional(
+    mut settings: KaleidoSettings,
+    video_settings: VideoSettings,
+    path: &str,
+    gpu: &mut GpuBackend
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fps = video_settings.fps;
+    let total_frames = video_settings.frame_count;
 
+    let mut sink = Mp4H264Sink::create(
+        path,
+        settings.output_size_w as usize,
+        settings.output_size_h as usize,
+        fps,
+        (settings.output_size_w as f32
+            * settings.output_size_h as f32
+            * fps as f32
+            * video_settings.quality)
+            .round() as u32,
+    )?;
+
+    let triangle_rotation_delta =
+        degrees_to_radians(video_settings.triangle_rotation_degrees_per_frame);
+
+    let base_rotation = settings.triangle_rotation_rad;
+    let base_hue = settings.hue_rotation as f32;
+
+    let mut output = vec![0u8; (settings.output_size_w * settings.output_size_h * 4) as usize];
+
+    let mut last_frame = YUVBuffer::new(settings.output_size_w as usize, settings.output_size_h as usize);
+    for frame in 0..total_frames {
+        settings.triangle_rotation_rad =
+            (base_rotation + triangle_rotation_delta * frame as f32).rem_euclid(2.0 * PI);
+
+        settings.zoom = zoom_modulation(&video_settings, frame);
+
+        settings.hue_rotation = (base_hue
+            + frame as f32 * video_settings.hue_rotation_degrees_per_frame)
+            .round()
+            .rem_euclid(360.0) as u32;
+
+        gpu.render_into_buffer(&settings, &mut output)?;
+        
+        last_frame = sink.write_rgba_frame(&output)?;
+    }
+    for _ in 0..video_settings.still_frame_ending {
+        sink.write_yuv_frame(&last_frame)?;
+    }
+
+    sink.finish()?;
+
+    Ok(())
+}
+
+pub fn render_video_gpu(
+    mut settings: KaleidoSettings,
+    video_settings: VideoSettings,
+    path: &str,
+    gpu: &mut GpuBackend,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fps = video_settings.fps;
+    let total_frames = video_settings.frame_count;
+
+    let mut renderer = GpuVideoRenderer::new(
+        gpu,
+        settings.output_size_w,
+        settings.output_size_h,
+        3,
+    )?;
+
+    let mut sink = Mp4H264Sink::create(
+        path,
+        settings.output_size_w as usize,
+        settings.output_size_h as usize,
+        fps,
+        (settings.output_size_w as f32
+            * settings.output_size_h as f32
+            * fps as f32
+            * video_settings.quality)
+            .round() as u32,
+    )?;
+
+    let triangle_rotation_delta =
+        degrees_to_radians(video_settings.triangle_rotation_degrees_per_frame);
+
+    let base_rotation = settings.triangle_rotation_rad;
+    let base_hue = settings.hue_rotation as f32;
+    let mut last_frame_slot: Option<usize> = None;
+
+    for frame in 0..total_frames {
+        settings.triangle_rotation_rad =
+            (base_rotation + triangle_rotation_delta * frame as f32).rem_euclid(2.0 * PI);
+
+        settings.zoom = zoom_modulation(&video_settings, frame);
+
+        settings.hue_rotation = (base_hue
+            + frame as f32 * video_settings.hue_rotation_degrees_per_frame)
+            .round()
+            .rem_euclid(360.0) as u32;
+
+        renderer.submit_frame(frame, &settings)?;
+
+        while let Some(done) = renderer.receive_oldest_blocking()? {
+            let rgba = renderer.slot_bytes(done.slot_index)?;
+            let _ = sink.write_rgba_frame(rgba)?;
+            last_frame_slot = Some(done.slot_index);
+            renderer.release_slot(done.slot_index)?;
+        }
+    }
+
+    for done in renderer.drain_remaining_blocking()? {
+        let rgba = renderer.slot_bytes(done.slot_index)?;
+        let _ = sink.write_rgba_frame(rgba)?;
+        last_frame_slot = Some(done.slot_index);
+        renderer.release_slot(done.slot_index)?;
+    }
+
+    if let Some(slot_index) = last_frame_slot {
+        let rgba = renderer.slot_bytes(slot_index).ok().map(|s| s);
+        if let Some(last_rgba) = rgba {
+            let last_yuv = sink.write_rgba_frame(&last_rgba)?;
+            for _ in 0..video_settings.still_frame_ending - 1 {
+                sink.write_yuv_frame(&last_yuv)?;
+            }
+        }
+    }
+
+    sink.finish()?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

@@ -343,5 +343,76 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let color = textureLoad(input_tex, src_i, 0);
-    textureStore(output_tex, vec2<i32>(i32(x), i32(y)), color);
+
+    // daydream
+    // rgb to hsv conversion for hue rotation
+
+    let r = color.r;
+    let g = color.g;
+    let b = color.b;
+
+    let c_max = max(r, max(g, b));
+    let c_min = min(r, min(g, b));
+    let delta = c_max - c_min;
+
+    var h = 0.0;
+    if (delta != 0.0) {
+        if (c_max == r) {
+            h = 60.0 * (((g - b) / delta) % 6.0);
+        } else if (c_max == g) {
+            h = 60.0 * (((b - r) / delta) + 2.0);
+        } else {
+            h = 60.0 * (((r - g) / delta) + 4.0);
+        }
+    }
+
+    var s = 0.0;
+    if (c_max != 0.0) {
+        s = delta / c_max;
+    }
+
+    let v = c_max;
+
+    h = euclidean_modulo(h + f32(settings.hue_rotation), 360.0);
+    let h_sector = h / 60.0;
+
+    let c = v * s;
+    let x2 = c * (1.0 - abs((h_sector % 2.0) - 1.0));
+    let m = v - c;
+
+    var rp = 0.0;
+    var gp = 0.0;
+    var bp = 0.0;
+
+    if (h_sector < 1.0) {
+        rp = c;
+        gp = x2;
+        bp = 0.0;
+    } else if (h_sector < 2.0) {
+        rp = x2;
+        gp = c;
+        bp = 0.0;
+    } else if (h_sector < 3.0) {
+        rp = 0.0;
+        gp = c;
+        bp = x2;
+    } else if (h_sector < 4.0) {
+        rp = 0.0;
+        gp = x2;
+        bp = c;
+    } else if (h_sector < 5.0) {
+        rp = x2;
+        gp = 0.0;
+        bp = c;
+    } else {
+        rp = c;
+        gp = 0.0;
+        bp = x2;
+    }
+
+    textureStore(
+        output_tex,
+        vec2<i32>(i32(x), i32(y)),
+        vec4<f32>(rp + m, gp + m, bp + m, color.a),
+    );
 }

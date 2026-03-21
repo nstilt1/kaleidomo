@@ -1,24 +1,14 @@
 use tauri_plugin_dialog::DialogExt;
 
 use std::sync::Mutex;
-use kaleidomo_core::{KaleidoSettings, anyhow::Context, pollster};
-use image::DynamicImage;
-use kaleidomo_core::log::error;
-use serde::{Deserialize, Serialize};
+use kaleidomo_core::pollster;
 use tauri::State;
 
 use kaleidomo_core::backends::gpu::GpuBackend;
 pub struct AppState {
-    gpu: Mutex<GpuBackend>,
+    pub gpu: Mutex<Option<GpuBackend>>,
     pub use_gpu_acceleration: Mutex<bool>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RenderResponse {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
+    pub gpu_available: bool,
 }
 
 #[tauri::command]
@@ -32,7 +22,7 @@ async fn init_gpu(state: State<'_, AppState>) -> Result<(), String> {
         .lock()
         .map_err(|_| "failed to lock GPU state".to_string())?;
 
-    *guard = backend;
+    *guard = Some(backend);
     Ok(())
 }
 
@@ -49,37 +39,29 @@ fn set_source_image_from_path(
         .lock()
         .map_err(|_| "failed to lock GPU state".to_string())?;
 
-    guard
-        .set_source_image(&image)
-        .map_err(|e| format!("failed to upload source image: {e}"))
+    if let Some(gpu) = guard.as_mut() {
+        gpu.set_source_image(&image)
+        .map_err(|e| format!("failed to select source image: {e}"))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
-fn render_kaleido_with_gpu(
-    state: State<'_, AppState>,
-    settings: KaleidoSettings,
-) -> Result<RenderResponse, String> {
-    let mut guard = state
+fn select_image(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    let img = image::open(&path).map_err(|e| e.to_string())?;
+    
+    let mut gpu = state
         .gpu
         .lock()
-        .map_err(|_| "failed to lock GPU state".to_string())?;
+        .map_err(|_| "failed to lock GPU backend".to_string())?;
 
-    let len = (settings.output_size_w as usize)
-        .checked_mul(settings.output_size_h as usize)
-        .and_then(|v| v.checked_mul(4))
-        .ok_or_else(|| "output dimensions overflowed".to_string())?;
-
-    let mut output = vec![0u8; len];
-
-    guard
-        .render_into_buffer(&settings, &mut output)
-        .map_err(|e| format!("failed to render kaleidoscope: {e}"))?;
-
-    Ok(RenderResponse {
-        width: settings.output_size_w,
-        height: settings.output_size_h,
-        rgba: output,
-    })
+    if let Some(gpu) = gpu.as_mut() {
+        gpu.set_source_image(&img).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -140,7 +122,7 @@ async fn export_kaleidoscope(
         let guard = state
             .use_gpu_acceleration
             .lock()
-            .map_err(|_| "failed to lock GPU preference state".to_string())?;
+            .map_err(|_| "Failed to lock GPU preference state".to_string())?;
         *guard
     };
 
@@ -150,7 +132,14 @@ async fn export_kaleidoscope(
             .lock()
             .map_err(|_| "failed to lock GPU backend".to_string())?;
 
-        gpu.set_source_image(&img).map_err(|e| e.to_string())?;
+        let gpu = match gpu.as_mut() {
+            Some(gpu) => gpu,
+            None => {
+                return Err("GPU backend is unavailable".into());
+            }
+        };
+
+        //gpu.set_source_image(&img).map_err(|e| e.to_string())?;
 
         let mut pixels = vec![
             0u8;
@@ -238,31 +227,30 @@ async fn generate_kaleidoscope(
         let guard = state
             .use_gpu_acceleration
             .lock()
-            .map_err(|_| "failed to lock GPU preference state".to_string())?;
+            .map_err(|_| "Failed to lock GPU preference state".to_string())?;
         *guard
     };
 
     let output = if use_gpu {
-        let mut gpu = state
+        let mut gpu_guard = state
             .gpu
             .lock()
-            .map_err(|_| "failed to lock GPU backend".to_string())?;
+            .map_err(|_| "Failed to lock GPU backend".to_string())?;
 
-        gpu.set_source_image(&img).map_err(|e| e.to_string())?;
+        let gpu = match gpu_guard.as_mut() {
+            Some(gpu) => gpu,
+            None => {
+                return Err("GPU backend is unavailable".into());
+            }
+        };
 
-        let mut pixels = vec![
-            0u8;
-            (output_size_w as usize)
-                .checked_mul(output_size_h as usize)
-                .and_then(|v| v.checked_mul(4))
-                .ok_or_else(|| "output dimensions overflowed".to_string())?
-        ];
+        let mut pixels = vec![0u8; (output_size_w * output_size_h * 4) as usize];
 
         gpu.render_into_buffer(&settings, &mut pixels)
             .map_err(|e| e.to_string())?;
 
         image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
-            .ok_or_else(|| "failed to create image from GPU output".to_string())?
+            .ok_or_else(|| "Failed to construct image".to_string())?
     } else {
         kaleidomo_core::render_kaleidoscope_with_auto_backend(&img, settings)
     };
@@ -279,6 +267,7 @@ async fn generate_kaleidoscope(
 
 #[tauri::command]
 async fn generate_video(
+    state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
     path: String,
     x: f32,
@@ -354,9 +343,34 @@ async fn generate_video(
         num_zoom_loops,
     };
 
-    match kaleidomo_core::render_video_with_auto_backend(&img, settings, video_settings, &file_path.to_string()) {
-        Ok(_) => (),
-        Err(e) => return Err(format!("Video generation failed: {}", e)),
+    let use_gpu = {
+        let guard = state
+            .use_gpu_acceleration
+            .lock()
+            .map_err(|_| "Failed to lock GPU preference state".to_string())?;
+        *guard
+    };
+
+    let _output = if use_gpu {
+        let mut gpu_guard = state
+            .gpu
+            .lock()
+            .map_err(|_| "Failed to lock GPU backend".to_string())?;
+
+        let gpu = match gpu_guard.as_mut() {
+            Some(gpu) => gpu,
+            None => {
+                return Err("GPU backend is unavailable".into());
+            }
+        };
+
+        kaleidomo_core::render_video_gpu(settings, video_settings, &file_path.to_string(), gpu)
+            .map_err(|e| format!("Video generation failed: {}", e))?
+    } else {
+        match kaleidomo_core::render_video_with_auto_backend(&img, settings, video_settings, &file_path.to_string()) {
+            Ok(_) => (),
+            Err(e) => return Err(format!("Video generation failed: {}", e)),
+        };
     };
 
     Ok(format!("data:video/mp4"))
@@ -367,12 +381,17 @@ fn set_use_gpu_acceleration(
     state: tauri::State<'_, AppState>,
     enabled: bool,
 ) -> Result<(), String> {
+    if enabled && !state.gpu_available {
+        return Err("GPU acceleration is not available on this system".into());
+    }
+
     let mut guard = state
         .use_gpu_acceleration
         .lock()
-        .map_err(|_| "failed to lock GPU preference state".to_string())?;
+        .map_err(|_| "Failed to lock GPU state")?;
 
     *guard = enabled;
+
     Ok(())
 }
 
@@ -388,17 +407,31 @@ fn get_use_gpu_acceleration(
     Ok(*guard)
 }
 
+#[tauri::command]
+fn gpu_available(state: tauri::State<'_, AppState>) -> bool {
+    state.gpu_available
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let backend = pollster::block_on(GpuBackend::new()).unwrap_or_else(|e| {
-        error!("failed to create initial GpuBackend: {e}");
-        panic!("failed to create initial GpuBackend: {e}");
-    });
+    let gpu_backend = match pollster::block_on(GpuBackend::new()) {
+        Ok(gpu) => {
+            println!("GPU backend initialized");
+            Some(gpu)
+        }
+        Err(e) => {
+            eprintln!("GPU initialization failed: {e}");
+            None
+        }
+    };
+
+    let gpu_available_b = gpu_backend.is_some();
 
     tauri::Builder::default()
         .manage(AppState {
-            gpu: Mutex::new(backend),
-            use_gpu_acceleration: Mutex::new(true),
+            gpu: Mutex::new(gpu_backend),
+            use_gpu_acceleration: Mutex::new(gpu_available_b),
+            gpu_available: gpu_available_b,
         })
         .plugin(tauri_plugin_fs::init()) // For saving later
         .plugin(tauri_plugin_dialog::init()) // For picking files
@@ -408,9 +441,10 @@ pub fn run() {
             export_kaleidoscope,
             init_gpu,
             set_source_image_from_path,
-            render_kaleido_with_gpu,
             set_use_gpu_acceleration,
             get_use_gpu_acceleration,
+            select_image,
+            gpu_available,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

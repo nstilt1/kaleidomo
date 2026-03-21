@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { WedgePicker } from "./components/WedgePicker";
-import { exists, readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import {
   Select,
@@ -20,6 +20,10 @@ import {
 import { NumberSliderInput } from "./components/NumberSliderInput";
 import { AspectRatioPicker } from "./components/AspectRatioPicker";
 import { Menu, MenuItem, Submenu } from "@tauri-apps/api/menu";
+import { initGpuSetting } from "./lib/utils";
+import { PerformanceMode, PerformanceModeCard } from "./components/PerformanceModeCard";
+import React from "react";
+import { Toaster } from "./components/ui/sonner";
 
 export async function setupAppMenu() {
   const aboutSubmenu = await Submenu.new({
@@ -113,25 +117,6 @@ const tryLoadImageFromPath = async (path: string): Promise<LoadedImage> => {
     width: img.naturalWidth,
     height: img.naturalHeight,
   };
-};
-
-const loadImageFromPath = async (originalPath: string) => {
-  if (!originalPath) {
-    return null;
-  }
-
-  try {
-    return await tryLoadImageFromPath(originalPath);
-  } catch (err) {
-    console.warn("Failed to load saved image path, asking user to relocate.", err);
-
-    const relocated = await promptForImageRelocation(originalPath);
-    if (!relocated) {
-      return null;
-    }
-
-    return await tryLoadImageFromPath(relocated);
-  }
 };
 
 export function roundToNearestMultiple(value: number, multiple: number): number {
@@ -261,9 +246,11 @@ function App() {
   const [kaleidoType, setKaleidoType] = useState<string>("radial");
   const [imgWidth, setImgWidth] = useState<number>(0);
   const [imgHeight, setImgHeight] = useState<number>(0);
+  const [performanceMode, setPerformanceMode] = React.useState<PerformanceMode>("gpu");
 
   useEffect(() => {
     void setupAppMenu();
+    initGpuSetting();
   }, []);
 
   useEffect(() => {
@@ -301,6 +288,10 @@ function App() {
     return () => {
       window.removeEventListener("menu-load-image-preset", onLoadImagePreset);
       window.removeEventListener("menu-load-video-preset", onLoadVideoPreset);
+      window.removeEventListener("menu-save-image-preset", onSaveImagePreset);
+      window.removeEventListener("menu-save-video-preset", onSaveVideoPreset);
+      window.removeEventListener("menu-load-project", onLoadProject);
+      window.removeEventListener("menu-save-project", onSaveProject);
     };
   }, []);
 
@@ -356,6 +347,9 @@ function App() {
         });
       };
         */
+      invoke("select_image", { path: selected }).catch((err) => {
+        console.error("Failed to select image:", err);
+      });
       await handleRender();
     }
   };
@@ -466,28 +460,6 @@ function App() {
     await writeTextFile(filePath, data);
   };
 
-  const resolveImagePath = async (originalPath: string): Promise<string | null> => {
-    if (!originalPath) {
-      return null;
-    }
-
-    if (await exists(originalPath)) {
-      return originalPath;
-    }
-
-    const relocated = await open({
-      multiple: false,
-      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg"] }],
-      defaultPath: originalPath,
-    });
-
-    if (!relocated || typeof relocated !== "string") {
-      return null;
-    }
-
-    return relocated;
-  };
-
   const loadImageFromPath = async (
     originalPath: string
   ): Promise<LoadedImage | null> => {
@@ -546,6 +518,9 @@ function App() {
             setImageSrc(loadedImage.imageSrc);
             setImgWidth(loadedImage.width);
             setImgHeight(loadedImage.height);
+            invoke("select_image", { path: loadedImage.imagePath }).catch((err) => {
+              console.error("Failed to select image:", err);
+            });
           }
         } catch (err) {
           console.error("Failed to load preset image", err);
@@ -631,6 +606,9 @@ function App() {
             setImageSrc(loadedImage.imageSrc);
             setImgWidth(loadedImage.width);
             setImgHeight(loadedImage.height);
+            invoke("select_image", { path: loadedImage.imagePath }).catch((err) => {
+              console.error("Failed to select image:", err);
+            });
           }
         } catch (err) {
           console.error("Failed to load project image", err);
@@ -727,6 +705,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-background flex flex-col items-center justify-center p-8">
+      <Toaster richColors position="top-right" />
       <div className="max-w-2xl w-full space-y-8">
         {/* Header */}
         <div className="text-center space-y-4">
@@ -773,6 +752,17 @@ function App() {
             )}
           </CardContent>
         </Card>
+
+        {/* Performance Mode Card */}
+        <div className="max-w-xl p-6">
+          <PerformanceModeCard
+            defaultMode="gpu"
+            onModeChange={setPerformanceMode}
+          />
+          <div className="mt-4 text-sm text-muted-foreground">
+            Current mode: {performanceMode === "gpu" ? "GPU" : "CPU (SIMD)"}
+          </div>
+        </div>
 
         {/* Features */}
         <div className="grid md:grid-cols-3 gap-4">

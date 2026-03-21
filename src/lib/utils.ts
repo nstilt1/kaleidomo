@@ -2,6 +2,7 @@ import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
 import { save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
+import { invoke } from "@tauri-apps/api/core";
 
 export const saveConfig = async (currentSettings: any, imagePath: string) => {
   try {
@@ -23,6 +24,18 @@ export const saveConfig = async (currentSettings: any, imagePath: string) => {
     console.error("Failed to save:", err);
   }
 };
+
+export async function initGpuSetting() {
+  const stored = localStorage.getItem("useGpuAcceleration");
+
+  let enabled = true;
+
+  if (stored !== null) {
+    enabled = stored === "true";
+  }
+
+  await invoke("set_use_gpu_acceleration", { enabled });
+}
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
