@@ -1,6 +1,8 @@
+const VERSION: &str = "1.0.1";
+
 use tauri_plugin_dialog::DialogExt;
 
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 use kaleidomo_core::pollster;
 use tauri::State;
 
@@ -9,6 +11,68 @@ pub struct AppState {
     pub gpu: Mutex<Option<GpuBackend>>,
     pub use_gpu_acceleration: Mutex<bool>,
     pub gpu_available: bool,
+    pub license_status: kaleidomo_core::LicenseStatus,
+    pub license_data: kaleidomo_core::LicenseData,
+}
+
+fn round_to_nearest_multiple(value: u32, multiple: u32) -> u32 {
+    if multiple == 0 {
+        return value; // Avoid division by zero
+    }
+    ((value + multiple - 1) / multiple) * multiple
+}
+
+/// Limiting the license using a macro since it copies all of the code 
+/// at compile time.
+macro_rules! limit_license {
+    ($state:expr, $output_size_w:expr, $output_size_h:expr, $offset_x:expr, $offset_y:expr, $zoom:expr, $tile_count:expr) => {
+        let (unlocked, license_type) = match $state.license_status.check_license(true).await {
+            Ok(v) => {
+                //$license_data = v.1.clone();
+                (v.0, v.1.license_type)
+            },
+            Err(_) => (false, "".to_string())
+        };
+        if license_type.to_lowercase().as_str() != "perpetual" || !unlocked {
+            if $output_size_h > 1280 || $output_size_w > 1280 {
+                let ratio = $output_size_w as f32 / $output_size_h as f32;
+                if ratio > 1.0 {
+                    $output_size_w = 1280;
+                    $output_size_h = (1280.0 / ratio) as u32;
+                } else {
+                    $output_size_h = 1280;
+                    $output_size_w = (1280.0 * ratio) as u32;
+                    $output_size_w = round_to_nearest_multiple($output_size_w, 8);
+                }
+            }
+            if $zoom > 3.0 {
+                $zoom = 3.0;
+            } else if $zoom < 0.8 {
+                $zoom = 0.8;
+            }
+        }
+        let is_unlocked = $state.license_status.is_unlocked().await;
+        if !is_unlocked || !unlocked {
+            $offset_x = 0;
+            $offset_y = 0;
+
+            if $tile_count > 3.5 {
+                $tile_count = 3.5;
+            }
+
+            if $output_size_h > 1280 || $output_size_w > 1280 {
+                let ratio = $output_size_w as f32 / $output_size_h as f32;
+                if ratio > 1.0 {
+                    $output_size_w = 1280;
+                    $output_size_h = (1280.0 / ratio) as u32;
+                } else {
+                    $output_size_h = 1280;
+                    $output_size_w = (1280.0 * ratio) as u32;
+                    $output_size_w = round_to_nearest_multiple($output_size_w, 8);
+                }
+            }
+        }
+    };
 }
 
 #[tauri::command]
@@ -72,16 +136,18 @@ async fn export_kaleidoscope(
     x: f32,
     y: f32,
     rotation: f32, 
-    zoom: f32,
+    mut zoom: f32,
     count: u32,
-    output_size_h: u32,
-    output_size_w: u32,
-    offset_x: i32,
-    offset_y: i32,
+    mut output_size_h: u32,
+    mut output_size_w: u32,
+    mut offset_x: i32,
+    mut offset_y: i32,
     kaleido_type: String,
-    tile_count: f32,
+    mut tile_count: f32,
     hue_rotation: u32,
 ) -> Result<String, String> {
+    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count);
+
     // 1. Open the Save Dialog first (don't render if they hit cancel)
     let file_path = app.dialog()
         .file()
@@ -173,12 +239,6 @@ async fn export_kaleidoscope(
     Ok(format!("Successfully exported to {}", path_to_save))
 }
 
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 use base64::Engine as _;
 
 #[tauri::command]
@@ -189,15 +249,18 @@ async fn generate_kaleidoscope(
     y: f32,
     rotation: f32,
     count: u32,
-    output_size_h: u32,
-    output_size_w: u32,
+    mut output_size_h: u32,
+    mut output_size_w: u32,
     offset_x: i32,
     offset_y: i32,
-    zoom: f32,
+    mut zoom: f32,
     kaleido_type: String,
-    tile_count: f32,
+    mut tile_count: f32,
     hue_rotation: u32,
 ) -> Result<String, String> {
+    let mut _offset_x = 0;
+    let mut _offset_y = 0;
+    limit_license!(state, output_size_w, output_size_h, _offset_x, _offset_y, zoom, tile_count);
     // 1. Load the image from the absolute path
     let img = image::open(&path).map_err(|e| e.to_string())?;
 
@@ -274,13 +337,13 @@ async fn generate_video(
     y: f32,
     rotation: f32,
     count: u32,
-    output_size_h: u32,
-    output_size_w: u32,
-    offset_x: i32,
-    offset_y: i32,
-    zoom: f32,
+    mut output_size_h: u32,
+    mut output_size_w: u32,
+    mut offset_x: i32,
+    mut offset_y: i32,
+    mut zoom: f32,
     kaleido_type: String,
-    tile_count: f32,
+    mut tile_count: f32,
     hue_rotation: u32,
     frame_count: u32,
     still_frame_ending: u32,
@@ -288,12 +351,15 @@ async fn generate_video(
     quality: f32,
     triangle_rotation_degrees_per_frame: f32,
     hue_rotation_degrees_per_frame: f32,
-    zoom_max: f32,
-    zoom_min: f32,
+    mut zoom_max: f32,
+    mut zoom_min: f32,
     zoom_fn: String,
     zoom_start_offset: f32,
     num_zoom_loops: u32,
 ) -> Result<String, String> {
+    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count);
+    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_max, tile_count);
+    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_min, tile_count);
     let file_path = app.dialog()
         .file()
         .add_filter("MP4 Video", &["mp4"])
@@ -412,6 +478,59 @@ fn gpu_available(state: tauri::State<'_, AppState>) -> bool {
     state.gpu_available
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenseInfo {
+    pub is_unlocked: bool,
+    pub license_data: kaleidomo_core::LicenseData,
+}
+
+#[tauri::command]
+async fn license_data(state: tauri::State<'_, AppState>) -> Result<LicenseInfo, String> {
+    Ok(match state.license_status.check_license(true).await {
+        Ok(v) => LicenseInfo {
+            is_unlocked: v.0,
+            license_data: v.1,
+        },
+        Err(v) => LicenseInfo {
+            is_unlocked: false,
+            license_data: v.1,
+        },
+    })
+}
+
+#[tauri::command]
+async fn is_unlocked(state: tauri::State<'_, AppState>) -> Result<LicenseInfo, String> {
+    match state.license_status.check_license(true).await {
+        Ok(v) => Ok(LicenseInfo {
+            is_unlocked: v.0,
+            license_data: v.1,
+        }),
+        Err(v) => Err(v.0.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn read_reply_from_webserver(state: State<'_, AppState>, license_code: String, save_system_stats: bool) -> Result<LicenseInfo, String> {
+    match state.license_status.read_reply_from_webserver(&license_code, save_system_stats).await {
+        Ok(v) => Ok(LicenseInfo {
+            is_unlocked: v.0,
+            license_data: v.1,
+        }),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+fn is_new_version_available(state: tauri::State<'_, AppState>) -> bool {
+    state.license_status.is_update_available(VERSION, &state.license_data)
+}
+
+#[tauri::command]
+fn current_version() -> String {
+    VERSION.to_string()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let gpu_backend = match pollster::block_on(GpuBackend::new()) {
@@ -427,11 +546,23 @@ pub fn run() {
 
     let gpu_available_b = gpu_backend.is_some();
 
+    let mut product_id_hashmap = HashMap::with_capacity(1);
+    product_id_hashmap.insert("KALEIDOM-lmeFJbHEr_TBYqpeOSGjbsNl".to_string(), "BJiM2lHBDzyXk5dUoVo7Fg9A/CcyTDCZvSWchDYHnAyZ5v29c2rr4BTXJ+n3WEh96zljmgZC3Hn1PRsgmdjTkwgU8uvkAFiNNlxnQDVqPpvrUJEsvg5vpcggqXN1ZzC3lQ==".to_string());
+    let (license_status, license_data_1) = tauri::async_runtime::block_on(async {
+        kaleidomo_core::LicenseStatus::new(
+        "ABCw9mRN-TeSq_IoJZi/W0JtBM0YbrlxAgNFnPm3I9U95lxksl5IIyHORLjqXT18a",
+        "AlteredBrainChemistry",
+        product_id_hashmap
+        ).await
+    });
+
     tauri::Builder::default()
         .manage(AppState {
             gpu: Mutex::new(gpu_backend),
             use_gpu_acceleration: Mutex::new(gpu_available_b),
             gpu_available: gpu_available_b,
+            license_status: license_status,
+            license_data: license_data_1,
         })
         .plugin(tauri_plugin_fs::init()) // For saving later
         .plugin(tauri_plugin_dialog::init()) // For picking files
@@ -445,6 +576,12 @@ pub fn run() {
             get_use_gpu_acceleration,
             select_image,
             gpu_available,
+            // licensing stuff
+            license_data,
+            is_unlocked,
+            read_reply_from_webserver,
+            is_new_version_available,
+            current_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

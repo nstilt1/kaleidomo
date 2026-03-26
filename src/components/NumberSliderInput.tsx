@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Slider } from "@/components/ui/slider";
-import { roundToNearestMultiple } from "@/App";
+import { roundToNearestMultiple } from "@/components/AppContent";
 
 type NumberSliderInputProps = {
   label: string;

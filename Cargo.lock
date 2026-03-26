@@ -4654,7 +4654,7 @@ dependencies = [
 [[package]]
 name = "software_licensor_static_rust_lib"
 version = "0.1.0"
-source = "git+https://github.com/nstilt1/software-licensor-client-side-library#02b2248a8358a37df8c8de2f540272aa9dda76eb"
+source = "git+https://github.com/nstilt1/software-licensor-client-side-library#2a247e6136e689cd32bcc27573e141a6c7bc0db4"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -4662,11 +4662,13 @@ dependencies = [
  "directories",
  "hkdf",
  "libc",
+ "once_cell",
  "p384",
  "prost",
  "prost-types",
  "rand 0.8.5",
  "reqwest",
+ "serde",
  "sha2",
  "tokio",
  "windows-sys 0.59.0",
