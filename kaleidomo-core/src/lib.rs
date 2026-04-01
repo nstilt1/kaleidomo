@@ -16,7 +16,7 @@ pub use wgpu;
 pub use image;
 pub use pollster;
 
-pub use software_licensor_static_rust_lib::{LicenseData, lib_api::LicenseStatus};
+pub use software_licensor_static_rust_lib::{LicenseData, lib_api::LicenseStatus, lib_api::{get_machine_stats_for_display, StatsDisplay}};
 
 use crate::backends::gpu::{GpuBackend, GpuVideoRenderer};
 pub use crate::backends::{KaleidoBackend, DaydreamBackend, Register, inner_loop};
@@ -215,7 +215,6 @@ pub fn render_kaleidoscope_with_gpu(
     settings: KaleidoSettings,
 ) -> anyhow::Result<ImageBuffer<Rgba<u8>, Vec<u8>>> {
     let rgba = source.to_rgba8();
-    let (sw, sh) = rgba.dimensions();
 
     let mut gpu = pollster::block_on(GpuBackend::new())
         .context("failed to initialize GPU backend")?;

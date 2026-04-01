@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "sukunai",
-  "version": "0.1.0",
-  "identifier": "com.sukunai.app",
+  "productName": "Kaleidomo",
+  "version": "1.0.1",
+  "identifier": "com.kaleidomo.app",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "sukunai",
+        "title": "Kaliedomo",
         "width": 800,
         "height": 600
       }

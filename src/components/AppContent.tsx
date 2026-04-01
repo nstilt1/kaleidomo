@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from '@tauri-apps/plugin-dialog';
@@ -379,6 +378,7 @@ function AppContent() {
 
   // Generate Kaleidoscope (Rust Call)
   const handleRender = async () => {
+    let {width, height} = calculateDimensions(settings);
     try {
       const result: string = await invoke('generate_kaleidoscope', {
         path: imagePath,
@@ -386,8 +386,8 @@ function AppContent() {
         y: settings.y,
         rotation: settings.rotation,
         count: count,
-        outputSizeH: settings.resolution,
-        outputSizeW: calculate_width(settings),
+        outputSizeH: height,
+        outputSizeW: width,
         offsetX: settings.offset_x,
         offsetY: settings.offset_y,
         zoom: settings.zoom,
@@ -616,19 +616,50 @@ function AppContent() {
     }
   };
 
-  const calculate_width = (settings: { resolution: number; ratio_num: number; ratio_den: number }) => {
-    const height = settings.resolution
-    const num = Math.max(1, settings.ratio_num)
-    const den = Math.max(1, settings.ratio_den)
+    const calculateDimensions = (settings: {
+        resolution: number
+        ratio_num: number
+        ratio_den: number
+    }) => {
+        const short = Math.max(1, settings.resolution)
+        const num = Math.max(1, settings.ratio_num)
+        const den = Math.max(1, settings.ratio_den)
 
-    const exactWidth = (height * num) / den
+        let width: number
+        let height: number
 
-    return roundToNearestMultiple(exactWidth, 8)
-  }
+        if (num >= den) {
+            // Landscape or square
+            height = short
+            width = (short * num) / den
+
+            // Round width only
+            width = roundToNearestMultiple(width, 8)
+
+            // Recompute height to preserve ratio
+            height = Math.floor((width * den) / num)
+        } else {
+            // Portrait
+            width = short
+            height = (short * den) / num
+
+            // Round width only (width is the short side here)
+            width = roundToNearestMultiple(width, 8)
+
+            // Recompute height to preserve ratio
+            height = Math.floor((width * den) / num)
+        }
+
+        return {
+            width,
+            height,
+        }
+    }
 
   const handleExport = async () => {
     if (!imagePath) return;
     
+    let {width, height} = calculateDimensions(settings);
     try {
       const message = await invoke('export_kaleidoscope', {
         path: imagePath,
@@ -637,8 +668,8 @@ function AppContent() {
         rotation: settings.rotation,
         zoom: settings.zoom,
         count: count,
-        outputSizeH: settings.resolution,
-        outputSizeW: calculate_width(settings),
+        outputSizeH: height,
+        outputSizeW: width,
         offsetX: settings.offset_x,
         offsetY: settings.offset_y,
         kaleidoType: kaleidoType,
@@ -656,6 +687,7 @@ function AppContent() {
   const handleVideo = async () => {
     if (!imagePath) return;
     
+    let {width, height} = calculateDimensions(settings);
     try {
       const message = await invoke('generate_video', {
         path: imagePath,
@@ -664,8 +696,8 @@ function AppContent() {
         rotation: settings.rotation,
         zoom: settings.zoom,
         count: count,
-        outputSizeH: settings.resolution,
-        outputSizeW: calculate_width(settings),
+        outputSizeH: height,
+        outputSizeW: width,
         offsetX: settings.offset_x,
         offsetY: settings.offset_y,
         kaleidoType: kaleidoType,
@@ -781,8 +813,8 @@ function AppContent() {
             <NumberSliderInput
               label="Sample Radius"
               value={settings.zoom}
-              min={isUnlocked ? 0.1 : 0.8}
-              max={isUnlocked ? 32.0 : 3.0}
+              min={isUnlocked && licenseType != "trial" ? 0.01 : 0.8}
+              max={isUnlocked && licenseType != "trial" ? 32.0 : 3.0}
               step={0.01}
               unit="x"
               onChange={(v) => setSettings(s => ({...s, zoom: v}))}
@@ -840,10 +872,10 @@ function AppContent() {
           {/* Group 2: Output */}
           <div className="space-y-4">
             <NumberSliderInput
-              label="Output Height"
+              label="Output Resolution (length of smaller side)"
               value={settings.resolution}
-              min={256}
-              max={isUnlocked && licenseType === "perpetual" ? 8192 : 1280}
+              min={8}
+              max={isUnlocked && licenseType === "perpetual" ? 8192 : 720}
               step={8}
               onChange={(v) => setSettings(s => ({...s, resolution: v}))}
               unit="px"
@@ -917,12 +949,11 @@ function AppContent() {
           <div className="space-y-4">
             <div className="flex justify-between items-center"><label>Video Settings</label>
             </div>
-            <p>The generation might be running on your CPU, so 360 frames should be a good starting point.</p>
             <NumberSliderInput
               label="Frame Count"
               value={settings.frame_count}
               min={1}
-              max={isUnlocked && licenseType == "perpetual" ? 3600 : 360}
+              max={isUnlocked && licenseType == "perpetual" ? 7200 : 1800}
               step={1}
               onChange={(v) => setSettings(s => ({...s, frame_count: v}))}
               unit="frames"
@@ -981,8 +1012,8 @@ function AppContent() {
             <NumberSliderInput
               label="Max Zoom"
               value={settings.zoom_max}
-              min={isUnlocked && licenseType == "perpetual" ? 0.01 : 0.8}
-              max={isUnlocked && licenseType == "perpetual" ? 32.0 : 3.0}
+              min={isUnlocked && licenseType != "trial" ? 0.01 : 0.8}
+              max={isUnlocked && licenseType != "trial" ? 32.0 : 3.0}
               step={0.01}
               onChange={(v) => setSettings(s => ({...s, zoom_max: v}))}
               unit="x"
@@ -991,8 +1022,8 @@ function AppContent() {
             <NumberSliderInput
               label="Min Zoom"
               value={settings.zoom_min}
-              min={isUnlocked && licenseType == "perpetual" ? 0.01 : 0.8}
-              max={isUnlocked && licenseType == "perpetual" ? 32.0 : 3.0}
+              min={isUnlocked && licenseType != "trial" ? 0.01 : 0.8}
+              max={isUnlocked && licenseType != "trial" ? 32.0 : 3.0}
               step={0.01}
               onChange={(v) => setSettings(s => ({...s, zoom_min: v}))}
               unit="x"

@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "sukunai",
+      "name": "Kaleidomo",
       "dependencies": {
         "@radix-ui/react-slot": "^1.2.4",
         "@tauri-apps/api": ">=2.0.0",

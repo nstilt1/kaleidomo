@@ -4,15 +4,22 @@ use tauri_plugin_dialog::DialogExt;
 
 use std::{collections::HashMap, sync::Mutex};
 use kaleidomo_core::pollster;
-use tauri::State;
+use tauri::{Manager, State};
 
 use kaleidomo_core::backends::gpu::GpuBackend;
+
+mod licensing;
+use licensing::*;
+
+use tokio::sync::Mutex as AsyncMutex;
+
 pub struct AppState {
     pub gpu: Mutex<Option<GpuBackend>>,
     pub use_gpu_acceleration: Mutex<bool>,
     pub gpu_available: bool,
     pub license_status: kaleidomo_core::LicenseStatus,
     pub license_data: kaleidomo_core::LicenseData,
+    pub license_sync_cooldown: AsyncMutex<licensing::cooldown::LicenseSyncCooldownState>,
 }
 
 fn round_to_nearest_multiple(value: u32, multiple: u32) -> u32 {
@@ -478,59 +485,6 @@ fn gpu_available(state: tauri::State<'_, AppState>) -> bool {
     state.gpu_available
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LicenseInfo {
-    pub is_unlocked: bool,
-    pub license_data: kaleidomo_core::LicenseData,
-}
-
-#[tauri::command]
-async fn license_data(state: tauri::State<'_, AppState>) -> Result<LicenseInfo, String> {
-    Ok(match state.license_status.check_license(true).await {
-        Ok(v) => LicenseInfo {
-            is_unlocked: v.0,
-            license_data: v.1,
-        },
-        Err(v) => LicenseInfo {
-            is_unlocked: false,
-            license_data: v.1,
-        },
-    })
-}
-
-#[tauri::command]
-async fn is_unlocked(state: tauri::State<'_, AppState>) -> Result<LicenseInfo, String> {
-    match state.license_status.check_license(true).await {
-        Ok(v) => Ok(LicenseInfo {
-            is_unlocked: v.0,
-            license_data: v.1,
-        }),
-        Err(v) => Err(v.0.to_string()),
-    }
-}
-
-#[tauri::command]
-async fn read_reply_from_webserver(state: State<'_, AppState>, license_code: String, save_system_stats: bool) -> Result<LicenseInfo, String> {
-    match state.license_status.read_reply_from_webserver(&license_code, save_system_stats).await {
-        Ok(v) => Ok(LicenseInfo {
-            is_unlocked: v.0,
-            license_data: v.1,
-        }),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-#[tauri::command]
-fn is_new_version_available(state: tauri::State<'_, AppState>) -> bool {
-    state.license_status.is_update_available(VERSION, &state.license_data)
-}
-
-#[tauri::command]
-fn current_version() -> String {
-    VERSION.to_string()
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let gpu_backend = match pollster::block_on(GpuBackend::new()) {
@@ -547,28 +501,42 @@ pub fn run() {
     let gpu_available_b = gpu_backend.is_some();
 
     let mut product_id_hashmap = HashMap::with_capacity(1);
-    product_id_hashmap.insert("KALEIDOM-lmeFJbHEr_TBYqpeOSGjbsNl".to_string(), "BJiM2lHBDzyXk5dUoVo7Fg9A/CcyTDCZvSWchDYHnAyZ5v29c2rr4BTXJ+n3WEh96zljmgZC3Hn1PRsgmdjTkwgU8uvkAFiNNlxnQDVqPpvrUJEsvg5vpcggqXN1ZzC3lQ==".to_string());
+    product_id_hashmap.insert(
+        "KALEIDOM-lmeFJbHEr_TBYqpeOSGjbsNl".to_string(),
+        "BJiM2lHBDzyXk5dUoVo7Fg9A/CcyTDCZvSWchDYHnAyZ5v29c2rr4BTXJ+n3WEh96zljmgZC3Hn1PRsgmdjTkwgU8uvkAFiNNlxnQDVqPpvrUJEsvg5vpcggqXN1ZzC3lQ==".to_string(),
+    );
+
     let (license_status, license_data_1) = tauri::async_runtime::block_on(async {
         kaleidomo_core::LicenseStatus::new(
-        "ABCw9mRN-TeSq_IoJZi/W0JtBM0YbrlxAgNFnPm3I9U95lxksl5IIyHORLjqXT18a",
-        "AlteredBrainChemistry",
-        product_id_hashmap
-        ).await
+            "ABCw9mRN-TeSq_IoJZi/W0JtBM0YbrlxAgNFnPm3I9U95lxksl5IIyHORLjqXT18a",
+            "AlteredBrainChemistry",
+            product_id_hashmap,
+            true,
+        )
+        .await
     });
 
     tauri::Builder::default()
-        .manage(AppState {
-            gpu: Mutex::new(gpu_backend),
-            use_gpu_acceleration: Mutex::new(gpu_available_b),
-            gpu_available: gpu_available_b,
-            license_status: license_status,
-            license_data: license_data_1,
+        .setup(move |app| {
+            let cooldown_state = licensing::cooldown::load_state(&app.handle())
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+            app.manage(AppState {
+                gpu: Mutex::new(gpu_backend),
+                use_gpu_acceleration: Mutex::new(gpu_available_b),
+                gpu_available: gpu_available_b,
+                license_status,
+                license_data: license_data_1,
+                license_sync_cooldown: AsyncMutex::new(cooldown_state),
+            });
+
+            Ok(())
         })
-        .plugin(tauri_plugin_fs::init()) // For saving later
-        .plugin(tauri_plugin_dialog::init()) // For picking files
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            generate_kaleidoscope, 
-            generate_video, 
+            generate_kaleidoscope,
+            generate_video,
             export_kaleidoscope,
             init_gpu,
             set_source_image_from_path,
@@ -576,12 +544,15 @@ pub fn run() {
             get_use_gpu_acceleration,
             select_image,
             gpu_available,
-            // licensing stuff
             license_data,
             is_unlocked,
             read_reply_from_webserver,
             is_new_version_available,
             current_version,
+            display_system_stats,
+            get_current_cloud_info,
+            update_license,
+            delete_hardware_info_from_cloud,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
