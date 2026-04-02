@@ -1,14 +1,37 @@
+use kaleidomo_core::LicenseData;
 use tauri::State;
 
 use crate::{AppState, VERSION};
 
 pub mod cooldown;
 
+const UNKNOWN_ERROR_CODE: i32 = 512;
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LicenseInfo {
     pub is_unlocked: bool,
     pub license_data: kaleidomo_core::LicenseData,
+}
+
+impl From<String> for LicenseInfo {
+    fn from(value: String) -> Self {
+        LicenseInfo {
+            is_unlocked: false,
+            license_data: LicenseData {
+                result_code: UNKNOWN_ERROR_CODE,
+                customer_first_name: "".into(),
+                customer_last_name: "".into(),
+                customer_email: "".into(),
+                license_type: "".into(),
+                version: "".into(),
+                error_message: value,
+                license_code: "".into(),
+                machine_count: None,
+                machine_limit: None,
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -37,13 +60,16 @@ pub async fn is_unlocked(state: tauri::State<'_, AppState>) -> Result<LicenseInf
 }
 
 #[tauri::command]
-pub async fn read_reply_from_webserver(state: State<'_, AppState>, license_code: String, save_system_stats: bool) -> Result<LicenseInfo, String> {
+pub async fn read_reply_from_webserver(state: State<'_, AppState>, license_code: String, save_system_stats: bool) -> Result<LicenseInfo, LicenseInfo> {
     match state.license_status.read_reply_from_webserver(&license_code, save_system_stats).await {
         Ok(v) => Ok(LicenseInfo {
             is_unlocked: v.0,
             license_data: v.1,
         }),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(LicenseInfo {
+            is_unlocked: false,
+            license_data: e.1,
+        }),
     }
 }
 
@@ -75,7 +101,7 @@ pub async fn delete_hardware_info_from_cloud(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     license_code: String,
-) -> Result<LicenseInfo, String> {
+) -> Result<LicenseInfo, LicenseInfo> {
     let mut cooldown = state.license_sync_cooldown.lock().await;
 
     cooldown::enforce(&cooldown)?;
@@ -94,7 +120,10 @@ pub async fn delete_hardware_info_from_cloud(
                 license_data: v.1,
             })
         }
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(LicenseInfo {
+            is_unlocked: false,
+            license_data: e.1,
+        }),
     }
 }
 
@@ -104,7 +133,7 @@ pub async fn update_license(
     state: tauri::State<'_, AppState>,
     license_code: String,
     save_system_stats: bool,
-) -> Result<LicenseInfo, String> {
+) -> Result<LicenseInfo, LicenseInfo> {
     let mut cooldown = state.license_sync_cooldown.lock().await;
 
     cooldown::enforce(&cooldown)?;
@@ -123,6 +152,9 @@ pub async fn update_license(
                 license_data: v.1,
             })
         }
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(LicenseInfo {
+            is_unlocked: false,
+            license_data: e.1,
+        })
     }
 }

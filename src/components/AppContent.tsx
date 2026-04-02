@@ -25,8 +25,10 @@ import { Toaster } from "@/components/ui/sonner";
 import LicenseActivationCard from "@/components/licensing/LicenseActivationCard";
 import { useLicense } from "@/lib/license-context";
 
+import { PredefinedMenuItem } from "@tauri-apps/api/menu";
+
 export async function setupAppMenu() {
-  const aboutSubmenu = await Submenu.new({
+  const appSubmenu = await Submenu.new({
     text: "App",
     items: [],
   });
@@ -79,8 +81,21 @@ export async function setupAppMenu() {
     ],
   });
 
+  const editSubmenu = await Submenu.new({
+    text: "Edit",
+    items: [
+      await PredefinedMenuItem.new({ item: "Undo" }),
+      await PredefinedMenuItem.new({ item: "Redo" }),
+      await PredefinedMenuItem.new({ item: "Separator" }),
+      await PredefinedMenuItem.new({ item: "Cut" }),
+      await PredefinedMenuItem.new({ item: "Copy" }),
+      await PredefinedMenuItem.new({ item: "Paste" }),
+      await PredefinedMenuItem.new({ item: "SelectAll" }),
+    ],
+  });
+
   const menu = await Menu.new({
-    items: [aboutSubmenu, fileSubmenu],
+    items: [appSubmenu, fileSubmenu, editSubmenu],
   });
 
   await menu.setAsAppMenu();

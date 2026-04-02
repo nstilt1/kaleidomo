@@ -119,8 +119,9 @@ export interface StatsDisplay {
 }
 
 function normalizeLicenseInfo(input: LicenseInfoWire): LicenseInfo {
+  console.log("In normalizeLicenseInfo");
   const data = input.licenseData ?? input.license_data ?? {};
-
+  console.log(input);
   return {
     isUnlocked:
       typeof input.isUnlocked === "boolean"

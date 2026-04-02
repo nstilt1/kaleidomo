@@ -6,6 +6,9 @@ use std::{collections::HashMap, sync::Mutex};
 use kaleidomo_core::pollster;
 use tauri::{Manager, State};
 
+use tauri::menu::{MenuBuilder, PredefinedMenuItem, SubmenuBuilder};
+
+
 use kaleidomo_core::backends::gpu::GpuBackend;
 
 mod licensing;
@@ -529,6 +532,21 @@ pub fn run() {
                 license_data: license_data_1,
                 license_sync_cooldown: AsyncMutex::new(cooldown_state),
             });
+
+            let edit_menu = SubmenuBuilder::new(app, "Edit")
+                .item(&PredefinedMenuItem::undo(app, None)?)
+                .item(&PredefinedMenuItem::redo(app, None)?)
+                .separator()
+                .item(&PredefinedMenuItem::cut(app, None)?)
+                .item(&PredefinedMenuItem::copy(app, None)?)
+                .item(&PredefinedMenuItem::paste(app, None)?)
+                .build()?;
+
+            let menu = MenuBuilder::new(app)
+                .item(&edit_menu)
+                .build()?;
+
+            app.set_menu(menu)?;
 
             Ok(())
         })

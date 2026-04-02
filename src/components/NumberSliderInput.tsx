@@ -18,6 +18,9 @@ type NumberSliderInputProps = {
   setExternalValue2?: (value: number) => void;
   externalValueName?: string;
   externalValue2Name?: string;
+  limitedCap?: number;
+  limitedMin?: number,
+  shouldLimit?: boolean;
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -57,10 +60,18 @@ export function NumberSliderInput({
   setExternalValue2,
   externalValueName,
   externalValue2Name,
+  limitedCap,
+  limitedMin,
+  shouldLimit = false,
 }: NumberSliderInputProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const effectiveMin = shouldLimit && limitedMin != null ? limitedMin : min;
+  const effectiveMax = shouldLimit && limitedCap != null ? limitedCap : max;
+  const showMaxLimitNotice = shouldLimit && limitedCap != null && limitedCap < max;
+  const showMinLimitNotice = shouldLimit && limitedMin != null && limitedMin > min;
 
   const displayValue = useMemo(() => {
     return formatDisplayValue(value, roundToInteger, roundToMultipleOf);
@@ -86,7 +97,7 @@ export function NumberSliderInput({
       normalized = roundToNearestMultiple(normalized, roundToMultipleOf);
     }
 
-    return clamp(normalized, min, max);
+    return clamp(normalized, effectiveMin, effectiveMax);
   };
 
   const commitDraft = () => {
@@ -155,8 +166,8 @@ export function NumberSliderInput({
               type="number"
               inputMode={roundToInteger ? "numeric" : "decimal"}
               step={roundToInteger ? 1 : step}
-              min={min}
-              max={max}
+              min={effectiveMin}
+              max={effectiveMax}
               value={draft}
               disabled={disabled}
               onChange={(e) => setDraft(e.target.value)}
@@ -180,8 +191,8 @@ export function NumberSliderInput({
 
       <Slider
         value={[normalizeValue(value)]}
-        min={min}
-        max={max}
+        min={effectiveMin}
+        max={effectiveMax}
         step={roundToInteger ? 1 : step}
         disabled={disabled}
         onValueChange={([next]) => {
@@ -198,6 +209,13 @@ export function NumberSliderInput({
         >
           {buttonLabel}
         </button>
+      ) : null}
+
+      {showMaxLimitNotice ? (
+        <div className="mt-3 rounded-md border border-red-500 bg-red-50 px-3 py-2 text-sm text-red-700">
+          Upon activating a Perpetual license, the bounds for this parameter will 
+          change to the following bounds: {min} to {max} {unit ? ` ${unit}` : ""}
+        </div>
       ) : null}
     </div>
   );
