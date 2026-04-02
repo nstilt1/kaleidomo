@@ -543,6 +543,17 @@ export function LicenseActivationCard(): React.JSX.Element {
   const [updatingLicense, setUpdatingLicense] = React.useState(false);
 
   const { canSync, remainingLabel, markSynced } = useLicenseSyncCooldown();
+  const [version, setVersion] = React.useState("");
+  const [productName, setProductName] = React.useState("");
+
+  React.useEffect(() => {
+    invoke<string>("current_version")
+      .then(setVersion)
+      .catch(() => setVersion(""));
+    invoke<string>("product_name")
+      .then(setProductName)
+      .catch(() => setProductName(""));  
+  }, []);
 
   React.useEffect(() => {
     if (!hasUserEdited && licenseInfo?.licenseData.licenseCode) {
@@ -634,6 +645,7 @@ export function LicenseActivationCard(): React.JSX.Element {
       const updateFlag = await fetchNeedsUpdate().catch(() => false);
       setNeedsUpdate(updateFlag);
     } catch (error) {
+      console.error("Failed to delete cloud hardware information: ", error);
       const message =
         error instanceof Error ? error.message : "Failed to delete cloud hardware information.";
       setFormError(message);
@@ -658,6 +670,7 @@ export function LicenseActivationCard(): React.JSX.Element {
       const updateFlag = await fetchNeedsUpdate().catch(() => false);
       setNeedsUpdate(updateFlag);
     } catch (error) {
+      console.error("Failed to update license: ", error);
       const message =
         error instanceof Error ? error.message : "Failed to update license.";
       setFormError(message);
@@ -770,7 +783,7 @@ export function LicenseActivationCard(): React.JSX.Element {
         <CardHeader className="space-y-3">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <CardTitle className="text-xl">License Activation</CardTitle>
+              <CardTitle className="text-xl">License Activation for {productName} v{version}</CardTitle>
               <CardDescription>
                 Activate your license and review your current registration status.
               </CardDescription>

@@ -1,4 +1,5 @@
 const VERSION: &str = "1.0.1";
+const PRODUCT_NAME: &str = "Kaleidomo";
 
 use tauri_plugin_dialog::DialogExt;
 
@@ -571,6 +572,7 @@ pub fn run() {
             get_current_cloud_info,
             update_license,
             delete_hardware_info_from_cloud,
+            product_name,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

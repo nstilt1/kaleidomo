@@ -1,7 +1,7 @@
 use kaleidomo_core::LicenseData;
 use tauri::State;
 
-use crate::{AppState, VERSION};
+use crate::{AppState, VERSION, PRODUCT_NAME};
 
 pub mod cooldown;
 
@@ -84,6 +84,11 @@ pub fn current_version() -> String {
 }
 
 #[tauri::command]
+pub fn product_name() -> String {
+    PRODUCT_NAME.to_string()
+}
+
+#[tauri::command]
 pub fn display_system_stats() -> Result<kaleidomo_core::StatsDisplay, String> {
     // Safety: function is only used to display hardware information.
     unsafe {
@@ -152,7 +157,7 @@ pub async fn update_license(
                 license_data: v.1,
             })
         }
-        Err(e) => Err(LicenseInfo {
+        Err(e) => Ok(LicenseInfo {
             is_unlocked: false,
             license_data: e.1,
         })

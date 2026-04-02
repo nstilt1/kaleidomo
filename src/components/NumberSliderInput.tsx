@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Slider } from "@/components/ui/slider";
-import { roundToNearestMultiple } from "@/components/AppContent";
+import { roundToNearestMultiple } from "@/components/Kaleidomo";
 
 type NumberSliderInputProps = {
   label: string;
@@ -71,7 +71,6 @@ export function NumberSliderInput({
   const effectiveMin = shouldLimit && limitedMin != null ? limitedMin : min;
   const effectiveMax = shouldLimit && limitedCap != null ? limitedCap : max;
   const showMaxLimitNotice = shouldLimit && limitedCap != null && limitedCap < max;
-  const showMinLimitNotice = shouldLimit && limitedMin != null && limitedMin > min;
 
   const displayValue = useMemo(() => {
     return formatDisplayValue(value, roundToInteger, roundToMultipleOf);

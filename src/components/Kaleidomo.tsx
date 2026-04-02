@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { WedgePicker } from "@/components/WedgePicker";
@@ -19,10 +18,7 @@ import { NumberSliderInput } from "@/components/NumberSliderInput";
 import { AspectRatioPicker } from "@/components/AspectRatioPicker";
 import { Menu, MenuItem, Submenu } from "@tauri-apps/api/menu";
 import { initGpuSetting } from "@/lib/utils";
-import { PerformanceMode, PerformanceModeCard } from "@/components/PerformanceModeCard";
-import React from "react";
 import { Toaster } from "@/components/ui/sonner";
-import LicenseActivationCard from "@/components/licensing/LicenseActivationCard";
 import { useLicense } from "@/lib/license-context";
 
 import { PredefinedMenuItem } from "@tauri-apps/api/menu";
@@ -248,7 +244,7 @@ function mergeSettingsWithBase(base: Settings, incoming: unknown): Settings {
   } as Settings;
 }
 
-function AppContent() {
+function Kaleidomo() {
   // State definitions
   const [imagePath, setImagePath] = useState<string>("");
   const [_imageSrc, setImageSrc] = useState<string>(""); // For previewing original
@@ -258,16 +254,11 @@ function AppContent() {
   const [kaleidoType, setKaleidoType] = useState<string>("radial");
   const [imgWidth, setImgWidth] = useState<number>(0);
   const [imgHeight, setImgHeight] = useState<number>(0);
-  const [performanceMode, setPerformanceMode] = React.useState<PerformanceMode>("gpu");
   const {isUnlocked, licenseType} = useLicense();
-  const [version, setVersion] = React.useState("");
 
   useEffect(() => {
     void setupAppMenu();
     initGpuSetting();
-    invoke<string>("current_version")
-        .then(setVersion)
-        .catch(() => setVersion(""));
   }, []);
 
   useEffect(() => {
@@ -744,32 +735,9 @@ function AppContent() {
       <div className="max-w-2xl w-full space-y-8">
         {/* Header */}
         <div className="text-center space-y-4">
-          <h1 className="text-4xl font-bold tracking-tight">
-            Kaleidomo v{version}
-          </h1>
-          <p className="text-xl text-muted-foreground">
+          {/* <p className="text-xl text-muted-foreground">
             Made with <del>love</del> rust
-          </p>
-          <div className="flex justify-center gap-2">
-            <Badge variant="secondary">Tauri v2</Badge>
-            <Badge variant="secondary">React 18</Badge>
-            <Badge variant="secondary">TypeScript</Badge>
-            <Badge variant="secondary">Rust</Badge>
-          </div>
-        </div>
-
-        {/* Demo Card */}
-        <LicenseActivationCard />
-
-        {/* Performance Mode Card */}
-        <div className="max-w-xl p-6">
-          <PerformanceModeCard
-            defaultMode="gpu"
-            onModeChange={setPerformanceMode}
-          />
-          <div className="mt-4 text-sm text-muted-foreground">
-            Current mode: {performanceMode === "gpu" ? "GPU" : "CPU (SIMD)"}
-          </div>
+          </p> */}
         </div>
 
         {/* Features */}
@@ -1122,4 +1090,4 @@ function AppContent() {
   );
 }
 
-export default AppContent;
+export default Kaleidomo;
