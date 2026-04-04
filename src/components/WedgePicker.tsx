@@ -1,127 +1,217 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+
+type Settings = {
+  x: number;
+  y: number;
+  rotation: number;
+  resolution: number;
+  zoom: number;
+  tile_count: number;
+  hue_rotate: number;
+  ratio_num: number;
+  ratio_den: number;
+  offset_x: number;
+  offset_y: number;
+  aspect_ratio_mode: string;
+  frame_count: number;
+  still_frame_ending: number;
+  fps: number;
+  quality: number;
+  triangle_rotation_degrees_per_frame: number;
+  hue_rotation_degrees_per_frame: number;
+  zoom_max: number;
+  zoom_min: number;
+  zoom_fn: string;
+  zoom_start_offset: number;
+  num_zoom_loops: number;
+};
 
 interface PickerProps {
   imagePath: string;
   count: number;
-  settings: { x: number; y: number; rotation: number, resolution: number, zoom: number, tile_count: number, hue_rotate: number, ratio_num: number, ratio_den: number, offset_x: number, offset_y: number, aspect_ratio_mode: string, frame_count: number, still_frame_ending: number, fps: number, quality: number, triangle_rotation_degrees_per_frame: number, hue_rotation_degrees_per_frame: number, zoom_max: number, zoom_min: number, zoom_fn: string, zoom_start_offset: number, num_zoom_loops: number }; // Pass settings as prop
-  onUpdate: (s: { x: number; y: number; rotation: number, resolution: number, zoom: number, tile_count: number, hue_rotate: number, ratio_num: number, ratio_den: number, offset_x: number, offset_y: number, aspect_ratio_mode: string, frame_count: number, still_frame_ending: number, fps: number, quality: number, triangle_rotation_degrees_per_frame: number, hue_rotation_degrees_per_frame: number, zoom_max: number, zoom_min: number, zoom_fn: string, zoom_start_offset: number, num_zoom_loops: number }) => void;
+  settings: Settings;
+  onUpdate: (s: Settings) => void;
 }
 
-export const WedgePicker: React.FC<PickerProps> = ({ imagePath, count, settings, onUpdate }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [scale, setScale] = useState(1); // Scale: (Natural Width / Display Width)
-  const [isDragging, setIsDragging] = useState(false);
+type ViewState = {
+  naturalWidth: number;
+  naturalHeight: number;
+  displayWidth: number;
+  displayHeight: number;
+  scaleX: number;
+  scaleY: number;
+};
 
-  const displayWidth = 800; // Constrain the UI to 800px wide
+export const WedgePicker: React.FC<PickerProps> = ({
+  imagePath,
+  count,
+  settings,
+  onUpdate,
+}) => {
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+
+  const [isDragging, setIsDragging] = useState(false);
+  const [view, setView] = useState<ViewState | null>(null);
+
+  const draw = useCallback(() => {
+    const canvas = canvasRef.current;
+    const image = imageRef.current;
+    const wrapper = wrapperRef.current;
+
+    if (!canvas || !image || !wrapper) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const wrapperRect = wrapper.getBoundingClientRect();
+    const maxWidth = Math.max(1, Math.floor(wrapperRect.width));
+    const maxHeight = Math.max(1, Math.floor(wrapperRect.height));
+
+    const naturalWidth = image.naturalWidth;
+    const naturalHeight = image.naturalHeight;
+
+    if (naturalWidth <= 0 || naturalHeight <= 0) return;
+
+    const fitScale = Math.min(maxWidth / naturalWidth, maxHeight / naturalHeight, 1);
+
+    const displayWidth = Math.max(1, Math.round(naturalWidth * fitScale));
+    const displayHeight = Math.max(1, Math.round(naturalHeight * fitScale));
+
+    canvas.width = displayWidth;
+    canvas.height = displayHeight;
+
+    const scaleX = displayWidth / naturalWidth;
+    const scaleY = displayHeight / naturalHeight;
+
+    setView({
+      naturalWidth,
+      naturalHeight,
+      displayWidth,
+      displayHeight,
+      scaleX,
+      scaleY,
+    });
+
+    ctx.clearRect(0, 0, displayWidth, displayHeight);
+    ctx.drawImage(image, 0, 0, displayWidth, displayHeight);
+
+    const sliceAngle = (2 * Math.PI) / count;
+
+    const displayX = settings.x * scaleX;
+    const displayY = settings.y * scaleY;
+
+    const sampleRadiusInSourcePixels = settings.resolution / (2 * settings.zoom);
+    const visualRadius = sampleRadiusInSourcePixels * Math.min(scaleX, scaleY);
+
+    ctx.save();
+    ctx.translate(displayX, displayY);
+    ctx.rotate(settings.rotation);
+
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, visualRadius, 0, sliceAngle);
+    ctx.lineTo(0, 0);
+    ctx.closePath();
+
+    ctx.strokeStyle = "#ff0000";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255, 0, 0, 0.3)";
+    ctx.fill();
+
+    ctx.restore();
+  }, [count, settings]);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
     const img = new Image();
     img.crossOrigin = "anonymous";
-    
     img.src = convertFileSrc(imagePath);
+
     img.onload = () => {
-      const s = img.width / displayWidth;
-      setScale(s);
-      canvas.width = displayWidth;
-      canvas.height = img.height / s;
-      draw(img, ctx);
+      imageRef.current = img;
+      draw();
     };
 
-    const draw = (image: HTMLImageElement, context: CanvasRenderingContext2D) => {
-      // 1. Force the canvas size to match the display constraints
-      const s = image.naturalWidth / displayWidth;
-      context.canvas.width = displayWidth;
-      context.canvas.height = image.naturalHeight / s;
-      const visualRadius = (settings.resolution / 2) / (scale * settings.zoom);
-
-      // 2. Draw the background image
-      context.drawImage(image, 0, 0, context.canvas.width, context.canvas.height);
-
-      // 3. Draw the Wedge (The Triangle)
-      const sliceAngle = (2 * Math.PI) / count;
-      
-      // Convert 'real' pixel coordinates from Rust-space back to 'canvas' space
-      const displayX = settings.x / s;
-      const displayY = settings.y / s;
-
-      context.save();
-      context.translate(displayX, displayY);
-      context.rotate(settings.rotation);
-      
-      context.beginPath();
-      context.moveTo(0, 0);
-      context.arc(0, 0, visualRadius, 0, sliceAngle); // 100px radius for visibility
-      context.lineTo(0, 0);
-      context.closePath();
-      
-      // Make it VERY visible for debugging
-      context.strokeStyle = '#ff0000'; // Bright Red
-      context.lineWidth = 3;
-      context.stroke();
-      context.fillStyle = 'rgba(255, 0, 0, 0.3)';
-      context.fill();
-      
-      context.restore();
+    return () => {
+      imageRef.current = null;
     };
-  }, [imagePath, count, settings, scale]);
+  }, [imagePath, draw]);
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDragging || !canvasRef.current) return;
-    
-    const rect = canvasRef.current.getBoundingClientRect();
-    
-    // 1. Get mouse position relative to the element (0 to displayWidth)
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
+  useEffect(() => {
+    draw();
+  }, [draw]);
 
-    // 2. Map screen pixels to internal canvas pixels 
-    // (In case the CSS is slightly different from the displayWidth)
-    const canvasX = (mouseX / rect.width) * canvasRef.current.width;
-    const canvasY = (mouseY / rect.height) * canvasRef.current.height;
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
 
-    // 3. Update the UI state (in canvas-space for drawing)
-    // 4. Send the SCALED coordinates to the parent (image-space for Rust)
+    const observer = new ResizeObserver(() => {
+      draw();
+    });
+
+    observer.observe(wrapper);
+    return () => observer.disconnect();
+  }, [draw]);
+
+  useEffect(() => {
+    const stopDragging = () => setIsDragging(false);
+    window.addEventListener("mouseup", stopDragging);
+    return () => window.removeEventListener("mouseup", stopDragging);
+  }, []);
+
+  const updateFromPointer = (clientX: number, clientY: number) => {
+    const canvas = canvasRef.current;
+    const currentView = view;
+    if (!canvas || !currentView) return;
+
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const clampedX = Math.min(Math.max(clientX - rect.left, 0), rect.width);
+    const clampedY = Math.min(Math.max(clientY - rect.top, 0), rect.height);
+
+    const imageX = (clampedX / rect.width) * currentView.naturalWidth;
+    const imageY = (clampedY / rect.height) * currentView.naturalHeight;
+
     onUpdate({
-      x: canvasX * scale,
-      y: canvasY * scale,
-      rotation: settings.rotation,
-      resolution: settings.resolution,
-      zoom: settings.zoom,
-      tile_count: settings.tile_count,
-      hue_rotate: settings.hue_rotate,
-      ratio_num: settings.ratio_num,
-      ratio_den: settings.ratio_den,
-      offset_x: settings.offset_x,
-      offset_y: settings.offset_y,
-      aspect_ratio_mode: settings.aspect_ratio_mode,
-      frame_count: settings.frame_count,
-      still_frame_ending: settings.still_frame_ending,
-      fps: settings.fps,
-      quality: settings.quality,
-      triangle_rotation_degrees_per_frame: settings.triangle_rotation_degrees_per_frame,
-      hue_rotation_degrees_per_frame: settings.hue_rotation_degrees_per_frame,
-      zoom_max: settings.zoom_max,
-      zoom_min: settings.zoom_min,
-      zoom_fn: settings.zoom_fn,
-      zoom_start_offset: settings.zoom_start_offset,
-      num_zoom_loops: settings.num_zoom_loops
+      ...settings,
+      x: imageX,
+      y: imageY,
     });
   };
 
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    setIsDragging(true);
+    updateFromPointer(e.clientX, e.clientY);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!isDragging) return;
+    updateFromPointer(e.clientX, e.clientY);
+  };
+
   return (
-    <div className="relative border shadow-inner bg-slate-950 overflow-hidden">
-      <canvas 
+    <div
+      ref={wrapperRef}
+      className="flex h-full w-full items-center justify-center overflow-hidden rounded-lg border shadow-inner bg-slate-950"
+    >
+      <canvas
         ref={canvasRef}
-        onMouseDown={() => setIsDragging(true)}
-        onMouseUp={() => setIsDragging(false)}
+        onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
-        style={{ display: 'block', maxWidth: '100%', height: 'auto' }}
+        onMouseLeave={() => setIsDragging(false)}
+        style={{
+          display: "block",
+          maxWidth: "100%",
+          maxHeight: "100%",
+          width: "auto",
+          height: "auto",
+          cursor: isDragging ? "grabbing" : "crosshair",
+        }}
       />
-  </div>
+    </div>
   );
 };

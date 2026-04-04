@@ -1087,7 +1087,7 @@ function Kaleidomo() {
         {/* Main Content: Vertical Rows */}
         <main className="flex-1 flex flex-col p-4 gap-4 overflow-y-auto bg-muted/20">
           {/* Row 1: Source Picker */}
-          <div className="min-h-[500px] flex flex-col items-center justify-center border rounded-xl bg-background p-8 relative shadow-sm">
+          <div className="h-[70vh] min-h-[500px] shrink-0 flex flex-col items-center justify-center border rounded-xl bg-background p-8 relative shadow-sm overflow-hidden">
             <h3 className="absolute top-4 left-4 text-xs font-bold uppercase opacity-30">1. Source Picker</h3>
             {imagePath && (
               <WedgePicker 
@@ -1103,9 +1103,9 @@ function Kaleidomo() {
           <div className="min-h-[500px] flex flex-col items-center justify-center border rounded-xl bg-background p-8 relative shadow-sm">
             <h3 className="absolute top-4 left-4 text-xs font-bold uppercase opacity-30">2. Kaleidoscope Render</h3>
             {outputSrc ? (
-              <img src={outputSrc} className="max-w-full max-h-full object-contain shadow-2xl rounded-lg" />
+              <img src={outputSrc} className="block max-w-full max-h-full object-contain shadow-2xl rounded-lg" />
             ) : (
-              <p className="text-muted-foreground italic">Click Generate to see result</p>
+              <p className="text-muted-foreground italic">Select an image or load a preset to begin.</p>
             )}
           </div>
 
