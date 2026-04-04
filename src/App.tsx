@@ -5,6 +5,8 @@ import Kaleidomo from "@/components/Kaleidomo"
 import { LicenseActivationCard } from "@/components/licensing/LicenseActivationCard"
 import { PerformanceModeCard } from "@/components/PerformanceModeCard"
 import { LicenseProvider, useLicense } from "@/lib/license-context"
+import React from "react"
+import { invoke } from "@tauri-apps/api/core"
 
 function CreateIcon() {
   return (
@@ -19,6 +21,14 @@ function CreateIcon() {
 function AppLayout() {
   const navigate = useNavigate()
   const { isUnlocked, licenseType } = useLicense()
+
+  const [needsUpdate, setNeedsUpdate] = React.useState(false);
+
+  React.useEffect(() => {
+    invoke<boolean>("is_new_version_available")
+      .then(setNeedsUpdate)
+      .catch(() => setNeedsUpdate(false));
+  }, [])
 
   const resolvedLicenseType =
     isUnlocked && licenseType?.trim() ? licenseType : "Inactive"
@@ -74,6 +84,18 @@ function AppLayout() {
             </NavLink>
           </nav>
 
+          {needsUpdate && (
+            <button
+              type="button"
+              onClick={() => navigate("/license")}
+              className={[
+                "inline-flex h-10 shrink-0 items-center rounded-md border px-3 text-sm font-medium transition-colors",
+                "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+              ].join(" ")}
+            >
+              {`Update available`}
+              </button>
+          )}
           <button
             type="button"
             onClick={() => navigate("/license")}

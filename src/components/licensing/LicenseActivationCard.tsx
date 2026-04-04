@@ -1,5 +1,6 @@
 import * as React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-shell";
 import {
   AlertCircle,
   Eye,
@@ -116,6 +117,15 @@ export interface StatsDisplay {
   hasAvx512vl: boolean;
   hasAvx512vpopcntdq: boolean;
   hasNeon: boolean;
+  gpuName?: string | null;
+  gpuBrand?: string | null;
+  gpuBackend?: string | null;
+  gpuType?: string | null;
+  gpuVramBytes?: number | null;
+  gpuUnifiedMemory?: boolean | null;
+  gpuCoreCount?: number | null;
+  npuAvailable?: boolean | null;
+  tpuAvailable?: boolean | null;
 }
 
 function normalizeLicenseInfo(input: LicenseInfoWire): LicenseInfo {
@@ -221,9 +231,14 @@ function formatLabel(key: string): string {
     .replace(/^has/, "")
     .replace(/^is/, "is ")
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/\b3d Now\b/g, "3DNow")
     .replace(/\bMb\b/g, "MB")
     .replace(/\bMhz\b/g, "MHz")
     .replace(/\bCpu\b/g, "CPU")
+    .replace(/\bGpu\b/g, "GPU")
+    .replace(/\bVram\b/g, "VRAM")
+    .replace(/\bNpu\b/g, "NPU")
+    .replace(/\bTpu\b/g, "TPU")
     .replace(/\bAvx\b/g, "AVX")
     .replace(/\bSse\b/g, "SSE")
     .replace(/\bNeon\b/g, "NEON")
@@ -233,13 +248,35 @@ function formatLabel(key: string): string {
     .replace(/^./, (c) => c.toUpperCase());
 }
 
-function formatValue(value: unknown): string {
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) {
+    return "—";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const decimals = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(decimals)} ${units[unitIndex]}`;
+}
+
+function formatValue(key: keyof StatsDisplay, value: unknown): string {
+  if (value === null || value === undefined || value === "") {
+    return "—";
+  }
+
   if (typeof value === "boolean") {
     return value ? "Yes" : "No";
   }
 
-  if (value === null || value === undefined || value === "") {
-    return "—";
+  if (key === "gpuVramBytes" && typeof value === "number") {
+    return formatBytes(value);
   }
 
   return String(value);
@@ -271,8 +308,8 @@ function buildStatsEntries(
     .map((key) => {
       const currentRaw = currentInfo?.[key];
       const storedRaw = storedInfo?.[key];
-      const currentValue = formatValue(currentRaw);
-      const storedValue = formatValue(storedRaw);
+      const currentValue = formatValue(key, currentRaw);
+      const storedValue = formatValue(key, storedRaw);
 
       return {
         key,
@@ -547,7 +584,7 @@ export function LicenseActivationCard(): React.JSX.Element {
   const [version, setVersion] = React.useState("");
   const [productName, setProductName] = React.useState("");
   const [downloadsUrl, setDownloadsUrl] = React.useState("");
-  const [storePageUrl, setStorePageUrl] = React.useState("");
+  const [_storePageUrl, setStorePageUrl] = React.useState("");
 
   React.useEffect(() => {
     invoke<string>("current_version")
@@ -820,7 +857,14 @@ export function LicenseActivationCard(): React.JSX.Element {
               <Info className="h-4 w-4" />
               <AlertDescription>
                 A new version is available for this product. Please update to access the latest
-                licensed version. New version: V{licenseInfo?.licenseData.version}. <a href={downloadsUrl} className="underline underline-offset-4">Downloads Page</a> to get the latest version.
+                licensed version. New version: V{licenseInfo?.licenseData.version}. Visit the downloads page to get the latest version.
+                <Button
+                  type="button"
+                  variant="link"
+                  onClick={() => open(downloadsUrl)}
+                >
+                  Downloads Page
+                </Button>
               </AlertDescription>
             </Alert>
           )}
