@@ -82,6 +82,8 @@ export const WedgePicker: React.FC<PickerProps> = ({
 
     canvas.width = displayWidth;
     canvas.height = displayHeight;
+    canvas.style.width = `${displayWidth}px`;
+    canvas.style.height = `${displayHeight}px`;
 
     const scaleX = displayWidth / naturalWidth;
     const scaleY = displayHeight / naturalHeight;
@@ -139,6 +141,44 @@ export const WedgePicker: React.FC<PickerProps> = ({
       imageRef.current = null;
     };
   }, [imagePath, draw]);
+
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
+
+    let frame1 = 0;
+    let frame2 = 0;
+
+    const redrawAfterLayoutSettles = () => {
+      cancelAnimationFrame(frame1);
+      cancelAnimationFrame(frame2);
+
+      frame1 = requestAnimationFrame(() => {
+        frame2 = requestAnimationFrame(() => {
+          draw();
+        });
+      });
+    };
+
+    const observer = new ResizeObserver(() => {
+      redrawAfterLayoutSettles();
+    });
+
+    observer.observe(wrapper);
+
+    const onWindowResize = () => {
+      redrawAfterLayoutSettles();
+    };
+
+    window.addEventListener("resize", onWindowResize);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", onWindowResize);
+      cancelAnimationFrame(frame1);
+      cancelAnimationFrame(frame2);
+    };
+  }, [draw]);
 
   useEffect(() => {
     draw();
@@ -205,10 +245,10 @@ export const WedgePicker: React.FC<PickerProps> = ({
         onMouseLeave={() => setIsDragging(false)}
         style={{
           display: "block",
+          width: view ? `${view.displayWidth}px` : "auto",
+          height: view ? `${view.displayHeight}px` : "auto",
           maxWidth: "100%",
           maxHeight: "100%",
-          width: "auto",
-          height: "auto",
           cursor: isDragging ? "grabbing" : "crosshair",
         }}
       />
