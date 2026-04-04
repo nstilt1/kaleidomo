@@ -34,7 +34,7 @@ interface PickerProps {
   onUpdate: (s: Settings) => void;
 }
 
-type ViewState = {
+type ImageMetrics = {
   naturalWidth: number;
   naturalHeight: number;
   displayWidth: number;
@@ -54,14 +54,13 @@ export const WedgePicker: React.FC<PickerProps> = ({
   const imageRef = useRef<HTMLImageElement | null>(null);
 
   const [isDragging, setIsDragging] = useState(false);
-  const [view, setView] = useState<ViewState | null>(null);
+  const [metrics, setMetrics] = useState<ImageMetrics | null>(null);
 
   const draw = useCallback(() => {
+    const wrapper = wrapperRef.current;
     const canvas = canvasRef.current;
     const image = imageRef.current;
-    const wrapper = wrapperRef.current;
-
-    if (!canvas || !image || !wrapper) return;
+    if (!wrapper || !canvas || !image) return;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
@@ -72,7 +71,6 @@ export const WedgePicker: React.FC<PickerProps> = ({
 
     const naturalWidth = image.naturalWidth;
     const naturalHeight = image.naturalHeight;
-
     if (naturalWidth <= 0 || naturalHeight <= 0) return;
 
     const fitScale = Math.min(maxWidth / naturalWidth, maxHeight / naturalHeight, 1);
@@ -80,15 +78,15 @@ export const WedgePicker: React.FC<PickerProps> = ({
     const displayWidth = Math.max(1, Math.round(naturalWidth * fitScale));
     const displayHeight = Math.max(1, Math.round(naturalHeight * fitScale));
 
+    const scaleX = displayWidth / naturalWidth;
+    const scaleY = displayHeight / naturalHeight;
+
     canvas.width = displayWidth;
     canvas.height = displayHeight;
     canvas.style.width = `${displayWidth}px`;
     canvas.style.height = `${displayHeight}px`;
 
-    const scaleX = displayWidth / naturalWidth;
-    const scaleY = displayHeight / naturalHeight;
-
-    setView({
+    setMetrics({
       naturalWidth,
       naturalHeight,
       displayWidth,
@@ -105,8 +103,8 @@ export const WedgePicker: React.FC<PickerProps> = ({
     const displayX = settings.x * scaleX;
     const displayY = settings.y * scaleY;
 
-    const sampleRadiusInSourcePixels = settings.resolution / (2 * settings.zoom);
-    const visualRadius = sampleRadiusInSourcePixels * Math.min(scaleX, scaleY);
+    const sourceRadius = settings.resolution / (2 * settings.zoom);
+    const visualRadius = sourceRadius * Math.min(scaleX, scaleY);
 
     ctx.save();
     ctx.translate(displayX, displayY);
@@ -143,57 +141,33 @@ export const WedgePicker: React.FC<PickerProps> = ({
   }, [imagePath, draw]);
 
   useEffect(() => {
-    const wrapper = wrapperRef.current;
-    if (!wrapper) return;
+    let raf1 = 0;
+    let raf2 = 0;
 
-    let frame1 = 0;
-    let frame2 = 0;
+    const redraw = () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
 
-    const redrawAfterLayoutSettles = () => {
-      cancelAnimationFrame(frame1);
-      cancelAnimationFrame(frame2);
-
-      frame1 = requestAnimationFrame(() => {
-        frame2 = requestAnimationFrame(() => {
+      raf1 = requestAnimationFrame(() => {
+        raf2 = requestAnimationFrame(() => {
           draw();
         });
       });
     };
 
-    const observer = new ResizeObserver(() => {
-      redrawAfterLayoutSettles();
-    });
-
-    observer.observe(wrapper);
-
-    const onWindowResize = () => {
-      redrawAfterLayoutSettles();
-    };
-
-    window.addEventListener("resize", onWindowResize);
-
-    return () => {
-      observer.disconnect();
-      window.removeEventListener("resize", onWindowResize);
-      cancelAnimationFrame(frame1);
-      cancelAnimationFrame(frame2);
-    };
-  }, [draw]);
-
-  useEffect(() => {
-    draw();
-  }, [draw]);
-
-  useEffect(() => {
     const wrapper = wrapperRef.current;
     if (!wrapper) return;
 
-    const observer = new ResizeObserver(() => {
-      draw();
-    });
-
+    const observer = new ResizeObserver(redraw);
     observer.observe(wrapper);
-    return () => observer.disconnect();
+    window.addEventListener("resize", redraw);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", redraw);
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
   }, [draw]);
 
   useEffect(() => {
@@ -204,22 +178,22 @@ export const WedgePicker: React.FC<PickerProps> = ({
 
   const updateFromPointer = (clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
-    const currentView = view;
-    if (!canvas || !currentView) return;
+    const currentMetrics = metrics;
+    if (!canvas || !currentMetrics) return;
 
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
-    const clampedX = Math.min(Math.max(clientX - rect.left, 0), rect.width);
-    const clampedY = Math.min(Math.max(clientY - rect.top, 0), rect.height);
+    const localX = Math.min(Math.max(clientX - rect.left, 0), rect.width);
+    const localY = Math.min(Math.max(clientY - rect.top, 0), rect.height);
 
-    const imageX = (clampedX / rect.width) * currentView.naturalWidth;
-    const imageY = (clampedY / rect.height) * currentView.naturalHeight;
+    const x = (localX / rect.width) * currentMetrics.naturalWidth;
+    const y = (localY / rect.height) * currentMetrics.naturalHeight;
 
     onUpdate({
       ...settings,
-      x: imageX,
-      y: imageY,
+      x,
+      y,
     });
   };
 
@@ -245,10 +219,10 @@ export const WedgePicker: React.FC<PickerProps> = ({
         onMouseLeave={() => setIsDragging(false)}
         style={{
           display: "block",
-          width: view ? `${view.displayWidth}px` : "auto",
-          height: view ? `${view.displayHeight}px` : "auto",
           maxWidth: "100%",
           maxHeight: "100%",
+          width: metrics ? `${metrics.displayWidth}px` : "auto",
+          height: metrics ? `${metrics.displayHeight}px` : "auto",
           cursor: isDragging ? "grabbing" : "crosshair",
         }}
       />
