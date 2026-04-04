@@ -1,5 +1,8 @@
 # Build
 export APPLE_SIGNING_IDENTITY=5CF51755590FF0D10D003787634667ACF96D9691
+export APPLE_ID="somedooby@gmail.com"
+export APPLE_PASSWORD=$(security find-generic-password -a "$USER" -s "notaryPassword" -w)
+export APPLE_TEAM_ID="WK272386LM"
 
 bun run tauri:build -- --target universal-apple-darwin
 

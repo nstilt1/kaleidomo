@@ -22,6 +22,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { useLicense } from "@/lib/license-context";
 
 import { PredefinedMenuItem } from "@tauri-apps/api/menu";
+import { Card, CardDescription, CardFooter } from "./ui/card";
 
 export async function setupAppMenu() {
   const appSubmenu = await Submenu.new({
@@ -796,8 +797,11 @@ function Kaleidomo() {
             <NumberSliderInput
               label="Sample Radius"
               value={settings.zoom}
-              min={isUnlocked && licenseType != "trial" ? 0.01 : 0.8}
-              max={isUnlocked && licenseType != "trial" ? 32.0 : 3.0}
+              shouldLimit={!isUnlocked || licenseType === "trial"}
+              limitedMin={0.8}
+              limitedCap={3.0}
+              min={0.01}
+              max={32.0}
               step={0.01}
               unit="x"
               onChange={(v) => setSettings(s => ({...s, zoom: v}))}
@@ -829,6 +833,8 @@ function Kaleidomo() {
               roundToInteger={false}
               />
 
+            <Card className="p-4">
+              <CardDescription>
             <NumberSliderInput 
               label="Offset X"
               value={settings.offset_x}
@@ -850,6 +856,17 @@ function Kaleidomo() {
               unit="px"
               roundToInteger={true}
             />
+              </CardDescription>
+              <CardFooter>
+                {(!isUnlocked || licenseType == "trial") && (
+                  <p className="text-xs text-muted-foreground">
+                    Offsets are only applied to previews within this app. 
+                    Upgrade to the perpetual license to unlock offsets in 
+                    exported media.
+                  </p>
+                )}
+              </CardFooter>
+            </Card>
           </div>
 
           {/* Group 2: Output */}
@@ -858,7 +875,9 @@ function Kaleidomo() {
               label="Output Resolution (length of smaller side)"
               value={settings.resolution}
               min={8}
-              max={isUnlocked && licenseType === "perpetual" ? 8192 : 720}
+              shouldLimit={!isUnlocked || licenseType === "trial"}
+              limitedCap={720}
+              max={8192}
               step={8}
               onChange={(v) => setSettings(s => ({...s, resolution: v}))}
               unit="px"
@@ -892,8 +911,10 @@ function Kaleidomo() {
             <NumberSliderInput
               label="Tile Count"
               value={settings.tile_count}
+              shouldLimit={!isUnlocked || licenseType === "trial"}
+              limitedCap={3.5}
               min={0.1}
-              max={isUnlocked ? 64.0 : 3.5}
+              max={64.0}
               step={0.1}
               onChange={(v) => setSettings(s => ({...s, tile_count: v}))}
               unit="tiles"
@@ -936,7 +957,9 @@ function Kaleidomo() {
               label="Frame Count"
               value={settings.frame_count}
               min={1}
-              max={isUnlocked && licenseType == "perpetual" ? 7200 : 1800}
+              shouldLimit={!isUnlocked || licenseType === "trial"}
+              limitedCap={1800}
+              max={7200}
               step={1}
               onChange={(v) => setSettings(s => ({...s, frame_count: v}))}
               unit="frames"
@@ -995,8 +1018,11 @@ function Kaleidomo() {
             <NumberSliderInput
               label="Max Zoom"
               value={settings.zoom_max}
-              min={isUnlocked && licenseType != "trial" ? 0.01 : 0.8}
-              max={isUnlocked && licenseType != "trial" ? 32.0 : 3.0}
+              shouldLimit={!isUnlocked || licenseType === "trial"}
+              limitedCap={3.0}
+              limitedMin={0.8}
+              min={0.01}
+              max={32.0}
               step={0.01}
               onChange={(v) => setSettings(s => ({...s, zoom_max: v}))}
               unit="x"
@@ -1005,8 +1031,11 @@ function Kaleidomo() {
             <NumberSliderInput
               label="Min Zoom"
               value={settings.zoom_min}
-              min={isUnlocked && licenseType != "trial" ? 0.01 : 0.8}
-              max={isUnlocked && licenseType != "trial" ? 32.0 : 3.0}
+              shouldLimit={!isUnlocked || licenseType === "trial"}
+              limitedCap={3.0}
+              limitedMin={0.8}
+              min={0.01}
+              max={32.0}
               step={0.01}
               onChange={(v) => setSettings(s => ({...s, zoom_min: v}))}
               unit="x"
@@ -1020,7 +1049,7 @@ function Kaleidomo() {
                 <SelectGroup>
                   <SelectLabel>Zoom Function</SelectLabel>
                   <SelectItem value="sin">Sine Wave</SelectItem>
-                  <SelectItem value="sawtooth">Linear/Triangle Wave</SelectItem>
+                  <SelectItem value="sawtooth">Triangle Wave</SelectItem>
                 </SelectGroup>
               </SelectContent>
             </Select>

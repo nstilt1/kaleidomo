@@ -1,5 +1,7 @@
-const VERSION: &str = "1.0.1";
+const VERSION: &str = "0.8.0";
 const PRODUCT_NAME: &str = "Kaleidomo";
+const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/dashboard/downloads";
+const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/shop/kaleidomo-kaleidoscope-generator/";
 
 use tauri_plugin_dialog::DialogExt;
 
@@ -516,6 +518,7 @@ pub fn run() {
             "AlteredBrainChemistry",
             product_id_hashmap,
             true,
+            "KALEIDOM-lmeFJbHEr_TBYqpeOSGjbsNl"
         )
         .await
     });
@@ -573,6 +576,8 @@ pub fn run() {
             update_license,
             delete_hardware_info_from_cloud,
             product_name,
+            downloads_url,
+            store_page_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

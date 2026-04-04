@@ -1,7 +1,7 @@
 use kaleidomo_core::LicenseData;
 use tauri::State;
 
-use crate::{AppState, VERSION, PRODUCT_NAME};
+use crate::{AppState, DOWNLOADS_URL, PRODUCT_NAME, STORE_PAGE_URL, VERSION};
 
 pub mod cooldown;
 
@@ -89,10 +89,20 @@ pub fn product_name() -> String {
 }
 
 #[tauri::command]
-pub fn display_system_stats() -> Result<kaleidomo_core::StatsDisplay, String> {
+pub fn downloads_url() -> String {
+    DOWNLOADS_URL.to_string()
+}
+
+#[tauri::command]
+pub fn store_page_url() -> String {
+    STORE_PAGE_URL.to_string()
+}
+
+#[tauri::command]
+pub async fn display_system_stats() -> Result<kaleidomo_core::StatsDisplay, String> {
     // Safety: function is only used to display hardware information.
     unsafe {
-        kaleidomo_core::get_machine_stats_for_display()
+        kaleidomo_core::get_machine_stats_for_display().await
     }
 }
 

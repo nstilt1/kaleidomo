@@ -388,6 +388,7 @@ function HardwareInfoDialog({
       setCurrentInfo(current);
       setStoredInfo(stored);
     } catch (err) {
+      console.error("Failed to loadData for HardwareInfoDialog: ", err);
       const message =
         err instanceof Error ? err.message : "Failed to load hardware information.";
       setError(message);
@@ -545,6 +546,8 @@ export function LicenseActivationCard(): React.JSX.Element {
   const { canSync, remainingLabel, markSynced } = useLicenseSyncCooldown();
   const [version, setVersion] = React.useState("");
   const [productName, setProductName] = React.useState("");
+  const [downloadsUrl, setDownloadsUrl] = React.useState("");
+  const [storePageUrl, setStorePageUrl] = React.useState("");
 
   React.useEffect(() => {
     invoke<string>("current_version")
@@ -552,7 +555,13 @@ export function LicenseActivationCard(): React.JSX.Element {
       .catch(() => setVersion(""));
     invoke<string>("product_name")
       .then(setProductName)
-      .catch(() => setProductName(""));  
+      .catch(() => setProductName(""));
+    invoke<string>("downloads_url")
+      .then(setDownloadsUrl)
+      .catch(() => setDownloadsUrl(""));
+    invoke<string>("store_page_url")
+      .then(setStorePageUrl)
+      .catch(() => setStorePageUrl(""));
   }, []);
 
   React.useEffect(() => {
@@ -573,6 +582,7 @@ export function LicenseActivationCard(): React.JSX.Element {
       setLicenseInfo(info);
       setNeedsUpdate(updateFlag);
     } catch (error) {
+      console.error("Failed to load license information in loadState: ", error);
       const message =
         error instanceof Error ? error.message : "Failed to load license information.";
       setFormError(message);
@@ -809,8 +819,8 @@ export function LicenseActivationCard(): React.JSX.Element {
             <Alert>
               <Info className="h-4 w-4" />
               <AlertDescription>
-                A new version is available for this license. Please update to access the latest
-                licensed version. New version: V{licenseInfo?.licenseData.version}
+                A new version is available for this product. Please update to access the latest
+                licensed version. New version: V{licenseInfo?.licenseData.version}. <a href={downloadsUrl} className="underline underline-offset-4">Downloads Page</a> to get the latest version.
               </AlertDescription>
             </Alert>
           )}
