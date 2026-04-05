@@ -319,8 +319,19 @@ function Kaleidomo() {
       const img = new Image();
       img.src = assetUrl;
       img.onload = () => {
+        const isPortrait = img.naturalHeight > img.naturalWidth;
+
+        if (isPortrait) {
+          alert("Portrait images are supported, but it is recommended to use landscape or square images.");
+        }
+
         setImgWidth(img.naturalWidth);
         setImgHeight(img.naturalHeight);
+        setSettings((s) => ({
+          ...s,
+          x: img.naturalWidth / 2,
+          y: img.naturalHeight / 2,
+        }));
       };
       /*
       img.onload = () => {
@@ -401,6 +412,8 @@ function Kaleidomo() {
         kaleidoType: kaleidoType,
         tileCount: settings.tile_count,
         hueRotation: settings.hue_rotate,
+        imgWidth: imgWidth,
+        imgHeight: imgHeight,
       });
       setOutputSrc(result);
     } catch (e) {
@@ -682,6 +695,8 @@ function Kaleidomo() {
         kaleidoType: kaleidoType,
         tileCount: settings.tile_count,
         hueRotation: settings.hue_rotate,
+        imgWidth: imgWidth,
+        imgHeight: imgHeight,
       });
       alert(message);
     } catch (e) {
@@ -721,6 +736,8 @@ function Kaleidomo() {
         zoomFn: settings.zoom_fn,
         zoomStartOffset: settings.zoom_start_offset,
         numZoomLoops: settings.num_zoom_loops,
+        imgWidth: imgWidth,
+        imgHeight: imgHeight,
       });
       alert(message);
     } catch (e) {
@@ -787,8 +804,10 @@ function Kaleidomo() {
             <NumberSliderInput
               label="Slices"
               value={count}
+              shouldLimit={!isUnlocked || licenseType == "trial"}
+              limitedCap={12}
               min={3}
-              max={isUnlocked ? 12 : 64}
+              max={64}
               step={1}
               onChange={(v) => setCount(v)}
               roundToInteger={true}

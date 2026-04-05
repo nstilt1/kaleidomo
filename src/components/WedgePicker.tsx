@@ -34,11 +34,13 @@ interface PickerProps {
   onUpdate: (s: Settings) => void;
 }
 
-type ImageMetrics = {
+type ViewMetrics = {
   naturalWidth: number;
   naturalHeight: number;
   displayWidth: number;
   displayHeight: number;
+  offsetX: number;
+  offsetY: number;
   scaleX: number;
   scaleY: number;
 };
@@ -54,7 +56,7 @@ export const WedgePicker: React.FC<PickerProps> = ({
   const imageRef = useRef<HTMLImageElement | null>(null);
 
   const [isDragging, setIsDragging] = useState(false);
-  const [metrics, setMetrics] = useState<ImageMetrics | null>(null);
+  const [metrics, setMetrics] = useState<ViewMetrics | null>(null);
 
   const draw = useCallback(() => {
     const wrapper = wrapperRef.current;
@@ -66,43 +68,56 @@ export const WedgePicker: React.FC<PickerProps> = ({
     if (!ctx) return;
 
     const wrapperRect = wrapper.getBoundingClientRect();
-    const maxWidth = Math.max(1, Math.floor(wrapperRect.width));
-    const maxHeight = Math.max(1, Math.floor(wrapperRect.height));
+    const viewportWidth = Math.max(1, Math.floor(wrapperRect.width));
+    const viewportHeight = Math.max(1, Math.floor(wrapperRect.height));
 
     const naturalWidth = image.naturalWidth;
     const naturalHeight = image.naturalHeight;
     if (naturalWidth <= 0 || naturalHeight <= 0) return;
 
-    const fitScale = Math.min(maxWidth / naturalWidth, maxHeight / naturalHeight, 1);
+    const fitScale = Math.min(
+      viewportWidth / naturalWidth,
+      viewportHeight / naturalHeight
+    );
 
     const displayWidth = Math.max(1, Math.round(naturalWidth * fitScale));
     const displayHeight = Math.max(1, Math.round(naturalHeight * fitScale));
 
+    const offsetX = Math.floor((viewportWidth - displayWidth) / 2);
+    const offsetY = Math.floor((viewportHeight - displayHeight) / 2);
+
     const scaleX = displayWidth / naturalWidth;
     const scaleY = displayHeight / naturalHeight;
 
-    canvas.width = displayWidth;
-    canvas.height = displayHeight;
-    canvas.style.width = `${displayWidth}px`;
-    canvas.style.height = `${displayHeight}px`;
+    canvas.width = viewportWidth;
+    canvas.height = viewportHeight;
+    canvas.style.width = `${viewportWidth}px`;
+    canvas.style.height = `${viewportHeight}px`;
 
     setMetrics({
       naturalWidth,
       naturalHeight,
       displayWidth,
       displayHeight,
+      offsetX,
+      offsetY,
       scaleX,
       scaleY,
     });
 
-    ctx.clearRect(0, 0, displayWidth, displayHeight);
-    ctx.drawImage(image, 0, 0, displayWidth, displayHeight);
+    ctx.clearRect(0, 0, viewportWidth, viewportHeight);
+
+    // black background for the letterbox bars
+    ctx.fillStyle = "#020617";
+    ctx.fillRect(0, 0, viewportWidth, viewportHeight);
+
+    // fitted image
+    ctx.drawImage(image, offsetX, offsetY, displayWidth, displayHeight);
+
+    const displayX = offsetX + settings.x * scaleX;
+    const displayY = offsetY + settings.y * scaleY;
 
     const sliceAngle = (2 * Math.PI) / count;
-
-    const displayX = settings.x * scaleX;
-    const displayY = settings.y * scaleY;
-
     const sourceRadius = settings.resolution / (2 * settings.zoom);
     const visualRadius = sourceRadius * Math.min(scaleX, scaleY);
 
@@ -184,11 +199,31 @@ export const WedgePicker: React.FC<PickerProps> = ({
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
-    const localX = Math.min(Math.max(clientX - rect.left, 0), rect.width);
-    const localY = Math.min(Math.max(clientY - rect.top, 0), rect.height);
+    const localX = ((clientX - rect.left) / rect.width) * canvas.width;
+    const localY = ((clientY - rect.top) / rect.height) * canvas.height;
+    console.log("updateFromPointer.localX", localX);
+    console.log("updateFromPointer.localY", localY);
 
-    const x = (localX / rect.width) * currentMetrics.naturalWidth;
-    const y = (localY / rect.height) * currentMetrics.naturalHeight;
+    const imageLocalX = localX - currentMetrics.offsetX;
+    const imageLocalY = localY - currentMetrics.offsetY;
+    console.log("updateFromPointer.imageLocalX", imageLocalX);
+    console.log("updateFromPointer.imageLocalY", imageLocalY);
+
+    // Ignore clicks in the black bars
+    if (
+      imageLocalX < 0 ||
+      imageLocalY < 0 ||
+      imageLocalX > currentMetrics.displayWidth ||
+      imageLocalY > currentMetrics.displayHeight
+    ) {
+      return;
+    }
+
+    const x = imageLocalX / currentMetrics.scaleX;
+    const y = imageLocalY / currentMetrics.scaleY;
+
+    console.log("updateFromPointer.x", x);
+    console.log("updateFromPointer.y", y);
 
     onUpdate({
       ...settings,
@@ -219,10 +254,8 @@ export const WedgePicker: React.FC<PickerProps> = ({
         onMouseLeave={() => setIsDragging(false)}
         style={{
           display: "block",
-          maxWidth: "100%",
-          maxHeight: "100%",
-          width: metrics ? `${metrics.displayWidth}px` : "auto",
-          height: metrics ? `${metrics.displayHeight}px` : "auto",
+          width: "100%",
+          height: "100%",
           cursor: isDragging ? "grabbing" : "crosshair",
         }}
       />

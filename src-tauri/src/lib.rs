@@ -6,7 +6,7 @@ const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/shop/kaleidomo-k
 use tauri_plugin_dialog::DialogExt;
 
 use std::{collections::HashMap, sync::Mutex};
-use kaleidomo_core::pollster;
+use kaleidomo_core::{KaleidoSettings, pollster};
 use tauri::{Manager, State};
 
 use tauri::menu::{MenuBuilder, PredefinedMenuItem, SubmenuBuilder};
@@ -35,6 +35,14 @@ fn round_to_nearest_multiple(value: u32, multiple: u32) -> u32 {
     ((value + multiple - 1) / multiple) * multiple
 }
 
+pub fn adjust_wedge_params(settings: &mut KaleidoSettings, img_width: u32, img_height: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        settings.triangle_center_x = (img_width - 1) as f32 - settings.triangle_center_x;
+        settings.triangle_center_y = (img_height - 1) as f32 - settings.triangle_center_y;
+        settings.triangle_rotation_rad -= core::f32::consts::PI;
+    }
+}
 /// Limiting the license using a macro since it copies all of the code 
 /// at compile time.
 macro_rules! limit_license {
@@ -158,6 +166,8 @@ async fn export_kaleidoscope(
     kaleido_type: String,
     mut tile_count: f32,
     hue_rotation: u32,
+    img_width: u32,
+    img_height: u32,
 ) -> Result<String, String> {
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count);
 
@@ -175,7 +185,7 @@ async fn export_kaleidoscope(
     // 2. Perform the high-res render
     let img = image::open(&path).map_err(|e| e.to_string())?;
     
-    let settings = kaleidomo_core::KaleidoSettings {
+    let mut settings = kaleidomo_core::KaleidoSettings {
         count,
         output_size_h,
         output_size_w,
@@ -196,6 +206,7 @@ async fn export_kaleidoscope(
         },
         hue_rotation
     };
+    adjust_wedge_params(&mut settings, img_width, img_height);
 
     let use_gpu = {
         let guard = state
@@ -270,6 +281,8 @@ async fn generate_kaleidoscope(
     kaleido_type: String,
     mut tile_count: f32,
     hue_rotation: u32,
+    img_width: u32,
+    img_height: u32,
 ) -> Result<String, String> {
     let mut _offset_x = 0;
     let mut _offset_y = 0;
@@ -277,7 +290,7 @@ async fn generate_kaleidoscope(
     // 1. Load the image from the absolute path
     let img = image::open(&path).map_err(|e| e.to_string())?;
 
-    let settings = kaleidomo_core::KaleidoSettings {
+    let mut settings = kaleidomo_core::KaleidoSettings {
         count,
         output_size_h, // High-res preview
         output_size_w,
@@ -298,6 +311,7 @@ async fn generate_kaleidoscope(
         },
         hue_rotation,
     };
+    adjust_wedge_params(&mut settings, img_width, img_height);
 
     let use_gpu = {
         let guard = state
@@ -369,6 +383,8 @@ async fn generate_video(
     zoom_fn: String,
     zoom_start_offset: f32,
     num_zoom_loops: u32,
+    img_width: u32,
+    img_height: u32,
 ) -> Result<String, String> {
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count);
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_max, tile_count);
@@ -386,7 +402,7 @@ async fn generate_video(
     // 1. Load the image from the absolute path
     let img = image::open(&path).map_err(|e| e.to_string())?;
 
-    let settings = kaleidomo_core::KaleidoSettings {
+    let mut settings = kaleidomo_core::KaleidoSettings {
         count,
         output_size_h, // High-res preview
         output_size_w,
@@ -407,6 +423,7 @@ async fn generate_video(
         },
         hue_rotation,
     };
+    adjust_wedge_params(&mut settings, img_width, img_height);
 
     let video_settings = kaleidomo_core::VideoSettings {
         frame_count,
