@@ -107,11 +107,9 @@ export const WedgePicker: React.FC<PickerProps> = ({
 
     ctx.clearRect(0, 0, viewportWidth, viewportHeight);
 
-    // black background for the letterbox bars
     ctx.fillStyle = "#020617";
     ctx.fillRect(0, 0, viewportWidth, viewportHeight);
 
-    // fitted image
     ctx.drawImage(image, offsetX, offsetY, displayWidth, displayHeight);
 
     const displayX = offsetX + settings.x * scaleX;
@@ -141,14 +139,30 @@ export const WedgePicker: React.FC<PickerProps> = ({
   }, [count, settings]);
 
   useEffect(() => {
+    if (!imagePath || imagePath.trim() === "") {
+      imageRef.current = null;
+      return;
+    }
+
     const img = new Image();
     img.crossOrigin = "anonymous";
-    img.src = convertFileSrc(imagePath);
+    const src = convertFileSrc(imagePath);
 
     img.onload = () => {
       imageRef.current = img;
       draw();
     };
+
+    img.onerror = (event) => {
+      console.error("WedgePicker image failed to load", {
+        imagePath,
+        src,
+        event,
+      });
+      imageRef.current = null;
+    };
+
+    img.src = src;
 
     return () => {
       imageRef.current = null;
@@ -201,15 +215,10 @@ export const WedgePicker: React.FC<PickerProps> = ({
 
     const localX = ((clientX - rect.left) / rect.width) * canvas.width;
     const localY = ((clientY - rect.top) / rect.height) * canvas.height;
-    console.log("updateFromPointer.localX", localX);
-    console.log("updateFromPointer.localY", localY);
 
     const imageLocalX = localX - currentMetrics.offsetX;
     const imageLocalY = localY - currentMetrics.offsetY;
-    console.log("updateFromPointer.imageLocalX", imageLocalX);
-    console.log("updateFromPointer.imageLocalY", imageLocalY);
 
-    // Ignore clicks in the black bars
     if (
       imageLocalX < 0 ||
       imageLocalY < 0 ||
@@ -221,9 +230,6 @@ export const WedgePicker: React.FC<PickerProps> = ({
 
     const x = imageLocalX / currentMetrics.scaleX;
     const y = imageLocalY / currentMetrics.scaleY;
-
-    console.log("updateFromPointer.x", x);
-    console.log("updateFromPointer.y", y);
 
     onUpdate({
       ...settings,

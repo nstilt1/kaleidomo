@@ -5,6 +5,7 @@ const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/shop/kaleidomo-k
 
 use tauri_plugin_dialog::DialogExt;
 
+use std::path::Path;
 use std::{collections::HashMap, sync::Mutex};
 use kaleidomo_core::{KaleidoSettings, pollster};
 use tauri::{Manager, State};
@@ -18,6 +19,22 @@ mod licensing;
 use licensing::*;
 
 use tokio::sync::Mutex as AsyncMutex;
+
+#[cfg(feature = "logging")]
+use log::*;
+
+#[cfg(feature = "logging")]
+macro_rules! log_error {
+    ($($arg:tt)*) => {{
+        log::error!("{}", &::std::format!($($arg)*))
+    }};
+}
+
+#[cfg(not(feature = "logging"))]
+macro_rules! log_error {
+    ($($arg:tt)*) => {{
+    }};
+}
 
 pub struct AppState {
     pub gpu: Mutex<Option<GpuBackend>>,
@@ -35,14 +52,24 @@ fn round_to_nearest_multiple(value: u32, multiple: u32) -> u32 {
     ((value + multiple - 1) / multiple) * multiple
 }
 
-pub fn adjust_wedge_params(settings: &mut KaleidoSettings, img_width: u32, img_height: u32) {
+fn adjust_wedge_params(settings: &mut KaleidoSettings, img_width: u32, img_height: u32) {
     #[cfg(target_os = "windows")]
     {
-        settings.triangle_center_x = (img_width - 1) as f32 - settings.triangle_center_x;
-        settings.triangle_center_y = (img_height - 1) as f32 - settings.triangle_center_y;
+        settings.triangle_center_x = (img_width) as f32 - settings.triangle_center_x;
+        settings.triangle_center_y = (img_height) as f32 - settings.triangle_center_y;
         settings.triangle_rotation_rad -= core::f32::consts::PI;
     }
 }
+
+fn adjust_path(path: &String) -> String {
+    let path_str = path.to_string();
+
+    #[cfg(target_os = "windows")]
+    let path_str = path_str.replace("\\", "/");
+
+    path_str
+}
+
 /// Limiting the license using a macro since it copies all of the code 
 /// at compile time.
 macro_rules! limit_license {
@@ -136,7 +163,13 @@ fn select_image(
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<(), String> {
-    let img = image::open(&path).map_err(|e| e.to_string())?;
+    let img = match image::open(&path).map_err(|e| e.to_string()) {
+        Ok(v) => v,
+        Err(e) => {
+            log_error!("Error select_image: {}", e);
+            return Err(e);
+        }
+    };
     
     let mut gpu = state
         .gpu
@@ -183,7 +216,13 @@ async fn export_kaleidoscope(
     };
 
     // 2. Perform the high-res render
-    let img = image::open(&path).map_err(|e| e.to_string())?;
+    let img = match image::open(&path).map_err(|e| e.to_string()) {
+        Ok(v) => v,
+        Err(e) => {
+            log_error!("error export_kaleidoscope: {}", e);
+            return Err(e);
+        }
+    };
     
     let mut settings = kaleidomo_core::KaleidoSettings {
         count,
@@ -268,6 +307,7 @@ use base64::Engine as _;
 #[tauri::command]
 async fn generate_kaleidoscope(
     state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
     path: String,
     x: f32,
     y: f32,
@@ -287,9 +327,15 @@ async fn generate_kaleidoscope(
     let mut _offset_x = 0;
     let mut _offset_y = 0;
     limit_license!(state, output_size_w, output_size_h, _offset_x, _offset_y, zoom, tile_count);
-    // 1. Load the image from the absolute path
-    let img = image::open(&path).map_err(|e| e.to_string())?;
 
+    #[cfg(feature = "logging")]
+    {
+        let window = app.get_webview_window("main").unwrap();
+        window.open_devtools();
+    }
+
+    let path = adjust_path(&path);
+    // 1. Load the image from the absolute path
     let mut settings = kaleidomo_core::KaleidoSettings {
         count,
         output_size_h, // High-res preview
@@ -342,6 +388,15 @@ async fn generate_kaleidoscope(
         image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
             .ok_or_else(|| "Failed to construct image".to_string())?
     } else {
+        let img = match image::open(&path)
+            .map_err(|e| format!("Failed to open image at path '{}': {}", path, e)) {
+                Ok(v) => v,
+                Err(e) => {
+                    log_error!("error generate_kaleidoscope: {}", e);
+                    return Err(e);
+                }
+            };
+
         kaleidomo_core::render_kaleidoscope_with_auto_backend(&img, settings)
     };
 
@@ -400,7 +455,13 @@ async fn generate_video(
         return Err("Video export cancelled".into());
     };
     // 1. Load the image from the absolute path
-    let img = image::open(&path).map_err(|e| e.to_string())?;
+    let img = match image::open(&path).map_err(|e| e.to_string()) {
+        Ok(v) => v,
+        Err(e) => {
+            log_error!("error generate_video: {}", e);
+            return Err(e);
+        }
+    };
 
     let mut settings = kaleidomo_core::KaleidoSettings {
         count,
@@ -574,6 +635,21 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("kaleidomo".to_string()),
+                    },
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Webview,
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             generate_kaleidoscope,
             generate_video,

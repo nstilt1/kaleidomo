@@ -8,6 +8,8 @@ import { LicenseProvider, useLicense } from "@/lib/license-context"
 import React from "react"
 import { invoke } from "@tauri-apps/api/core"
 
+//import { attachConsole} from "@tauri-apps/plugin-log"
+
 function CreateIcon() {
   return (
     <img
