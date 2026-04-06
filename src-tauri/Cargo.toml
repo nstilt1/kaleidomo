@@ -25,6 +25,7 @@ logging = ["log", "tauri/devtools"]
 base64 = "0.21"
 image = "0.24"
 kaleidomo-core = { path = "../kaleidomo-core" }
+kamadak-exif = "0.6"
 log = { version = "0.4", optional = true }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"

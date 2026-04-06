@@ -20,6 +20,47 @@ use licensing::*;
 
 use tokio::sync::Mutex as AsyncMutex;
 
+use std::fs::File;
+use std::io::BufReader;
+
+fn apply_exif_orientation(mut img: image::DynamicImage, path: &str) -> image::DynamicImage {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return img,
+    };
+
+    let mut reader = BufReader::new(file);
+
+    let exif = match exif::Reader::new().read_from_container(&mut reader) {
+        Ok(v) => v,
+        Err(_) => return img,
+    };
+
+    let orientation = exif
+        .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+        .and_then(|field| field.value.get_uint(0))
+        .unwrap_or(1);
+
+    match orientation {
+        1 => img,
+        2 => img.fliph(),
+        3 => img.rotate180(),
+        4 => img.flipv(),
+        5 => img.fliph().rotate90(),
+        6 => img.rotate90(),
+        7 => img.fliph().rotate270(),
+        8 => img.rotate270(),
+        _ => img,
+    }
+}
+
+fn load_source_image(path: &str) -> Result<image::DynamicImage, String> {
+    let img = image::open(path)
+        .map_err(|e| format!("failed to open image '{}': {}", path, e))?;
+
+    Ok(apply_exif_orientation(img, path))
+}
+
 #[cfg(feature = "logging")]
 use log::*;
 
@@ -88,12 +129,12 @@ fn clamp(value: &mut f32, min: f32, max: f32) {
 }
 
 fn adjust_wedge_params(settings: &mut KaleidoSettings, img_width: u32, img_height: u32, use_gpu: bool) {
-    #[cfg(target_os = "windows")]
-    if true {
-        settings.triangle_center_x = (img_width - 1) as f32 - settings.triangle_center_x;
-        settings.triangle_center_y = (img_height - 1) as f32 - settings.triangle_center_y;
-        settings.triangle_rotation_rad -= core::f32::consts::PI;
-    }
+    // #[cfg(target_os = "windows")]
+    // if true {
+    //     settings.triangle_center_x = (img_width - 1) as f32 - settings.triangle_center_x;
+    //     settings.triangle_center_y = (img_height - 1) as f32 - settings.triangle_center_y;
+    //     settings.triangle_rotation_rad -= core::f32::consts::PI;
+    // }
 
     clamp(&mut settings.triangle_center_x, 0f32, img_width as f32 - 1.0);
     clamp(&mut settings.triangle_center_y, 0f32, img_height as f32 - 1.0);
@@ -228,7 +269,7 @@ fn select_image(
         *guard
     };
 
-    let img = match image::open(&normalized_path).map_err(|e| e.to_string()) {
+    let img = match load_source_image(&normalized_path) {
         Ok(v) => v,
         Err(e) => {
             log_error!("Error select_image open: {}", e);
@@ -303,7 +344,7 @@ async fn export_kaleidoscope(
     };
 
     // 2. Perform the high-res render
-    let img = match image::open(&path).map_err(|e| e.to_string()) {
+    let img = match load_source_image(&path) {
         Ok(v) => v,
         Err(e) => {
             log_error!("error export_kaleidoscope: {}", e);
@@ -395,7 +436,6 @@ use base64::Engine as _;
 #[tauri::command]
 async fn generate_kaleidoscope(
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
     path: String,
     x: f32,
     y: f32,
@@ -415,12 +455,6 @@ async fn generate_kaleidoscope(
     let mut _offset_x = 0;
     let mut _offset_y = 0;
     limit_license!(state, output_size_w, output_size_h, _offset_x, _offset_y, zoom, tile_count);
-
-    #[cfg(feature = "logging")]
-    {
-        let window = app.get_webview_window("main").unwrap();
-        window.open_devtools();
-    }
 
     let path = adjust_path(&path);
     // 1. Load the image from the absolute path
@@ -477,7 +511,7 @@ async fn generate_kaleidoscope(
         image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
             .ok_or_else(|| "Failed to construct image".to_string())?
     } else {
-        let img = match image::open(&path)
+        let img = match load_source_image(&path)
             .map_err(|e| format!("Failed to open image at path '{}': {}", path, e)) {
                 Ok(v) => v,
                 Err(e) => {
@@ -544,7 +578,7 @@ async fn generate_video(
         return Err("Video export cancelled".into());
     };
     // 1. Load the image from the absolute path
-    let img = match image::open(&path).map_err(|e| e.to_string()) {
+    let img = match load_source_image(&path) {
         Ok(v) => v,
         Err(e) => {
             log_error!("error generate_video: {}", e);
@@ -721,6 +755,13 @@ pub fn run() {
                 .build()?;
 
             app.set_menu(menu)?;
+
+            
+            #[cfg(feature = "logging")]
+            {
+                let window = app.get_webview_window("main").unwrap();
+                window.open_devtools();
+            }
 
             Ok(())
         })

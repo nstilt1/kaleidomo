@@ -824,7 +824,7 @@ function Kaleidomo() {
             />
 
             <NumberSliderInput
-              label="Sample Radius"
+              label="Zoom"
               value={settings.zoom}
               shouldLimit={!isUnlocked || licenseType === "trial"}
               limitedMin={0.8}

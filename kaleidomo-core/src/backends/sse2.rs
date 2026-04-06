@@ -259,7 +259,7 @@ impl KaleidoBackend for __m128 {
             (sx, sy)
         }
     }
-    #[target_feature(enable = "sse2")]
+    #[target_feature(enable = "avx2")]
     #[inline]
     unsafe fn store_pixel(
         output: &mut [u8],
@@ -274,6 +274,7 @@ impl KaleidoBackend for __m128 {
             let zero = _mm_set1_ps(0.0);
             let sw_v = _mm_set1_ps(sw as f32);
             let sh_v = _mm_set1_ps(sh as f32);
+
             let v_mask = _mm_and_ps(
                 _mm_and_ps(
                     _mm_cmp_ps::<_CMP_GE_OS>(sx, zero),
@@ -285,20 +286,28 @@ impl KaleidoBackend for __m128 {
                 ),
             );
 
-            let sx_i = _mm_cvtps_epi32(sx);
-            let sy_i = _mm_cvtps_epi32(sy);
-            let mut xs = [0u32; Self::NUM_FLOATS];
-            let mut ys = [0u32; Self::NUM_FLOATS];
-            let mut m = [0u32; Self::NUM_FLOATS];
+            let lane_mask = _mm_movemask_ps(v_mask) as u32;
+
+            let max_x = _mm_set1_ps(sw.saturating_sub(1) as f32);
+            let max_y = _mm_set1_ps(sh.saturating_sub(1) as f32);
+
+            let sx_safe = _mm_max_ps(zero, _mm_min_ps(sx, max_x));
+            let sy_safe = _mm_max_ps(zero, _mm_min_ps(sy, max_y));
+
+            let sx_i = _mm_cvttps_epi32(sx_safe);
+            let sy_i = _mm_cvttps_epi32(sy_safe);
+
+            let mut xs = [0i32; Self::NUM_FLOATS];
+            let mut ys = [0i32; Self::NUM_FLOATS];
+
             _mm_storeu_si128(xs.as_mut_ptr() as *mut __m128i, sx_i);
             _mm_storeu_si128(ys.as_mut_ptr() as *mut __m128i, sy_i);
-            _mm_storeu_si128(m.as_mut_ptr() as *mut __m128i, _mm_castps_si128(v_mask));
 
             for i in 0..Self::NUM_FLOATS {
-                if m[i] != 0 {
-                    let offset = i as u32 * 4;
-                    let pixel = source.get_pixel(xs[i], ys[i]);
-                    output[offset as usize..(offset + 4) as usize].copy_from_slice(&pixel.0)
+                if ((lane_mask >> i) & 1) != 0 {
+                    let offset = i * 4;
+                    let pixel = source.get_pixel(xs[i] as u32, ys[i] as u32);
+                    output[offset..offset + 4].copy_from_slice(&pixel.0);
                 }
             }
         }

@@ -280,6 +280,7 @@ impl KaleidoBackend for __m256 {
             let zero = _mm256_set1_ps(0.0);
             let sw_v = _mm256_set1_ps(sw as f32);
             let sh_v = _mm256_set1_ps(sh as f32);
+
             let v_mask = _mm256_and_ps(
                 _mm256_and_ps(
                     _mm256_cmp_ps::<_CMP_GE_OS>(sx, zero),
@@ -291,20 +292,28 @@ impl KaleidoBackend for __m256 {
                 ),
             );
 
-            let sx_i = _mm256_cvtps_epi32(sx);
-            let sy_i = _mm256_cvtps_epi32(sy);
-            let mut xs = [0u32; Self::NUM_FLOATS];
-            let mut ys = [0u32; Self::NUM_FLOATS];
-            let mut m = [0u32; Self::NUM_FLOATS];
+            let lane_mask = _mm256_movemask_ps(v_mask) as u32;
+
+            let max_x = _mm256_set1_ps(sw.saturating_sub(1) as f32);
+            let max_y = _mm256_set1_ps(sh.saturating_sub(1) as f32);
+
+            let sx_safe = _mm256_max_ps(zero, _mm256_min_ps(sx, max_x));
+            let sy_safe = _mm256_max_ps(zero, _mm256_min_ps(sy, max_y));
+
+            let sx_i = _mm256_cvttps_epi32(sx_safe);
+            let sy_i = _mm256_cvttps_epi32(sy_safe);
+
+            let mut xs = [0i32; Self::NUM_FLOATS];
+            let mut ys = [0i32; Self::NUM_FLOATS];
+
             _mm256_storeu_si256(xs.as_mut_ptr() as *mut __m256i, sx_i);
             _mm256_storeu_si256(ys.as_mut_ptr() as *mut __m256i, sy_i);
-            _mm256_storeu_si256(m.as_mut_ptr() as *mut __m256i, _mm256_castps_si256(v_mask));
 
             for i in 0..Self::NUM_FLOATS {
-                if m[i] != 0 {
-                    let offset = i as u32 * 4;
-                    let pixel = source.get_pixel(xs[i], ys[i]);
-                    output[offset as usize..(offset + 4) as usize].copy_from_slice(&pixel.0)
+                if ((lane_mask >> i) & 1) != 0 {
+                    let offset = i * 4;
+                    let pixel = source.get_pixel(xs[i] as u32, ys[i] as u32);
+                    output[offset..offset + 4].copy_from_slice(&pixel.0);
                 }
             }
         }
