@@ -36,6 +36,35 @@ macro_rules! log_error {
     }};
 }
 
+use std::backtrace::Backtrace;
+use std::panic;
+
+fn install_panic_hook() {
+    panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "non-string panic payload".to_string()
+        };
+
+        let backtrace = Backtrace::force_capture();
+        #[cfg(feature = "logging")]
+        error!(
+            "PANIC at {}: {}\nBacktrace:\n{}",
+            location,
+            payload,
+            backtrace
+        );
+    }));
+}
+
 pub struct AppState {
     pub gpu: Mutex<Option<GpuBackend>>,
     pub use_gpu_acceleration: Mutex<bool>,
@@ -43,6 +72,7 @@ pub struct AppState {
     pub license_status: kaleidomo_core::LicenseStatus,
     pub license_data: kaleidomo_core::LicenseData,
     pub license_sync_cooldown: AsyncMutex<licensing::cooldown::LicenseSyncCooldownState>,
+    pub loaded_gpu_image_path: Mutex<Option<String>>,
 }
 
 fn round_to_nearest_multiple(value: u32, multiple: u32) -> u32 {
@@ -52,13 +82,21 @@ fn round_to_nearest_multiple(value: u32, multiple: u32) -> u32 {
     ((value + multiple - 1) / multiple) * multiple
 }
 
-fn adjust_wedge_params(settings: &mut KaleidoSettings, img_width: u32, img_height: u32) {
+fn clamp(value: &mut f32, min: f32, max: f32) {
+    *value = value.max(min);
+    *value = value.min(max);
+}
+
+fn adjust_wedge_params(settings: &mut KaleidoSettings, img_width: u32, img_height: u32, use_gpu: bool) {
     #[cfg(target_os = "windows")]
-    {
-        settings.triangle_center_x = (img_width) as f32 - settings.triangle_center_x;
-        settings.triangle_center_y = (img_height) as f32 - settings.triangle_center_y;
+    if true {
+        settings.triangle_center_x = (img_width - 1) as f32 - settings.triangle_center_x;
+        settings.triangle_center_y = (img_height - 1) as f32 - settings.triangle_center_y;
         settings.triangle_rotation_rad -= core::f32::consts::PI;
     }
+
+    clamp(&mut settings.triangle_center_x, 0f32, img_width as f32 - 1.0);
+    clamp(&mut settings.triangle_center_y, 0f32, img_height as f32 - 1.0);
 }
 
 fn adjust_path(path: &String) -> String {
@@ -163,22 +201,71 @@ fn select_image(
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<(), String> {
-    let img = match image::open(&path).map_err(|e| e.to_string()) {
+    let normalized_path = adjust_path(&path);
+
+    {
+        let current_path = state
+            .loaded_gpu_image_path
+            .lock()
+            .map_err(|_| "failed to lock loaded GPU image path".to_string())?;
+
+        if current_path.as_deref() == Some(normalized_path.as_str()) {
+            return Ok(());
+        }
+    }
+
+    let use_gpu = {
+        let guard = match state
+            .use_gpu_acceleration
+            .lock()
+            .map_err(|_| "Failed to lock GPU preference state".to_string()) {
+                Ok(v) => v,
+                Err(e) => {
+                    log_error!("Error select_image: {}", e);
+                    return Err(e);
+                }
+            };
+        *guard
+    };
+
+    let img = match image::open(&normalized_path).map_err(|e| e.to_string()) {
         Ok(v) => v,
         Err(e) => {
-            log_error!("Error select_image: {}", e);
+            log_error!("Error select_image open: {}", e);
             return Err(e);
         }
     };
-    
+
     let mut gpu = state
         .gpu
         .lock()
         .map_err(|_| "failed to lock GPU backend".to_string())?;
 
     if let Some(gpu) = gpu.as_mut() {
-        gpu.set_source_image(&img).map_err(|e| e.to_string())?;
+        match gpu.set_source_image(&img).map_err(|e| e.to_string()) {
+            Ok(_) => (),
+            Err(e) => {
+                log_error!("select_image error set_source_image: {}", e);
+                return Err(e);
+            }
+        };
+    } else {
+        return Err("GPU backend is unavailable".into());
     }
+
+    let mut current_path = match state
+        .loaded_gpu_image_path
+        .lock()
+        .map_err(|_| "failed to lock loaded GPU image path".to_string()) {
+            Ok(v) => v,
+            Err(e) => {
+                log_error!("select_image error current_path = ... {}", e);
+                return Err(e);
+            }
+        };
+
+    *current_path = Some(normalized_path);
+
     Ok(())
 }
 
@@ -245,7 +332,6 @@ async fn export_kaleidoscope(
         },
         hue_rotation
     };
-    adjust_wedge_params(&mut settings, img_width, img_height);
 
     let use_gpu = {
         let guard = state
@@ -254,6 +340,8 @@ async fn export_kaleidoscope(
             .map_err(|_| "Failed to lock GPU preference state".to_string())?;
         *guard
     };
+
+    adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
 
     if use_gpu {
         let mut gpu = state
@@ -357,7 +445,6 @@ async fn generate_kaleidoscope(
         },
         hue_rotation,
     };
-    adjust_wedge_params(&mut settings, img_width, img_height);
 
     let use_gpu = {
         let guard = state
@@ -366,6 +453,8 @@ async fn generate_kaleidoscope(
             .map_err(|_| "Failed to lock GPU preference state".to_string())?;
         *guard
     };
+
+    adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
 
     let output = if use_gpu {
         let mut gpu_guard = state
@@ -484,7 +573,6 @@ async fn generate_video(
         },
         hue_rotation,
     };
-    adjust_wedge_params(&mut settings, img_width, img_height);
 
     let video_settings = kaleidomo_core::VideoSettings {
         frame_count,
@@ -507,6 +595,8 @@ async fn generate_video(
             .map_err(|_| "Failed to lock GPU preference state".to_string())?;
         *guard
     };
+
+    adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
 
     let _output = if use_gpu {
         let mut gpu_guard = state
@@ -571,6 +661,7 @@ fn gpu_available(state: tauri::State<'_, AppState>) -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_panic_hook();
     let gpu_backend = match pollster::block_on(GpuBackend::new()) {
         Ok(gpu) => {
             println!("GPU backend initialized");
@@ -613,6 +704,7 @@ pub fn run() {
                 license_status,
                 license_data: license_data_1,
                 license_sync_cooldown: AsyncMutex::new(cooldown_state),
+                loaded_gpu_image_path: Mutex::new(None),
             });
 
             let edit_menu = SubmenuBuilder::new(app, "Edit")

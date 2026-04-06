@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -16,85 +16,11 @@ import {
 } from "@/components/ui/select";
 import { NumberSliderInput } from "@/components/NumberSliderInput";
 import { AspectRatioPicker } from "@/components/AspectRatioPicker";
-import { Menu, MenuItem, Submenu, PredefinedMenuItem } from "@tauri-apps/api/menu";
 import { initGpuSetting } from "@/lib/utils";
 import { Toaster } from "@/components/ui/sonner";
 import { useLicense } from "@/lib/license-context";
 import { Card, CardDescription, CardFooter } from "./ui/card";
-
-export async function setupAppMenu() {
-  const appSubmenu = await Submenu.new({
-    text: "App",
-    items: [],
-  });
-
-  const fileSubmenu = await Submenu.new({
-    text: "File",
-    items: [
-      await MenuItem.new({
-        id: "load-image-preset",
-        text: "Load Image Preset...",
-        action: () => {
-          window.dispatchEvent(new CustomEvent("menu-load-image-preset"));
-        },
-      }),
-      await MenuItem.new({
-        id: "save-image-preset",
-        text: "Save Image Preset",
-        action: () => {
-          window.dispatchEvent(new CustomEvent("menu-save-image-preset"));
-        },
-      }),
-      await MenuItem.new({
-        id: "load-video-preset",
-        text: "Load Video Preset...",
-        action: () => {
-          window.dispatchEvent(new CustomEvent("menu-load-video-preset"));
-        },
-      }),
-      await MenuItem.new({
-        id: "save-video-preset",
-        text: "Save Video Preset",
-        action: () => {
-          window.dispatchEvent(new CustomEvent("menu-save-video-preset"));
-        },
-      }),
-      await MenuItem.new({
-        id: "load-project-preset",
-        text: "Load Project...",
-        action: () => {
-          window.dispatchEvent(new CustomEvent("menu-load-project"));
-        },
-      }),
-      await MenuItem.new({
-        id: "save-project-preset",
-        text: "Save Project",
-        action: () => {
-          window.dispatchEvent(new CustomEvent("menu-save-project"));
-        },
-      }),
-    ],
-  });
-
-  const editSubmenu = await Submenu.new({
-    text: "Edit",
-    items: [
-      await PredefinedMenuItem.new({ item: "Undo" }),
-      await PredefinedMenuItem.new({ item: "Redo" }),
-      await PredefinedMenuItem.new({ item: "Separator" }),
-      await PredefinedMenuItem.new({ item: "Cut" }),
-      await PredefinedMenuItem.new({ item: "Copy" }),
-      await PredefinedMenuItem.new({ item: "Paste" }),
-      await PredefinedMenuItem.new({ item: "SelectAll" }),
-    ],
-  });
-
-  const menu = await Menu.new({
-    items: [appSubmenu, fileSubmenu, editSubmenu],
-  });
-
-  await menu.setAsAppMenu();
-}
+import { useKaleidomoSession } from "@/lib/kaleidomo-session-context";
 
 const promptForImageRelocation = async (
   originalPath: string
@@ -243,28 +169,36 @@ function mergeSettingsWithBase(base: Settings, incoming: unknown): Settings {
 }
 
 function Kaleidomo() {
-  const [imagePath, setImagePath] = useState<string>("");
-  const [, setImageSrc] = useState<string>("");
-  const [outputSrc, setOutputSrc] = useState<string>("");
-  const [count, setCount] = useState<number>(6);
-  const [settings, setSettings] = useState<Settings>({
-    ...DEFAULT_SETTINGS,
-    x: 100,
-    y: 100,
-  });
-  const [kaleidoType, setKaleidoType] = useState<string>("radial");
-  const [imgWidth, setImgWidth] = useState<number>(0);
-  const [imgHeight, setImgHeight] = useState<number>(0);
-  const [isRendering, setIsRendering] = useState(false);
   const { isUnlocked, licenseType } = useLicense();
+
+  const {
+    imagePath,
+    setImagePath,
+    imageSrc,
+    setImageSrc,
+    outputSrc,
+    setOutputSrc,
+    count,
+    setCount,
+    settings,
+    setSettings,
+    kaleidoType,
+    setKaleidoType,
+    imgWidth,
+    setImgWidth,
+    imgHeight,
+    setImgHeight,
+    isRendering,
+    setIsRendering,
+  } = useKaleidomoSession();
 
   useEffect(() => {
     console.log("location.href", window.location.href);
     console.log("has __TAURI_INTERNALS__", "__TAURI_INTERNALS__" in window);
+    console.log(imageSrc);
   }, []);
 
   useEffect(() => {
-    void setupAppMenu();
     initGpuSetting();
   }, []);
 
@@ -820,7 +754,7 @@ function Kaleidomo() {
   };
 
   return (
-    <div className="min-h-full bg-background flex flex-col items-center justify-center p-8">
+    <div className="max-h-full bg-background flex flex-col items-center justify-center p-8">
       <Toaster richColors position="top-right" />
 
       <div className="max-w-2xl w-full space-y-8">

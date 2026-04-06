@@ -1,5 +1,4 @@
-import { Navigate, Outlet, NavLink, useNavigate } from "react-router"
-import { BrowserRouter, Routes, Route } from "react-router"
+import { BrowserRouter, Routes, Route, Navigate, Outlet, NavLink, useNavigate, useLocation } from "react-router";
 import { Settings, KeyRound } from "lucide-react"
 import Kaleidomo from "@/components/Kaleidomo"
 import { LicenseActivationCard } from "@/components/licensing/LicenseActivationCard"
@@ -7,6 +6,8 @@ import { PerformanceModeCard } from "@/components/PerformanceModeCard"
 import { LicenseProvider, useLicense } from "@/lib/license-context"
 import React from "react"
 import { invoke } from "@tauri-apps/api/core"
+import { KaleidomoProvider } from "@/lib/kaleidomo-session-context" 
+import { setupAppMenu, type AppMenuHandles } from "@/lib/app-menu";
 
 //import { attachConsole} from "@tauri-apps/plugin-log"
 
@@ -22,6 +23,31 @@ function CreateIcon() {
 
 function AppLayout() {
   const navigate = useNavigate()
+
+  const location = useLocation();
+  const menuHandlesRef = React.useRef<AppMenuHandles | null>(null);
+
+  React.useEffect(() => {
+    void (async () => {
+      menuHandlesRef.current = await setupAppMenu();
+    })();
+  }, []);
+
+  React.useEffect(() => {
+    const isCreate = location.pathname === "/create";
+    const handles = menuHandlesRef.current;
+
+    if (!handles) {
+      return;
+    }
+
+    void handles.loadImagePreset.setEnabled(isCreate);
+    void handles.saveImagePreset.setEnabled(isCreate);
+    void handles.loadVideoPreset.setEnabled(isCreate);
+    void handles.saveVideoPreset.setEnabled(isCreate);
+    void handles.loadProject.setEnabled(isCreate);
+    void handles.saveProject.setEnabled(isCreate);
+  }, [location.pathname]);
   const { isUnlocked, licenseType } = useLicense()
 
   const [needsUpdate, setNeedsUpdate] = React.useState(false);
@@ -151,16 +177,18 @@ function CreatePage() {
 export default function App() {
   return (
     <LicenseProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<AppLayout />}>
-            <Route index element={<Navigate to="/create" replace />} />
-            <Route path="create" element={<CreatePage />} />
-            <Route path="license" element={<LicensePage />} />
-            <Route path="settings" element={<SettingsPage />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
+      <KaleidomoProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<AppLayout />}>
+              <Route index element={<Navigate to="/create" replace />} />
+              <Route path="create" element={<CreatePage />} />
+              <Route path="license" element={<LicensePage />} />
+              <Route path="settings" element={<SettingsPage />} />
+            </Route>
+          </Routes>
+        </BrowserRouter>
+      </KaleidomoProvider>
     </LicenseProvider>
   )
 }
