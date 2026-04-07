@@ -31,6 +31,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { useLicense } from "@/lib/license-context";
 
 type NullableNumber = number | null | undefined;
 type NullableString = string | null | undefined;
@@ -562,7 +563,14 @@ function HardwareInfoDialog({
 }
 
 export function LicenseActivationCard(): React.JSX.Element {
-  const [licenseInfo, setLicenseInfo] = React.useState<LicenseInfo | null>(null);
+  const [licenseInfo2, setLicenseInfo2] = React.useState<LicenseInfo | null>(null);
+  const {
+    licenseInfo,
+    isLoading,
+    refreshLicense,
+    setLicenseInfo,
+  } = useLicense();
+  console.log(isLoading);
   const [needsUpdate, setNeedsUpdate] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -602,8 +610,8 @@ export function LicenseActivationCard(): React.JSX.Element {
   }, []);
 
   React.useEffect(() => {
-    if (!hasUserEdited && licenseInfo?.licenseData.licenseCode) {
-      setLicenseCode(licenseInfo.licenseData.licenseCode);
+    if (!hasUserEdited && licenseInfo2?.licenseData.licenseCode) {
+      setLicenseCode(licenseInfo2.licenseData.licenseCode);
     }
   }, [licenseInfo, hasUserEdited]);
 
@@ -616,6 +624,7 @@ export function LicenseActivationCard(): React.JSX.Element {
         fetchNeedsUpdate().catch(() => false),
       ]);
 
+      setLicenseInfo2(info);
       setLicenseInfo(info);
       setNeedsUpdate(updateFlag);
     } catch (error) {
@@ -635,7 +644,7 @@ export function LicenseActivationCard(): React.JSX.Element {
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    await loadState();
+    await refreshLicense();
   };
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -653,6 +662,7 @@ export function LicenseActivationCard(): React.JSX.Element {
 
     try {
       const updatedInfo = await activateLicense(trimmedCode, shareHardwareInfo);
+      setLicenseInfo2(updatedInfo);
       setLicenseInfo(updatedInfo);
 
       const updateFlag = await fetchNeedsUpdate().catch(() => false);
@@ -672,7 +682,7 @@ export function LicenseActivationCard(): React.JSX.Element {
 
   const effectiveLicenseCode = React.useMemo(() => {
     const codeFromState = licenseCode.trim();
-    const codeFromLicense = licenseInfo?.licenseData.licenseCode?.trim() ?? "";
+    const codeFromLicense = licenseInfo2?.licenseData.licenseCode?.trim() ?? "";
     return codeFromLicense || codeFromState;
   }, [licenseCode, licenseInfo]);
 
@@ -686,6 +696,7 @@ export function LicenseActivationCard(): React.JSX.Element {
 
     try {
       const updatedInfo = await deleteHardwareInfoFromCloud(effectiveLicenseCode);
+      setLicenseInfo2(updatedInfo);
       setLicenseInfo(updatedInfo);
       markSynced();
 
@@ -711,6 +722,7 @@ export function LicenseActivationCard(): React.JSX.Element {
 
     try {
       const updatedInfo = await updateLicense(effectiveLicenseCode, shareHardwareInfo);
+      setLicenseInfo2(updatedInfo);
       setLicenseInfo(updatedInfo);
       markSynced();
 

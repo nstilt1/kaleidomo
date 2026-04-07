@@ -372,7 +372,12 @@ function Kaleidomo() {
   const handlePickFile = async () => {
     const selected = await open({
       multiple: false,
-      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg"] }],
+      filters: [
+        {
+          name: "Images",
+          extensions: ["png", "jpg", "jpeg", "webp", "tif", "tiff", "avif", "heic", "heif"],
+        },
+      ]
     });
 
     if (typeof selected !== "string" || selected.trim() === "") {
@@ -811,6 +816,21 @@ function Kaleidomo() {
               </SelectContent>
             </Select>
 
+          <div className="space-y-4">
+            <NumberSliderInput
+              label="Tile Count"
+              value={settings.tile_count}
+              shouldLimit={!isUnlocked || licenseType === "trial"}
+              limitedCap={3.5}
+              min={0.1}
+              max={64.0}
+              step={0.1}
+              onChange={(v) => setSettings((s) => ({ ...s, tile_count: v }))}
+              unit="tiles"
+              roundToInteger={false}
+            />
+          </div>
+
             <NumberSliderInput
               label="Slices"
               value={count}
@@ -931,21 +951,6 @@ function Kaleidomo() {
                   ratio_den: denominator,
                 }));
               }}
-            />
-          </div>
-
-          <div className="space-y-4">
-            <NumberSliderInput
-              label="Tile Count"
-              value={settings.tile_count}
-              shouldLimit={!isUnlocked || licenseType === "trial"}
-              limitedCap={3.5}
-              min={0.1}
-              max={64.0}
-              step={0.1}
-              onChange={(v) => setSettings((s) => ({ ...s, tile_count: v }))}
-              unit="tiles"
-              roundToInteger={false}
             />
           </div>
 

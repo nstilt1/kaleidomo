@@ -46,6 +46,7 @@ interface LicenseContextValue {
   licenseInfo: LicenseInfo | null;
   isLoading: boolean;
   refreshLicense: () => Promise<void>;
+  setLicenseInfo: React.Dispatch<React.SetStateAction<LicenseInfo | null>>;
   isUnlocked: boolean;
   licenseType: string | null;
 }
@@ -116,6 +117,7 @@ export function LicenseProvider({
       licenseInfo,
       isLoading,
       refreshLicense,
+      setLicenseInfo,
       isUnlocked: licenseInfo?.isUnlocked ?? false,
       licenseType: licenseInfo?.licenseData.licenseType || null,
     }),

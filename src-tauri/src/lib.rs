@@ -1,14 +1,18 @@
-const VERSION: &str = "0.9.4";
+const VERSION: &str = "0.9.8";
 const PRODUCT_NAME: &str = "Kaleidomo";
 const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/dashboard/downloads";
 const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/shop/kaleidomo-kaleidoscope-generator/";
+const VERSION_URL: &str = "https://0-plugin-versioning.s3.us-east-1.amazonaws.com/kaleidomo-version.txt";
 
 use tauri_plugin_dialog::DialogExt;
 
-use std::path::Path;
 use std::{collections::HashMap, sync::Mutex};
 use kaleidomo_core::{KaleidoSettings, pollster};
 use tauri::{Manager, State};
+
+use std::fs;
+use std::io::Cursor;
+use image::io::Reader as ImageReader;
 
 use tauri::menu::{MenuBuilder, PredefinedMenuItem, SubmenuBuilder};
 
@@ -55,8 +59,16 @@ fn apply_exif_orientation(mut img: image::DynamicImage, path: &str) -> image::Dy
 }
 
 fn load_source_image(path: &str) -> Result<image::DynamicImage, String> {
-    let img = image::open(path)
-        .map_err(|e| format!("failed to open image '{}': {}", path, e))?;
+    let bytes = fs::read(path)
+        .map_err(|e| format!("failed to read image '{}': {}", path, e))?;
+
+    let reader = ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("failed to guess image format for '{}': {}", path, e))?;
+
+    let img = reader
+        .decode()
+        .map_err(|e| format!("failed to decode image '{}': {}", path, e))?;
 
     Ok(apply_exif_orientation(img, path))
 }
@@ -65,12 +77,14 @@ fn load_source_image(path: &str) -> Result<image::DynamicImage, String> {
 use log::*;
 
 #[cfg(feature = "logging")]
+#[macro_export]
 macro_rules! log_error {
     ($($arg:tt)*) => {{
         log::error!("{}", &::std::format!($($arg)*))
     }};
 }
 
+#[macro_export]
 #[cfg(not(feature = "logging"))]
 macro_rules! log_error {
     ($($arg:tt)*) => {{
@@ -114,6 +128,7 @@ pub struct AppState {
     pub license_data: kaleidomo_core::LicenseData,
     pub license_sync_cooldown: AsyncMutex<licensing::cooldown::LicenseSyncCooldownState>,
     pub loaded_gpu_image_path: Mutex<Option<String>>,
+    pub last_version_fetch: AsyncMutex<Option<u64>>,
 }
 
 fn round_to_nearest_multiple(value: u32, multiple: u32) -> u32 {
@@ -728,6 +743,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(move |app| {
+            let ts = load_timestamp(app.handle());
             let cooldown_state = licensing::cooldown::load_state(&app.handle())
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
@@ -739,6 +755,7 @@ pub fn run() {
                 license_data: license_data_1,
                 license_sync_cooldown: AsyncMutex::new(cooldown_state),
                 loaded_gpu_image_path: Mutex::new(None),
+                last_version_fetch: AsyncMutex::new(ts),
             });
 
             let edit_menu = SubmenuBuilder::new(app, "Edit")

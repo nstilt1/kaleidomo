@@ -1,7 +1,8 @@
 use kaleidomo_core::LicenseData;
-use tauri::State;
+use tauri::{Manager, State};
 
-use crate::{AppState, DOWNLOADS_URL, PRODUCT_NAME, STORE_PAGE_URL, VERSION};
+use crate::{AppState, DOWNLOADS_URL, PRODUCT_NAME, STORE_PAGE_URL, VERSION, VERSION_URL, log_error};
+use kaleidomo_core::software_licensor_static_rust_lib::reqwest;
 
 pub mod cooldown;
 
@@ -74,8 +75,38 @@ pub async fn read_reply_from_webserver(state: State<'_, AppState>, license_code:
 }
 
 #[tauri::command]
-pub fn is_new_version_available(state: tauri::State<'_, AppState>) -> bool {
-    state.license_status.is_update_available(VERSION, &state.license_data)
+pub async fn is_new_version_available(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> Result<bool, String> {
+    let mut last = state.last_version_fetch.lock().await;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+    let should_fetch = match *last {
+        Some(ts) => now - ts >= Duration::from_hours(1).as_secs(),
+        None => true
+    };
+
+    if should_fetch {
+        let response = reqwest::get(VERSION_URL)
+            .await
+            .map_err(|e| e.to_string())?;
+        let text = match response.text().await {
+            Ok(v) => v,
+            Err(e) => {
+                log_error!("is_new_version_available() text error: {}", e);
+                return Err(e.to_string());
+            }
+        };
+        let cloud_version = text.trim();
+        *last = Some(now);
+        match persist_timestamp(&app, now) {
+            Ok(()) => (),
+            Err(e) => {
+                log_error!("is_new_version_available persist_timestamp_err: {}", e);
+                return Err(e);
+            }
+        }
+        return Ok(state.license_status.is_update_available_manual(VERSION, cloud_version));
+    }
+    Ok(state.license_status.is_update_available(VERSION, &state.license_data))
 }
 
 #[tauri::command]
@@ -172,4 +203,26 @@ pub async fn update_license(
             license_data: e.1,
         })
     }
+}
+
+use tauri::AppHandle;
+use std::{fs, time::{Duration, SystemTime, UNIX_EPOCH}};
+
+fn persist_timestamp(app: &AppHandle, ts: u64) -> Result<(), String> {
+    let path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("last_fetch.txt");
+
+    fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    fs::write(path, ts.to_string()).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+pub fn load_timestamp(app: &AppHandle) -> Option<u64> {
+    let path = app.path().app_data_dir().ok()?.join("last_fetch.txt");
+    let text = fs::read_to_string(path).ok()?;
+    u64::from_str_radix(&text, 10).ok()
 }
