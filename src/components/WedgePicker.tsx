@@ -31,6 +31,7 @@ interface PickerProps {
   imagePath: string;
   count: number;
   settings: Settings;
+  sourceRadiusPx: number;
   onUpdate: (s: Settings) => void;
 }
 
@@ -41,14 +42,14 @@ type ViewMetrics = {
   displayHeight: number;
   offsetX: number;
   offsetY: number;
-  scaleX: number;
-  scaleY: number;
+  fitScale: number;
 };
 
 export const WedgePicker: React.FC<PickerProps> = ({
   imagePath,
   count,
   settings,
+  sourceRadiusPx,
   onUpdate,
 }) => {
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -68,8 +69,8 @@ export const WedgePicker: React.FC<PickerProps> = ({
     if (!ctx) return;
 
     const wrapperRect = wrapper.getBoundingClientRect();
-    const viewportWidth = Math.max(1, Math.floor(wrapperRect.width));
-    const viewportHeight = Math.max(1, Math.floor(wrapperRect.height));
+    const viewportWidth = Math.max(1, wrapperRect.width);
+    const viewportHeight = Math.max(1, wrapperRect.height);
 
     const naturalWidth = image.naturalWidth;
     const naturalHeight = image.naturalHeight;
@@ -80,19 +81,21 @@ export const WedgePicker: React.FC<PickerProps> = ({
       viewportHeight / naturalHeight
     );
 
-    const displayWidth = Math.max(1, Math.round(naturalWidth * fitScale));
-    const displayHeight = Math.max(1, Math.round(naturalHeight * fitScale));
+    const displayWidth = Math.max(1, naturalWidth * fitScale);
+    const displayHeight = Math.max(1, naturalHeight * fitScale);
 
-    const offsetX = Math.floor((viewportWidth - displayWidth) / 2);
-    const offsetY = Math.floor((viewportHeight - displayHeight) / 2);
+    const offsetX = (viewportWidth - displayWidth) / 2;
+    const offsetY = (viewportHeight - displayHeight) / 2;
 
-    const scaleX = displayWidth / naturalWidth;
-    const scaleY = displayHeight / naturalHeight;
+    const dpr = window.devicePixelRatio || 1;
 
-    canvas.width = viewportWidth;
-    canvas.height = viewportHeight;
+    canvas.width = Math.max(1, Math.round(viewportWidth * dpr));
+    canvas.height = Math.max(1, Math.round(viewportHeight * dpr));
     canvas.style.width = `${viewportWidth}px`;
     canvas.style.height = `${viewportHeight}px`;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, viewportWidth, viewportHeight);
 
     setMetrics({
       naturalWidth,
@@ -101,23 +104,19 @@ export const WedgePicker: React.FC<PickerProps> = ({
       displayHeight,
       offsetX,
       offsetY,
-      scaleX,
-      scaleY,
+      fitScale,
     });
-
-    ctx.clearRect(0, 0, viewportWidth, viewportHeight);
 
     ctx.fillStyle = "#020617";
     ctx.fillRect(0, 0, viewportWidth, viewportHeight);
 
     ctx.drawImage(image, offsetX, offsetY, displayWidth, displayHeight);
 
-    const displayX = offsetX + settings.x * scaleX;
-    const displayY = offsetY + settings.y * scaleY;
+    const displayX = offsetX + settings.x * fitScale;
+    const displayY = offsetY + settings.y * fitScale;
 
     const sliceAngle = (2 * Math.PI) / count;
-    const sourceRadius = settings.resolution / (2 * settings.zoom);
-    const visualRadius = sourceRadius * Math.min(scaleX, scaleY);
+    const visualRadius = sourceRadiusPx * fitScale;
 
     ctx.save();
     ctx.translate(displayX, displayY);
@@ -130,13 +129,18 @@ export const WedgePicker: React.FC<PickerProps> = ({
     ctx.closePath();
 
     ctx.strokeStyle = "#ff0000";
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 2;
     ctx.stroke();
-    ctx.fillStyle = "rgba(255, 0, 0, 0.3)";
+    ctx.fillStyle = "rgba(255, 0, 0, 0.22)";
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, 4, 0, 2 * Math.PI);
+    ctx.fillStyle = "#ffffff";
     ctx.fill();
 
     ctx.restore();
-  }, [count, settings]);
+  }, [count, settings, sourceRadiusPx]);
 
   useEffect(() => {
     if (!imagePath || imagePath.trim() === "") {
@@ -213,8 +217,8 @@ export const WedgePicker: React.FC<PickerProps> = ({
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
-    const localX = ((clientX - rect.left) / rect.width) * canvas.width;
-    const localY = ((clientY - rect.top) / rect.height) * canvas.height;
+    const localX = clientX - rect.left;
+    const localY = clientY - rect.top;
 
     const imageLocalX = localX - currentMetrics.offsetX;
     const imageLocalY = localY - currentMetrics.offsetY;
@@ -228,8 +232,8 @@ export const WedgePicker: React.FC<PickerProps> = ({
       return;
     }
 
-    const x = imageLocalX / currentMetrics.scaleX;
-    const y = imageLocalY / currentMetrics.scaleY;
+    const x = imageLocalX / currentMetrics.fitScale;
+    const y = imageLocalY / currentMetrics.fitScale;
 
     onUpdate({
       ...settings,

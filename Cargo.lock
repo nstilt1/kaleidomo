@@ -4987,7 +4987,7 @@ dependencies = [
 [[package]]
 name = "software_licensor_static_rust_lib"
 version = "0.1.0"
-source = "git+https://github.com/nstilt1/software-licensor-client-side-library#56ef2787ab98632764cfc48c5d00b548e5a3fdcd"
+source = "git+https://github.com/nstilt1/software-licensor-client-side-library#9e1d039e7a4210528acb4b96f47b8fd5c3cdaac8"
 dependencies = [
  "aes-gcm",
  "ash",

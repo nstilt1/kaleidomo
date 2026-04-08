@@ -19,11 +19,23 @@ pub struct GpuBackend {
     last_settings: Option<GpuKaleidoSettings>,
 }
 
+const DEFAULT_TILE_SIZE: u32 = 4096;
+
 pub(crate) struct SourceImageGpu {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     width: u32,
     height: u32,
+    tile_size: u32,
+    tile_grid_width: u32,
+    tile_grid_height: u32,
+    layer_count: u32,
+}
+
+impl SourceImageGpu {
+    fn tile_index(&self, tile_x: u32, tile_y: u32) -> u32 {
+        tile_y * self.tile_grid_width + tile_x
+    }
 }
 
 struct OutputResources {
@@ -75,7 +87,7 @@ impl GpuBackend {
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D2,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
                             multisampled: false,
                         },
                         count: None,
@@ -140,12 +152,35 @@ impl GpuBackend {
             bail!("source image dimensions must be non-zero");
         }
 
+        let limits = self.device.limits();
+        let max_dim = limits.max_texture_dimension_2d;
+        let max_layers = limits.max_texture_array_layers;
+
+        let tile_size = DEFAULT_TILE_SIZE.min(max_dim);
+        if tile_size == 0 {
+            bail!("GPU reported invalid max texture dimension 0");
+        }
+
+        let tile_grid_width = width.div_ceil(tile_size);
+        let tile_grid_height = height.div_ceil(tile_size);
+        let layer_count = tile_grid_width
+            .checked_mul(tile_grid_height)
+            .ok_or_else(|| anyhow!("source tile count overflow"))?;
+
+        if layer_count > max_layers {
+            bail!(
+                "source image requires {} tile layers, but GPU only supports {} texture array layers",
+                layer_count,
+                max_layers
+            );
+        }
+
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("kaleidomo.input_texture"),
+            label: Some("kaleidomo.input_texture_array"),
             size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
+                width: tile_size,
+                height: tile_size,
+                depth_or_array_layers: layer_count,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -155,38 +190,96 @@ impl GpuBackend {
             view_formats: &[],
         });
 
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            rgba.as_raw(),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
+        let src_raw = rgba.as_raw();
+        let src_row_bytes = width as usize * 4;
+        let tile_row_bytes = tile_size as usize * 4;
 
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut tile_staging = vec![0u8; tile_row_bytes * tile_size as usize];
+
+        for tile_y in 0..tile_grid_height {
+            for tile_x in 0..tile_grid_width {
+                tile_staging.fill(0);
+
+                let src_x = tile_x * tile_size;
+                let src_y = tile_y * tile_size;
+
+                let copy_width = (width - src_x).min(tile_size);
+                let copy_height = (height - src_y).min(tile_size);
+
+                for row in 0..copy_height as usize {
+                    let src_start =
+                        ((src_y as usize + row) * src_row_bytes) + (src_x as usize * 4);
+                    let src_end = src_start + copy_width as usize * 4;
+
+                    let dst_start = row * tile_row_bytes;
+                    let dst_end = dst_start + copy_width as usize * 4;
+
+                    tile_staging[dst_start..dst_end].copy_from_slice(&src_raw[src_start..src_end]);
+                }
+
+                let layer = tile_y * tile_grid_width + tile_x;
+
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &tile_staging,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(tile_size * 4),
+                        rows_per_image: Some(tile_size),
+                    },
+                    wgpu::Extent3d {
+                        width: tile_size,
+                        height: tile_size,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("kaleidomo.input_texture_array_view"),
+            format: Some(wgpu::TextureFormat::Rgba8Unorm),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+            aspect: wgpu::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(layer_count),
+        });
 
         self.source = Some(SourceImageGpu {
             texture,
             view,
             width,
             height,
+            tile_size,
+            tile_grid_width,
+            tile_grid_height,
+            layer_count,
         });
 
         self.last_settings = None;
 
-        info!("Source image uploaded to GPU: {}x{}", width, height);
+        info!(
+            "Source image uploaded to GPU as tiled array: {}x{}, tile_size={}, grid={}x{}, layers={}",
+            width,
+            height,
+            tile_size,
+            tile_grid_width,
+            tile_grid_height,
+            layer_count
+        );
+
         Ok(())
     }
 
@@ -207,8 +300,9 @@ impl GpuBackend {
 
         self.last_settings = Some(GpuKaleidoSettings::from_parts(
             settings,
-            source.width,
-            source.height,
+            source,
+            0,
+            0,
         ));
 
         debug!(
@@ -236,99 +330,135 @@ impl GpuBackend {
             );
         }
 
-        self.ensure_output_resources(settings.output_size_w, settings.output_size_h)?;
+        let max_dim = self.device.limits().max_texture_dimension_2d;
+        let tile_size = DEFAULT_TILE_SIZE.min(max_dim);
 
-        let source = match self.source.as_ref() {
-            Some(source) => source,
-            None => {
-                error!("render_into_buffer called with no source image selected");
-                bail!("no source image is currently loaded into the GPU backend");
-            }
-        };
-
-        let gpu_settings =
-            GpuKaleidoSettings::from_parts(settings, source.width, source.height);
-        self.last_settings = Some(gpu_settings);
-
-        let settings_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("kaleidomo.settings_buffer"),
-            contents: bytemuck::bytes_of(&gpu_settings),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-
-        let output_resources = match self.output.as_ref() {
-            Some(resources) => resources,
-            None => {
-                error!("output resources unexpectedly missing after ensure_output_resources");
-                bail!("output resources were not available");
-            }
-        };
-
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("kaleidomo.bind_group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&source.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&output_resources.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: settings_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("kaleidomo.command_encoder"),
-                });
-
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("kaleidomo.compute_pass"),
-                timestamp_writes: None,
-            });
-
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(
-                settings.output_size_w.div_ceil(8),
-                settings.output_size_h.div_ceil(8),
-                1,
-            );
+        if tile_size == 0 {
+            bail!("GPU reported invalid max texture dimension 0");
         }
 
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &output_resources.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &output_resources.readback_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(output_resources.padded_bytes_per_row),
-                    rows_per_image: Some(output_resources.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: output_resources.width,
-                height: output_resources.height,
-                depth_or_array_layers: 1,
-            },
-        );
+        let full_output_row_bytes = settings.output_size_w as usize * 4;
 
-        self.queue.submit(Some(encoder.finish()));
+        for tile_origin_y in (0..settings.output_size_h).step_by(tile_size as usize) {
+            for tile_origin_x in (0..settings.output_size_w).step_by(tile_size as usize) {
+                let tile_width = (settings.output_size_w - tile_origin_x).min(tile_size);
+                let tile_height = (settings.output_size_h - tile_origin_y).min(tile_size);
 
-        self.readback_into_output(output)
+                self.ensure_output_resources(tile_width, tile_height)?;
+
+                let source = match self.source.as_ref() {
+                    Some(source) => source,
+                    None => {
+                        error!("render_into_buffer called with no source image selected");
+                        bail!("no source image is currently loaded into the GPU backend");
+                    }
+                };
+
+                let gpu_settings = GpuKaleidoSettings::from_parts(
+                    settings,
+                    source,
+                    tile_origin_x,
+                    tile_origin_y,
+                );
+                self.last_settings = Some(gpu_settings);
+
+                let settings_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("kaleidomo.settings_buffer"),
+                    contents: bytemuck::bytes_of(&gpu_settings),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+
+                let output_resources = match self.output.as_ref() {
+                    Some(resources) => resources,
+                    None => {
+                        error!("output resources unexpectedly missing after ensure_output_resources");
+                        bail!("output resources were not available");
+                    }
+                };
+
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("kaleidomo.bind_group"),
+                    layout: &self.bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&source.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&output_resources.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: settings_buffer.as_entire_binding(),
+                        },
+                    ],
+                });
+
+                let mut encoder =
+                    self.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("kaleidomo.command_encoder"),
+                        });
+
+                {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("kaleidomo.compute_pass"),
+                        timestamp_writes: None,
+                    });
+
+                    pass.set_pipeline(&self.pipeline);
+                    pass.set_bind_group(0, &bind_group, &[]);
+                    pass.dispatch_workgroups(
+                        tile_width.div_ceil(8),
+                        tile_height.div_ceil(8),
+                        1,
+                    );
+                }
+
+                encoder.copy_texture_to_buffer(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &output_resources.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &output_resources.readback_buffer,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(output_resources.padded_bytes_per_row),
+                            rows_per_image: Some(output_resources.height),
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width: output_resources.width,
+                        height: output_resources.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+
+                self.queue.submit(Some(encoder.finish()));
+
+                let mut tile_cpu = vec![0u8; expected_rgba_len(tile_width, tile_height)?];
+                self.readback_into_output(&mut tile_cpu)?;
+
+                let tile_row_bytes = tile_width as usize * 4;
+
+                for row in 0..tile_height as usize {
+                    let src_start = row * tile_row_bytes;
+                    let src_end = src_start + tile_row_bytes;
+
+                    let dst_start = ((tile_origin_y as usize + row) * full_output_row_bytes)
+                        + (tile_origin_x as usize * 4);
+                    let dst_end = dst_start + tile_row_bytes;
+
+                    output[dst_start..dst_end].copy_from_slice(&tile_cpu[src_start..src_end]);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn render_into_internal_buffer(&mut self, settings: &KaleidoSettings) -> Result<&[u8]> {
@@ -513,11 +643,21 @@ pub struct GpuKaleidoSettings {
     pub triangle_rotation_rad: f32,
     pub source_width: u32,
     pub source_height: u32,
-    pub _pad1: u32,
+    pub source_tile_size: u32,
+
+    pub source_tile_grid_width: u32,
+    pub source_tile_grid_height: u32,
+    pub output_tile_origin_x: u32,
+    pub output_tile_origin_y: u32,
 }
 
 impl GpuKaleidoSettings {
-    pub fn from_parts(settings: &KaleidoSettings, source_width: u32, source_height: u32) -> Self {
+    pub fn from_parts(
+        settings: &KaleidoSettings,
+        source: &SourceImageGpu,
+        output_tile_origin_x: u32,
+        output_tile_origin_y: u32,
+    ) -> Self {
         let zoom = settings.zoom;
         let inv_zoom = if zoom.abs() > f32::EPSILON { 1.0 / zoom } else { 0.0 };
         let safe_count = settings.count.max(1);
@@ -547,9 +687,14 @@ impl GpuKaleidoSettings {
             triangle_center_y: settings.triangle_center_y,
 
             triangle_rotation_rad: settings.triangle_rotation_rad,
-            source_width,
-            source_height,
-            _pad1: 0,
+            source_width: source.width,
+            source_height: source.height,
+            source_tile_size: source.tile_size,
+
+            source_tile_grid_width: source.tile_grid_width,
+            source_tile_grid_height: source.tile_grid_height,
+            output_tile_origin_x,
+            output_tile_origin_y,
         }
     }
 }
@@ -642,6 +787,14 @@ impl<'a> GpuVideoRenderer<'a> {
             return Err("max_in_flight must be non-zero".into());
         }
 
+        let max_dim = gpu.device().limits().max_texture_dimension_2d;
+        if width > max_dim || height > max_dim {
+            return Err(format!(
+                "GpuVideoRenderer output {}x{} exceeds GPU max texture dimension {}; tiled video output is not implemented yet",
+                width, height, max_dim
+            ).into());
+        }
+
         //gpu.set_source_image(source)?;
 
         let source = gpu
@@ -653,8 +806,7 @@ impl<'a> GpuVideoRenderer<'a> {
             slots.push(Self::create_slot(
                 gpu,
                 &source.view,
-                source.width,
-                source.height,
+                source,
                 width,
                 height,
             )?);
@@ -673,8 +825,7 @@ impl<'a> GpuVideoRenderer<'a> {
     fn create_slot(
         gpu: &GpuBackend,
         source_view: &wgpu::TextureView,
-        source_width: u32,
-        source_height: u32,
+        source: &SourceImageGpu,
         width: u32,
         height: u32,
     ) -> Result<FrameSlot, Box<dyn Error>> {
@@ -720,8 +871,9 @@ impl<'a> GpuVideoRenderer<'a> {
                 kaleido_type: crate::KaleidoType::Radial,
                 hue_rotation: 0,
             },
-            source_width,
-            source_height,
+            source,
+            0,
+            0,
         );
 
         let settings_buffer =
@@ -810,7 +962,7 @@ impl<'a> GpuVideoRenderer<'a> {
             .ok_or("GpuVideoRenderer has no source image loaded")?;
 
         let gpu_settings =
-            GpuKaleidoSettings::from_parts(settings, source.width, source.height);
+            GpuKaleidoSettings::from_parts(settings, source, 0, 0);
 
         let slot = &mut self.slots[slot_index];
         self.gpu.queue().write_buffer(

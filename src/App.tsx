@@ -1,13 +1,37 @@
-import { BrowserRouter, Routes, Route, Navigate, Outlet, NavLink, useNavigate, useLocation } from "react-router";
-import { Settings, KeyRound } from "lucide-react"
-import Kaleidomo from "@/components/Kaleidomo"
-import { LicenseActivationCard } from "@/components/licensing/LicenseActivationCard"
-import { PerformanceModeCard } from "@/components/PerformanceModeCard"
-import { LicenseProvider, useLicense } from "@/lib/license-context"
-import React from "react"
-import { invoke } from "@tauri-apps/api/core"
-import { KaleidomoProvider } from "@/lib/kaleidomo-session-context" 
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  Outlet,
+  NavLink,
+  useNavigate,
+  useLocation,
+} from "react-router";
+import { Settings, KeyRound } from "lucide-react";
+import Kaleidomo from "@/components/Kaleidomo";
+import { LicenseActivationCard } from "@/components/licensing/LicenseActivationCard";
+import { PerformanceModeCard } from "@/components/PerformanceModeCard";
+import { LicenseProvider, useLicense } from "@/lib/license-context";
+import React from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { KaleidomoProvider } from "@/lib/kaleidomo-session-context";
 import { setupAppMenu, type AppMenuHandles } from "@/lib/app-menu";
+import {
+  SettingsProvider,
+  useSettings,
+} from "@/lib/settings-context";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { NumberSliderInput } from "@/components/NumberSliderInput";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 //import { attachConsole} from "@tauri-apps/plugin-log"
 
@@ -18,11 +42,11 @@ function CreateIcon() {
       alt=""
       className="h-4 w-4 rounded-sm object-contain"
     />
-  )
+  );
 }
 
 function AppLayout() {
-  const navigate = useNavigate()
+  const navigate = useNavigate();
 
   const location = useLocation();
   const menuHandlesRef = React.useRef<AppMenuHandles | null>(null);
@@ -48,7 +72,8 @@ function AppLayout() {
     void handles.loadProject.setEnabled(isCreate);
     void handles.saveProject.setEnabled(isCreate);
   }, [location.pathname]);
-  const { isUnlocked, licenseType } = useLicense()
+
+  const { isUnlocked, licenseType } = useLicense();
 
   const [needsUpdate, setNeedsUpdate] = React.useState(false);
 
@@ -56,10 +81,10 @@ function AppLayout() {
     invoke<boolean>("is_new_version_available")
       .then(setNeedsUpdate)
       .catch(() => setNeedsUpdate(false));
-  }, [])
+  }, []);
 
   const resolvedLicenseType =
-    isUnlocked && licenseType?.trim() ? licenseType : "Inactive"
+    isUnlocked && licenseType?.trim() ? licenseType : "Inactive";
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
@@ -118,12 +143,13 @@ function AppLayout() {
               onClick={() => navigate("/license")}
               className={[
                 "inline-flex h-10 shrink-0 items-center rounded-md border px-3 text-sm font-medium transition-colors",
-                "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                "bg-secondary text-secondary-foreground hover:bg-secondary/80",
               ].join(" ")}
             >
               {`Update available`}
-              </button>
+            </button>
           )}
+
           <button
             type="button"
             onClick={() => navigate("/license")}
@@ -143,7 +169,7 @@ function AppLayout() {
         <Outlet />
       </main>
     </div>
-  )
+  );
 }
 
 function LicensePage() {
@@ -153,7 +179,64 @@ function LicensePage() {
         <LicenseActivationCard />
       </div>
     </div>
-  )
+  );
+}
+
+function WedgePickerSettingsCard() {
+  const {
+    mode,
+    setMode,
+    diagonalMultiplier,
+    setDiagonalMultiplier,
+  } = useSettings();
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Wedge Picker</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <label className="text-sm font-medium">Picker Mode</label>
+          <Select
+            value={mode}
+            onValueChange={(value) =>
+              setMode(value as "legacy" | "scaled")
+            }
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="Select wedge picker mode" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectLabel>Modes</SelectLabel>
+                <SelectItem value="legacy">Legacy</SelectItem>
+                <SelectItem value="scaled">Scaled</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Legacy mode uses the current direct zoom behavior. Scaled mode keeps
+            the wedge visually tied to the image diagonal and converts that to
+            backend zoom on the frontend.
+          </p>
+        </div>
+
+        {mode === "scaled" && (
+          <NumberSliderInput
+            label="Scaled Mode Diagonal Multiplier"
+            value={diagonalMultiplier}
+            min={1.0}
+            max={2.0}
+            step={0.01}
+            onChange={setDiagonalMultiplier}
+            unit="x diagonal"
+            roundToInteger={false}
+          />
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 function SettingsPage() {
@@ -161,9 +244,10 @@ function SettingsPage() {
     <div className="h-full overflow-auto p-4">
       <div className="mx-auto max-w-4xl space-y-4">
         <PerformanceModeCard />
+        <WedgePickerSettingsCard />
       </div>
     </div>
-  )
+  );
 }
 
 function CreatePage() {
@@ -171,24 +255,26 @@ function CreatePage() {
     <div className="h-full min-h-0">
       <Kaleidomo />
     </div>
-  )
+  );
 }
 
 export default function App() {
   return (
     <LicenseProvider>
       <KaleidomoProvider>
-        <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<AppLayout />}>
-              <Route index element={<Navigate to="/create" replace />} />
-              <Route path="create" element={<CreatePage />} />
-              <Route path="license" element={<LicensePage />} />
-              <Route path="settings" element={<SettingsPage />} />
-            </Route>
-          </Routes>
-        </BrowserRouter>
+        <SettingsProvider>
+          <BrowserRouter>
+            <Routes>
+              <Route path="/" element={<AppLayout />}>
+                <Route index element={<Navigate to="/create" replace />} />
+                <Route path="create" element={<CreatePage />} />
+                <Route path="license" element={<LicensePage />} />
+                <Route path="settings" element={<SettingsPage />} />
+              </Route>
+            </Routes>
+          </BrowserRouter>
+        </SettingsProvider>
       </KaleidomoProvider>
     </LicenseProvider>
-  )
+  );
 }

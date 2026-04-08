@@ -21,6 +21,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { useLicense } from "@/lib/license-context";
 import { Card, CardDescription, CardFooter } from "./ui/card";
 import { useKaleidomoSession } from "@/lib/kaleidomo-session-context";
+import { useSettings } from "@/lib/settings-context";
 
 const promptForImageRelocation = async (
   originalPath: string
@@ -144,6 +145,45 @@ const DEFAULT_SETTINGS: Settings = {
   num_zoom_loops: 1,
 };
 
+function clampMin(value: number, min: number) {
+  return Math.max(min, value);
+}
+
+function getEffectiveZoomAndSourceRadius(
+  userZoom: number,
+  resolution: number,
+  imgWidth: number,
+  imgHeight: number,
+  mode: "legacy" | "scaled",
+  diagonalMultiplier: number
+) {
+  const safeUserZoom = clampMin(userZoom, 0.01);
+
+  if (mode === "legacy") {
+    const sourceRadiusPx = resolution / (2 * safeUserZoom);
+
+    return {
+      effectiveZoom: safeUserZoom,
+      sourceRadiusPx,
+    };
+  }
+
+  const imageDiagonal = Math.hypot(imgWidth, imgHeight);
+  const scaledRadiusAtMinimumZoom = imageDiagonal * diagonalMultiplier;
+  const sourceRadiusPx =
+    scaledRadiusAtMinimumZoom / (safeUserZoom / 0.01);
+
+  const effectiveZoom = clampMin(
+    resolution / (2 * sourceRadiusPx),
+    0.000001
+  );
+
+  return {
+    effectiveZoom,
+    sourceRadiusPx,
+  };
+}
+
 function pickSettings<K extends keyof Settings>(
   source: Settings,
   keys: readonly K[]
@@ -170,6 +210,7 @@ function mergeSettingsWithBase(base: Settings, incoming: unknown): Settings {
 
 function Kaleidomo() {
   const { isUnlocked, licenseType } = useLicense();
+  const { mode: wedgePickerMode, diagonalMultiplier } = useSettings();
 
   const {
     imagePath,
@@ -273,6 +314,15 @@ function Kaleidomo() {
     []
   );
 
+  const effectiveZoomState = getEffectiveZoomAndSourceRadius(
+    settings.zoom,
+    settings.resolution,
+    imgWidth,
+    imgHeight,
+    wedgePickerMode,
+    diagonalMultiplier
+  );
+
   const renderPreview = useCallback(
     async (options?: {
       path?: string;
@@ -327,7 +377,14 @@ function Kaleidomo() {
           outputSizeW: width,
           offsetX: activeSettings.offset_x,
           offsetY: activeSettings.offset_y,
-          zoom: activeSettings.zoom,
+          zoom: getEffectiveZoomAndSourceRadius(
+            activeSettings.zoom,
+            activeSettings.resolution,
+            sourceWidth,
+            sourceHeight,
+            wedgePickerMode,
+            diagonalMultiplier
+          ).effectiveZoom,
           kaleidoType: activeKaleidoType,
           tileCount: activeSettings.tile_count,
           hueRotation: activeSettings.hue_rotate,
@@ -692,7 +749,7 @@ function Kaleidomo() {
         x: settings.x,
         y: settings.y,
         rotation: settings.rotation,
-        zoom: settings.zoom,
+        zoom: effectiveZoomState.effectiveZoom,
         count,
         outputSizeH: height,
         outputSizeW: width,
@@ -726,7 +783,7 @@ function Kaleidomo() {
         x: settings.x,
         y: settings.y,
         rotation: settings.rotation,
-        zoom: settings.zoom,
+        zoom: effectiveZoomState.effectiveZoom,
         count,
         outputSizeH: height,
         outputSizeW: width,
@@ -1169,6 +1226,7 @@ function Kaleidomo() {
                 count={count}
                 settings={settings}
                 onUpdate={setSettings}
+                sourceRadiusPx={effectiveZoomState.sourceRadiusPx}
               />
             ) : (
               <p className="text-muted-foreground italic">

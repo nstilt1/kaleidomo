@@ -24,11 +24,16 @@ struct KaleidoSettings {
     triangle_rotation_rad: f32,
     source_width: u32,
     source_height: u32,
-    _pad1: u32,
+    source_tile_size: u32,
+
+    source_tile_grid_width: u32,
+    source_tile_grid_height: u32,
+    output_tile_origin_x: u32,
+    output_tile_origin_y: u32,
 };
 
 @group(0) @binding(0)
-var input_tex: texture_2d<f32>;
+var input_tex: texture_2d_array<f32>;
 
 @group(0) @binding(1)
 var output_tex: texture_storage_2d<rgba8unorm, write>;
@@ -38,6 +43,32 @@ var<uniform> settings: KaleidoSettings;
 
 const PI: f32 = 3.141592653589793;
 const TWO_PI: f32 = 2.0 * PI;
+
+fn load_source_pixel(src_i: vec2<i32>) -> vec4<f32> {
+    if (src_i.x < 0 || src_i.y < 0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
+    if (src_i.x >= i32(settings.source_width) || src_i.y >= i32(settings.source_height)) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
+    let tile_size = i32(settings.source_tile_size);
+
+    let tile_x = u32(src_i.x / tile_size);
+    let tile_y = u32(src_i.y / tile_size);
+
+    if (tile_x >= settings.source_tile_grid_width || tile_y >= settings.source_tile_grid_height) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
+    let local_x = src_i.x % tile_size;
+    let local_y = src_i.y % tile_size;
+
+    let layer = i32(tile_y * settings.source_tile_grid_width + tile_x);
+
+    return textureLoad(input_tex, vec2<i32>(local_x, local_y), layer, 0);
+}
 
 fn euclidean_modulo(a : f32, b : f32) -> f32 {
     let result = a % b;
@@ -291,10 +322,25 @@ fn map_hexagonal_flat_top(
     return source_space_rotation(local_x, local_y, rotation, tx, ty, hex_radius, slice_angle, width_over_2, zoom);
 }
 
+fn source_in_bounds(src_i: vec2<i32>) -> bool {
+    return src_i.x >= 0 &&
+        src_i.y >= 0 &&
+        src_i.x < i32(settings.source_width) &&
+        src_i.y < i32(settings.source_height);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
+    let local_x = gid.x;
+    let local_y = gid.y;
+
+    let out_dims = textureDimensions(output_tex);
+    if (local_x >= out_dims.x || local_y >= out_dims.y) {
+        return;
+    }
+
+    let x = settings.output_tile_origin_x + local_x;
+    let y = settings.output_tile_origin_y + local_y;
 
     if (x >= settings.output_size_w || y >= settings.output_size_h) {
         return;
@@ -333,86 +379,89 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let src_x = round(mapped.x);
     let src_y = round(mapped.y);
-
     let src_i = vec2<i32>(i32(src_x), i32(src_y));
 
-    let dims = textureDimensions(input_tex);
-    if (src_i.x < 0 || src_i.y < 0 || src_i.x >= i32(dims.x) || src_i.y >= i32(dims.y)) {
-        textureStore(output_tex, vec2<i32>(i32(x), i32(y)), vec4<f32>(0.0, 0.0, 0.0, 0.0));
+    if (!source_in_bounds(src_i)) {
+        textureStore(output_tex, vec2<i32>(i32(local_x), i32(local_y)), vec4<f32>(0.0, 0.0, 0.0, 0.0));
         return;
     }
 
-    let color = textureLoad(input_tex, src_i, 0);
+    let color = load_source_pixel(src_i);
 
     // daydream
     // rgb to hsv conversion for hue rotation
+    var final_rgb = color.rgb;
 
-    let r = color.r;
-    let g = color.g;
-    let b = color.b;
+    if (settings.hue_rotation % 360 != 0u) {
+        let r = color.r;
+        let g = color.g;
+        let b = color.b;
 
-    let c_max = max(r, max(g, b));
-    let c_min = min(r, min(g, b));
-    let delta = c_max - c_min;
+        let c_max = max(r, max(g, b));
+        let c_min = min(r, min(g, b));
+        let delta = c_max - c_min;
 
-    var h = 0.0;
-    if (delta != 0.0) {
-        if (c_max == r) {
-            h = 60.0 * (((g - b) / delta) % 6.0);
-        } else if (c_max == g) {
-            h = 60.0 * (((b - r) / delta) + 2.0);
-        } else {
-            h = 60.0 * (((r - g) / delta) + 4.0);
+        var h = 0.0;
+        if (delta != 0.0) {
+            if (c_max == r) {
+                h = 60.0 * (((g - b) / delta) % 6.0);
+            } else if (c_max == g) {
+                h = 60.0 * (((b - r) / delta) + 2.0);
+            } else {
+                h = 60.0 * (((r - g) / delta) + 4.0);
+            }
         }
-    }
 
-    var s = 0.0;
-    if (c_max != 0.0) {
-        s = delta / c_max;
-    }
+        var s = 0.0;
+        if (c_max != 0.0) {
+            s = delta / c_max;
+        }
 
-    let v = c_max;
+        let v = c_max;
 
-    h = euclidean_modulo(h + f32(settings.hue_rotation), 360.0);
-    let h_sector = h / 60.0;
+        h = euclidean_modulo(h + f32(settings.hue_rotation), 360.0);
+        let h_sector = h / 60.0;
 
-    let c = v * s;
-    let x2 = c * (1.0 - abs((h_sector % 2.0) - 1.0));
-    let m = v - c;
+        let c = v * s;
+        let x2 = c * (1.0 - abs((h_sector % 2.0) - 1.0));
+        let m = v - c;
 
-    var rp = 0.0;
-    var gp = 0.0;
-    var bp = 0.0;
+        var rp = 0.0;
+        var gp = 0.0;
+        var bp = 0.0;
 
-    if (h_sector < 1.0) {
-        rp = c;
-        gp = x2;
-        bp = 0.0;
-    } else if (h_sector < 2.0) {
-        rp = x2;
-        gp = c;
-        bp = 0.0;
-    } else if (h_sector < 3.0) {
-        rp = 0.0;
-        gp = c;
-        bp = x2;
-    } else if (h_sector < 4.0) {
-        rp = 0.0;
-        gp = x2;
-        bp = c;
-    } else if (h_sector < 5.0) {
-        rp = x2;
-        gp = 0.0;
-        bp = c;
-    } else {
-        rp = c;
-        gp = 0.0;
-        bp = x2;
+        if (h_sector < 1.0) {
+            rp = c;
+            gp = x2;
+            bp = 0.0;
+        } else if (h_sector < 2.0) {
+            rp = x2;
+            gp = c;
+            bp = 0.0;
+        } else if (h_sector < 3.0) {
+            rp = 0.0;
+            gp = c;
+            bp = x2;
+        } else if (h_sector < 4.0) {
+            rp = 0.0;
+            gp = x2;
+            bp = c;
+        } else if (h_sector < 5.0) {
+            rp = x2;
+            gp = 0.0;
+            bp = c;
+        } else {
+            rp = c;
+            gp = 0.0;
+            bp = x2;
+        }
+
+        final_rgb = vec3<f32>(rp + m, gp + m, bp + m);
     }
 
     textureStore(
         output_tex,
-        vec2<i32>(i32(x), i32(y)),
-        vec4<f32>(rp + m, gp + m, bp + m, color.a),
+        vec2<i32>(i32(local_x), i32(local_y)),
+        vec4<f32>(final_rgb, color.a),
     );
 }
