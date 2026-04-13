@@ -1,4 +1,4 @@
-const VERSION: &str = "0.9.10";
+const VERSION: &str = "0.9.11";
 const PRODUCT_NAME: &str = "Kaleidomo";
 const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/dashboard/downloads";
 const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/shop/kaleidomo-kaleidoscope-generator/";
