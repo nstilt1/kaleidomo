@@ -5,6 +5,8 @@ use crate::{AppState, DOWNLOADS_URL, PRODUCT_NAME, STORE_PAGE_URL, VERSION, VERS
 use kaleidomo_core::software_licensor_static_rust_lib::reqwest;
 
 pub mod cooldown;
+pub mod eula;
+pub use eula::*;
 
 const UNKNOWN_ERROR_CODE: i32 = 512;
 

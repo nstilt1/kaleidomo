@@ -7,6 +7,7 @@ export type AppMenuHandles = {
   saveVideoPreset: MenuItem;
   loadProject: MenuItem;
   saveProject: MenuItem;
+  viewEula: MenuItem;
 };
 
 function dispatchCreatePageEvent(eventName: string) {
@@ -50,9 +51,15 @@ export async function setupAppMenu(): Promise<AppMenuHandles> {
     action: () => dispatchCreatePageEvent("menu-save-project"),
   });
 
+  const viewEula = await MenuItem.new({
+    id: "view-eula",
+    text: "View License Agreement",
+    action: () => dispatchCreatePageEvent("menu-open-eula"),
+  });
+
   const appSubmenu = await Submenu.new({
     text: "App",
-    items: [],
+    items: [viewEula],
   });
 
   const fileSubmenu = await Submenu.new({
@@ -93,5 +100,6 @@ export async function setupAppMenu(): Promise<AppMenuHandles> {
     saveVideoPreset,
     loadProject,
     saveProject,
+    viewEula,
   };
 }

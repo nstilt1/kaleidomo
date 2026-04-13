@@ -1,0 +1,92 @@
+**END USER LICENSE AGREEMENT (EULA)**
+**Kaleidomo**
+Last Updated: April 12, 2026
+
+---
+
+### 1. Acceptance
+
+By installing, accessing, or using Kaleidomo ("the Software"), you agree to be bound by this End User License Agreement ("Agreement"). If you do not agree, do not install or use the Software.
+
+---
+
+### 2. License Grant
+
+Altered Brain Chemistry grants you a limited, non-exclusive, non-transferable license to use the Software.
+
+If the Software requires a license key, usage may be limited based on activation or device restrictions.
+
+---
+
+### 3. Ownership
+
+The Software is licensed, not sold. All rights not expressly granted are reserved by Altered Brain Chemistry.
+
+---
+
+### 4. Licensing System and Device Limits
+
+The Software may use a licensing system that associates activations with specific devices.
+
+* A license may be limited to a maximum number of activated devices.
+* Device identification is based on system-specific identifiers.
+* Changes to hardware, operating system configuration, or system identifiers may cause a device to be recognized as a new device.
+
+If device changes result in exceeding the activation limit:
+
+* You may use a **license regeneration feature**, which clears all previously activated **online devices** associated with the license.
+* Devices activated using offline activation methods (if implemented) cannot be removed through regeneration.
+
+You are responsible for managing your activations and ensuring compliance with the device limit.
+
+---
+
+### 5. Server Connectivity and Availability
+
+The Software may periodically connect to Altered Brain Chemistry servers for licensing validation and functionality.
+
+* The Software may require occasional internet access.
+* Server availability is not guaranteed and may be temporarily unavailable due to maintenance, updates, or unforeseen issues.
+* Temporary outages may affect licensing verification or functionality but are expected to be resolved.
+
+The Software may cease to function after an extended period without successful server communication.
+
+---
+
+### 6. Testing, Updates, and Service Changes
+
+The licensing system and related services may be updated, modified, or tested over time.
+
+* Features may change, improve, or be temporarily unstable during updates.
+* Behavior of licensing, activation, and validation systems may evolve.
+* Altered Brain Chemistry will make reasonable efforts to maintain functionality and resolve issues.
+
+---
+
+### 7. Restrictions
+
+You may not:
+
+* Redistribute the Software as a standalone product
+* Remove or alter copyright or attribution notices
+* Use the Software in a manner that circumvents licensing or activation mechanisms
+
+---
+
+### 8. No Warranty
+
+The Software is provided "as is" without warranty of any kind, express or implied, including but not limited to fitness for a particular purpose or non-infringement.
+
+---
+
+### 9. Limitation of Liability
+
+To the maximum extent permitted by law, Altered Brain Chemistry shall not be liable for any indirect, incidental, special, consequential, or exemplary damages, including but not limited to loss of data, loss of profits, or business interruption arising out of or related to the use or inability to use the Software.
+
+---
+
+### 10. Changes to This Agreement
+
+This Agreement may be updated in future versions of the Software. Continued use of the Software after changes constitutes acceptance of the updated Agreement.
+
+---

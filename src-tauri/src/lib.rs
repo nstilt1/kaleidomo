@@ -1,4 +1,4 @@
-const VERSION: &str = "0.9.9";
+const VERSION: &str = "0.9.10";
 const PRODUCT_NAME: &str = "Kaleidomo";
 const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/dashboard/downloads";
 const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/shop/kaleidomo-kaleidoscope-generator/";
@@ -13,9 +13,6 @@ use tauri::{Manager, State};
 use std::fs;
 use std::io::Cursor;
 use image::io::Reader as ImageReader;
-
-use tauri::menu::{MenuBuilder, PredefinedMenuItem, SubmenuBuilder};
-
 
 use kaleidomo_core::backends::gpu::GpuBackend;
 
@@ -757,22 +754,6 @@ pub fn run() {
                 loaded_gpu_image_path: Mutex::new(None),
                 last_version_fetch: AsyncMutex::new(ts),
             });
-
-            let edit_menu = SubmenuBuilder::new(app, "Edit")
-                .item(&PredefinedMenuItem::undo(app, None)?)
-                .item(&PredefinedMenuItem::redo(app, None)?)
-                .separator()
-                .item(&PredefinedMenuItem::cut(app, None)?)
-                .item(&PredefinedMenuItem::copy(app, None)?)
-                .item(&PredefinedMenuItem::paste(app, None)?)
-                .build()?;
-
-            let menu = MenuBuilder::new(app)
-                .item(&edit_menu)
-                .build()?;
-
-            app.set_menu(menu)?;
-
             
             #[cfg(feature = "logging")]
             {
@@ -822,6 +803,8 @@ pub fn run() {
             product_name,
             downloads_url,
             store_page_url,
+            accept_eula,
+            get_eula_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

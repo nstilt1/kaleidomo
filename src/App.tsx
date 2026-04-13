@@ -32,7 +32,7 @@ import {
 } from "@/components/ui/select";
 import { NumberSliderInput } from "@/components/NumberSliderInput";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-
+import { EulaGate } from "./components/licensing/EulaGate";
 //import { attachConsole} from "@tauri-apps/plugin-log"
 
 function CreateIcon() {
@@ -260,21 +260,23 @@ function CreatePage() {
 
 export default function App() {
   return (
-    <LicenseProvider>
-      <KaleidomoProvider>
-        <SettingsProvider>
-          <BrowserRouter>
-            <Routes>
-              <Route path="/" element={<AppLayout />}>
-                <Route index element={<Navigate to="/create" replace />} />
-                <Route path="create" element={<CreatePage />} />
-                <Route path="license" element={<LicensePage />} />
-                <Route path="settings" element={<SettingsPage />} />
-              </Route>
-            </Routes>
-          </BrowserRouter>
-        </SettingsProvider>
-      </KaleidomoProvider>
-    </LicenseProvider>
+    <EulaGate>
+      <LicenseProvider>
+        <KaleidomoProvider>
+          <SettingsProvider>
+            <BrowserRouter>
+              <Routes>
+                <Route path="/" element={<AppLayout />}>
+                  <Route index element={<Navigate to="/create" replace />} />
+                  <Route path="create" element={<CreatePage />} />
+                  <Route path="license" element={<LicensePage />} />
+                  <Route path="settings" element={<SettingsPage />} />
+                </Route>
+              </Routes>
+            </BrowserRouter>
+          </SettingsProvider>
+        </KaleidomoProvider>
+      </LicenseProvider>
+    </EulaGate>
   );
 }
