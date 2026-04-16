@@ -88,6 +88,21 @@ macro_rules! log_error {
     }};
 }
 
+#[cfg(feature = "logging")]
+#[macro_export]
+macro_rules! log_info {
+    ($($arg:tt)*) => {{
+        log::info!("{}", &::std::format!($($arg)*))
+    }};
+}
+
+#[macro_export]
+#[cfg(not(feature = "logging"))]
+macro_rules! log_info {
+    ($($arg:tt)*) => {{
+    }};
+}
+
 use std::backtrace::Backtrace;
 use std::panic;
 
@@ -168,11 +183,15 @@ macro_rules! limit_license {
         let (unlocked, license_type) = match $state.license_status.check_license(true).await {
             Ok(v) => {
                 //$license_data = v.1.clone();
+                log_info!("limit_license initial check was Ok(({}, {}))", v.0, v.1.license_type);
                 (v.0, v.1.license_type)
             },
-            Err(_) => (false, "".to_string())
+            Err(e) => {
+                log_error!("limit_license initial check was Err({})", e.1.error_message);
+                (false, "".to_string())
+            }
         };
-        if license_type.to_lowercase().as_str() != "perpetual" || !unlocked {
+        if !unlocked {
             if $output_size_h > 1280 || $output_size_w > 1280 {
                 let ratio = $output_size_w as f32 / $output_size_h as f32;
                 if ratio > 1.0 {
@@ -191,6 +210,7 @@ macro_rules! limit_license {
             }
         }
         let is_unlocked = $state.license_status.is_unlocked().await;
+        log_info!("limit_license is_unlocked = {}", is_unlocked);
         if !is_unlocked || !unlocked {
             $offset_x = 0;
             $offset_y = 0;

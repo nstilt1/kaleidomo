@@ -877,7 +877,7 @@ function Kaleidomo() {
             <NumberSliderInput
               label="Tile Count"
               value={settings.tile_count}
-              shouldLimit={!isUnlocked || licenseType === "trial"}
+              shouldLimit={!isUnlocked}
               limitedCap={3.5}
               min={0.1}
               max={64.0}
@@ -891,7 +891,7 @@ function Kaleidomo() {
             <NumberSliderInput
               label="Slices"
               value={count}
-              shouldLimit={!isUnlocked || licenseType === "trial"}
+              shouldLimit={!isUnlocked}
               limitedCap={12}
               min={3}
               max={64}
@@ -903,7 +903,7 @@ function Kaleidomo() {
             <NumberSliderInput
               label="Zoom"
               value={settings.zoom}
-              shouldLimit={!isUnlocked || licenseType === "trial"}
+              shouldLimit={!isUnlocked}
               limitedMin={0.8}
               limitedCap={3.0}
               min={0.01}
@@ -964,7 +964,7 @@ function Kaleidomo() {
                 />
               </CardDescription>
               <CardFooter>
-                {(!isUnlocked || licenseType === "trial") && (
+                {(!isUnlocked) && (
                   <p className="text-xs text-muted-foreground">
                     Offsets are only applied to previews within this app. Upgrade to
                     the perpetual license to unlock offsets in exported media.
@@ -979,7 +979,7 @@ function Kaleidomo() {
               label="Output Resolution (length of smaller side)"
               value={settings.resolution}
               min={8}
-              shouldLimit={!isUnlocked || licenseType === "trial"}
+              shouldLimit={!isUnlocked}
               limitedCap={720}
               max={8192}
               step={8}
@@ -1060,7 +1060,7 @@ function Kaleidomo() {
               label="Frame Count"
               value={settings.frame_count}
               min={1}
-              shouldLimit={!isUnlocked || licenseType === "trial"}
+              shouldLimit={!isUnlocked}
               limitedCap={1800}
               max={7200}
               step={1}
@@ -1133,7 +1133,7 @@ function Kaleidomo() {
             <NumberSliderInput
               label="Max Zoom"
               value={settings.zoom_max}
-              shouldLimit={!isUnlocked || licenseType === "trial"}
+              shouldLimit={!isUnlocked}
               limitedCap={3.0}
               limitedMin={0.8}
               min={0.01}
@@ -1146,7 +1146,7 @@ function Kaleidomo() {
             <NumberSliderInput
               label="Min Zoom"
               value={settings.zoom_min}
-              shouldLimit={!isUnlocked || licenseType === "trial"}
+              shouldLimit={!isUnlocked}
               limitedCap={3.0}
               limitedMin={0.8}
               min={0.01}
