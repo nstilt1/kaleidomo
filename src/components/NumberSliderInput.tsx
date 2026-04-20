@@ -21,13 +21,22 @@ type NumberSliderInputProps = {
   limitedCap?: number;
   limitedMin?: number;
   shouldLimit?: boolean;
-
-  // NEW PROP
   presetValues?: number[];
+  sliderScale?: "linear" | "splitLog";
+  sliderMidpointValue?: number;
+  sliderMidpointPercent?: number;
 };
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function safeLogRatio(value: number, start: number, end: number): number {
+  if (value <= 0 || start <= 0 || end <= 0 || start === end) {
+    return 0;
+  }
+
+  return Math.log(value / start) / Math.log(end / start);
 }
 
 function formatDisplayValue(
@@ -59,7 +68,10 @@ export function NumberSliderInput({
   limitedCap,
   limitedMin,
   shouldLimit = false,
-  presetValues = [], // default empty
+  presetValues = [],
+  sliderScale = "linear",
+  sliderMidpointValue = 1,
+  sliderMidpointPercent = 0.5,
 }: NumberSliderInputProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -88,6 +100,68 @@ export function NumberSliderInput({
     let normalized = roundToInteger ? Math.round(raw) : raw;
     if (roundToMultipleOf) normalized = roundToNearestMultiple(normalized, roundToMultipleOf);
     return clamp(normalized, effectiveMin, effectiveMax);
+  };
+
+  const normalizedMidpointPercent = clamp(sliderMidpointPercent, 0.05, 0.95);
+  const canUseSplitLog =
+    sliderScale === "splitLog" &&
+    effectiveMin > 0 &&
+    effectiveMax > 0 &&
+    sliderMidpointValue > effectiveMin &&
+    sliderMidpointValue < effectiveMax;
+
+  const sliderToActualValue = (sliderValue: number): number => {
+    if (!canUseSplitLog) {
+      return normalizeValue(sliderValue);
+    }
+
+    const clampedSlider = clamp(sliderValue, 0, 1);
+
+    if (clampedSlider <= normalizedMidpointPercent) {
+      const sectionT = clampedSlider / normalizedMidpointPercent;
+      const actual =
+        effectiveMin *
+        Math.exp(Math.log(sliderMidpointValue / effectiveMin) * sectionT);
+      return normalizeValue(actual);
+    }
+
+    const sectionT =
+      (clampedSlider - normalizedMidpointPercent) /
+      (1 - normalizedMidpointPercent);
+    const actual =
+      sliderMidpointValue *
+      Math.exp(Math.log(effectiveMax / sliderMidpointValue) * sectionT);
+
+    return normalizeValue(actual);
+  };
+
+  const actualToSliderValue = (actualValue: number): number => {
+    const normalizedActual = normalizeValue(actualValue);
+
+    if (!canUseSplitLog) {
+      return normalizedActual;
+    }
+
+    if (normalizedActual <= sliderMidpointValue) {
+      const sectionT = safeLogRatio(
+        normalizedActual,
+        effectiveMin,
+        sliderMidpointValue
+      );
+      return clamp(sectionT * normalizedMidpointPercent, 0, 1);
+    }
+
+    const sectionT = safeLogRatio(
+      normalizedActual,
+      sliderMidpointValue,
+      effectiveMax
+    );
+
+    return clamp(
+      normalizedMidpointPercent + sectionT * (1 - normalizedMidpointPercent),
+      0,
+      1
+    );
   };
 
   const commitDraft = () => {
@@ -165,12 +239,14 @@ export function NumberSliderInput({
       </div>
 
       <Slider
-        value={[normalizeValue(value)]}
-        min={effectiveMin}
-        max={effectiveMax}
-        step={roundToInteger ? 1 : step}
+        value={[actualToSliderValue(value)]}
+        min={canUseSplitLog ? 0 : effectiveMin}
+        max={canUseSplitLog ? 1 : effectiveMax}
+        step={canUseSplitLog ? 0.001 : roundToInteger ? 1 : step}
         disabled={disabled}
-        onValueChange={([next]) => onChange(normalizeValue(next))}
+        onValueChange={([next]) =>
+          onChange(canUseSplitLog ? sliderToActualValue(next) : normalizeValue(next))
+        }
       />
 
       {/* NEW: preset buttons */}

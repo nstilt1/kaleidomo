@@ -727,6 +727,7 @@ fn gpu_available(state: tauri::State<'_, AppState>) -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_hook();
+    assert!(verify_cert() == 1);
     let gpu_backend = match pollster::block_on(GpuBackend::new()) {
         Ok(gpu) => {
             println!("GPU backend initialized");

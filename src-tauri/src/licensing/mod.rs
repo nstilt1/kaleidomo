@@ -7,6 +7,8 @@ use kaleidomo_core::software_licensor_static_rust_lib::reqwest;
 pub mod cooldown;
 pub mod eula;
 pub use eula::*;
+pub mod signature_verification;
+pub use signature_verification::*;
 
 const UNKNOWN_ERROR_CODE: i32 = 512;
 

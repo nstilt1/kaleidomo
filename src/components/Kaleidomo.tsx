@@ -149,15 +149,19 @@ function clampMin(value: number, min: number) {
   return Math.max(min, value);
 }
 
+const SCALED_WEDGE_DIAGONAL_MULTIPLIER = 1.5;
+const HEXAGONAL_SQRT_3 = 1.7320508075688772;
+const SCALED_MODE_REFERENCE_ZOOM = 0.01;
+
 function getEffectiveZoomAndSourceRadius(
   userZoom: number,
   resolution: number,
   imgWidth: number,
   imgHeight: number,
-  mode: "legacy" | "scaled",
-  diagonalMultiplier: number
+  tileCount: number,
+  mode: "legacy" | "scaled"
 ) {
-  const safeUserZoom = clampMin(userZoom, 0.01);
+  const safeUserZoom = clampMin(userZoom, 0.0001);
 
   if (mode === "legacy") {
     const sourceRadiusPx = resolution / (2 * safeUserZoom);
@@ -169,14 +173,14 @@ function getEffectiveZoomAndSourceRadius(
   }
 
   const imageDiagonal = Math.hypot(imgWidth, imgHeight);
-  const scaledRadiusAtMinimumZoom = imageDiagonal * diagonalMultiplier;
+  const scaledRadiusAtReferenceZoom =
+    imageDiagonal * SCALED_WEDGE_DIAGONAL_MULTIPLIER;
   const sourceRadiusPx =
-    scaledRadiusAtMinimumZoom / (safeUserZoom / 0.01);
+    scaledRadiusAtReferenceZoom / (safeUserZoom / SCALED_MODE_REFERENCE_ZOOM);
 
-  const effectiveZoom = clampMin(
-    resolution / (2 * sourceRadiusPx),
-    0.000001
-  );
+  const safeTileCount = clampMin(tileCount, 0.0001);
+  const hexRadiusPx = resolution / (safeTileCount * HEXAGONAL_SQRT_3);
+  const effectiveZoom = clampMin(hexRadiusPx / sourceRadiusPx, 0.000001);
 
   return {
     effectiveZoom,
@@ -210,7 +214,12 @@ function mergeSettingsWithBase(base: Settings, incoming: unknown): Settings {
 
 function Kaleidomo() {
   const { isUnlocked, licenseType } = useLicense();
-  const { mode: wedgePickerMode, diagonalMultiplier } = useSettings();
+  const {
+    mode: wedgePickerMode,
+    setMode: setWedgePickerMode,
+    zoomSliderMidpointPercent,
+    setZoomSliderMidpointPercent,
+  } = useSettings();
   console.log(licenseType);
   const {
     imagePath,
@@ -319,8 +328,8 @@ function Kaleidomo() {
     settings.resolution,
     imgWidth,
     imgHeight,
-    wedgePickerMode,
-    diagonalMultiplier
+    settings.tile_count,
+    wedgePickerMode
   );
 
   const renderPreview = useCallback(
@@ -382,8 +391,8 @@ function Kaleidomo() {
             activeSettings.resolution,
             sourceWidth,
             sourceHeight,
-            wedgePickerMode,
-            diagonalMultiplier
+            activeSettings.tile_count,
+            wedgePickerMode
           ).effectiveZoom,
           kaleidoType: activeKaleidoType,
           tileCount: activeSettings.tile_count,
@@ -399,7 +408,16 @@ function Kaleidomo() {
         setIsRendering(false);
       }
     },
-    [imagePath, imgWidth, imgHeight, settings, count, kaleidoType, calculateDimensions]
+    [
+      imagePath,
+      imgWidth,
+      imgHeight,
+      settings,
+      count,
+      kaleidoType,
+      calculateDimensions,
+      wedgePickerMode,
+    ]
   );
 
   const loadImageIntoState = useCallback(
@@ -689,6 +707,27 @@ function Kaleidomo() {
 
       const nextSettings = mergeSettingsWithBase(DEFAULT_SETTINGS, parsed.settings);
 
+      if (isRecord(parsed.uiSettings)) {
+        if (
+          parsed.uiSettings.wedgePickerMode === "legacy" ||
+          parsed.uiSettings.wedgePickerMode === "scaled"
+        ) {
+          setWedgePickerMode(parsed.uiSettings.wedgePickerMode);
+        }
+
+        if (
+          typeof parsed.uiSettings.zoomSliderMidpointPercent === "number" &&
+          Number.isFinite(parsed.uiSettings.zoomSliderMidpointPercent)
+        ) {
+          setZoomSliderMidpointPercent(
+            Math.min(
+              0.95,
+              Math.max(0.05, parsed.uiSettings.zoomSliderMidpointPercent)
+            )
+          );
+        }
+      }
+
       setCount(nextCount);
       setSettings(nextSettings);
       setKaleidoType(nextKaleidoType);
@@ -732,7 +771,16 @@ function Kaleidomo() {
       return;
     }
 
-    const data = JSON.stringify({ imagePath, count, settings, kaleidoType });
+    const data = JSON.stringify({
+      imagePath,
+      count,
+      settings,
+      kaleidoType,
+      uiSettings: {
+        wedgePickerMode,
+        zoomSliderMidpointPercent,
+      },
+    });
     await writeTextFile(filePath, data);
   };
 
@@ -906,12 +954,15 @@ function Kaleidomo() {
               shouldLimit={!isUnlocked}
               limitedMin={0.8}
               limitedCap={3.0}
-              min={0.01}
+              min={0.001}
               max={32.0}
-              step={0.01}
+              step={0.0001}
               unit="x"
               onChange={(v) => setSettings((s) => ({ ...s, zoom: v }))}
               roundToInteger={false}
+              sliderScale="splitLog"
+              sliderMidpointValue={1.0}
+              sliderMidpointPercent={zoomSliderMidpointPercent}
               setExternalValue={(v) =>
                 setSettings((s) => ({
                   ...s,
@@ -1137,12 +1188,15 @@ function Kaleidomo() {
               shouldLimit={!isUnlocked}
               limitedCap={3.0}
               limitedMin={0.8}
-              min={0.01}
+              min={0.001}
               max={32.0}
-              step={0.01}
+              step={0.0001}
               onChange={(v) => setSettings((s) => ({ ...s, zoom_max: v }))}
               unit="x"
               roundToInteger={false}
+              sliderScale="splitLog"
+              sliderMidpointValue={1.0}
+              sliderMidpointPercent={zoomSliderMidpointPercent}
             />
             <NumberSliderInput
               label="Min Zoom"
@@ -1150,12 +1204,15 @@ function Kaleidomo() {
               shouldLimit={!isUnlocked}
               limitedCap={3.0}
               limitedMin={0.8}
-              min={0.01}
+              min={0.001}
               max={32.0}
-              step={0.01}
+              step={0.0001}
               onChange={(v) => setSettings((s) => ({ ...s, zoom_min: v }))}
               unit="x"
               roundToInteger={false}
+              sliderScale="splitLog"
+              sliderMidpointValue={1.0}
+              sliderMidpointPercent={zoomSliderMidpointPercent}
             />
             <Select
               onValueChange={(v) => setSettings((s) => ({ ...s, zoom_fn: v }))}

@@ -186,8 +186,8 @@ function WedgePickerSettingsCard() {
   const {
     mode,
     setMode,
-    diagonalMultiplier,
-    setDiagonalMultiplier,
+    zoomSliderMidpointPercent,
+    setZoomSliderMidpointPercent,
   } = useSettings();
 
   return (
@@ -216,24 +216,27 @@ function WedgePickerSettingsCard() {
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
-            Legacy mode uses the current direct zoom behavior. Scaled mode keeps
-            the wedge visually tied to the image diagonal and converts that to
-            backend zoom on the frontend.
+            Legacy mode uses the direct backend zoom value. Scaled mode is the
+            default and uses a fixed 1.5× image-diagonal reference, then maps
+            that into backend zoom using the hexagonal tiling math from the
+            shader.
           </p>
         </div>
 
-        {mode === "scaled" && (
-          <NumberSliderInput
-            label="Scaled Mode Diagonal Multiplier"
-            value={diagonalMultiplier}
-            min={1.0}
-            max={2.0}
-            step={0.01}
-            onChange={setDiagonalMultiplier}
-            unit="x diagonal"
-            roundToInteger={false}
-          />
-        )}
+        <NumberSliderInput
+          label="Zoom Slider Midpoint"
+          value={zoomSliderMidpointPercent * 100}
+          min={20}
+          max={80}
+          step={1}
+          onChange={(value) => setZoomSliderMidpointPercent(value / 100)}
+          unit="%"
+          roundToInteger={true}
+        />
+        <p className="text-xs text-muted-foreground">
+          This controls how much of the slider track is reserved for values
+          below 1.0x. A value of 50% makes 1.0x the midpoint of the zoom slider.
+        </p>
       </CardContent>
     </Card>
   );

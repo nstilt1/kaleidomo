@@ -5,8 +5,8 @@ export type WedgePickerMode = "legacy" | "scaled";
 type SettingsContextValue = {
   mode: WedgePickerMode;
   setMode: React.Dispatch<React.SetStateAction<WedgePickerMode>>;
-  diagonalMultiplier: number;
-  setDiagonalMultiplier: React.Dispatch<React.SetStateAction<number>>;
+  zoomSliderMidpointPercent: number;
+  setZoomSliderMidpointPercent: React.Dispatch<React.SetStateAction<number>>;
 };
 
 const SettingsContext =
@@ -17,17 +17,18 @@ export function SettingsProvider({
 }: {
   children: React.ReactNode;
 }) {
-  const [mode, setMode] = React.useState<WedgePickerMode>("legacy");
-  const [diagonalMultiplier, setDiagonalMultiplier] = React.useState(1.5);
+  const [mode, setMode] = React.useState<WedgePickerMode>("scaled");
+  const [zoomSliderMidpointPercent, setZoomSliderMidpointPercent] =
+    React.useState(0.5);
 
   const value = React.useMemo(
     () => ({
       mode,
       setMode,
-      diagonalMultiplier,
-      setDiagonalMultiplier,
+      zoomSliderMidpointPercent,
+      setZoomSliderMidpointPercent,
     }),
-    [mode, diagonalMultiplier]
+    [mode, zoomSliderMidpointPercent]
   );
 
   return (
