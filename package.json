@@ -40,7 +40,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "bun --env-file=.env tauri build"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",

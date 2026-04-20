@@ -1,7 +1,7 @@
 use kaleidomo_core::LicenseData;
 use tauri::{Manager, State};
 
-use crate::{AppState, DOWNLOADS_URL, PRODUCT_NAME, STORE_PAGE_URL, VERSION, VERSION_URL, log_error};
+use crate::{AppState, DOWNLOADS_URL, PRODUCT_NAME, STORE_PAGE_URL, VERSION_URL, log_error};
 use kaleidomo_core::software_licensor_static_rust_lib::reqwest;
 
 pub mod cooldown;
@@ -106,14 +106,14 @@ pub async fn is_new_version_available(state: tauri::State<'_, AppState>, app: ta
                 return Err(e);
             }
         }
-        return Ok(state.license_status.is_update_available_manual(VERSION, cloud_version));
+        return Ok(state.license_status.is_update_available_manual(&app.package_info().version.to_string(), cloud_version));
     }
-    Ok(state.license_status.is_update_available(VERSION, &state.license_data))
+    Ok(state.license_status.is_update_available(&app.package_info().version.to_string(), &state.license_data))
 }
 
 #[tauri::command]
-pub fn current_version() -> String {
-    VERSION.to_string()
+pub fn current_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
 }
 
 #[tauri::command]

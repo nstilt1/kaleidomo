@@ -19,8 +19,11 @@ type NumberSliderInputProps = {
   externalValueName?: string;
   externalValue2Name?: string;
   limitedCap?: number;
-  limitedMin?: number,
+  limitedMin?: number;
   shouldLimit?: boolean;
+
+  // NEW PROP
+  presetValues?: number[];
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -32,16 +35,9 @@ function formatDisplayValue(
   roundToInteger: boolean,
   roundToMultipleOf: null | number
 ): string {
-  if (roundToInteger) {
-    return String(Math.round(value));
-  }
-
-  if (roundToMultipleOf) {
-    return roundToNearestMultiple(value, roundToMultipleOf).toString();
-  }
-
-  const rounded = Number(value.toFixed(4));
-  return String(rounded);
+  if (roundToInteger) return String(Math.round(value));
+  if (roundToMultipleOf) return roundToNearestMultiple(value, roundToMultipleOf).toString();
+  return String(Number(value.toFixed(4)));
 }
 
 export function NumberSliderInput({
@@ -63,6 +59,7 @@ export function NumberSliderInput({
   limitedCap,
   limitedMin,
   shouldLimit = false,
+  presetValues = [], // default empty
 }: NumberSliderInputProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -77,9 +74,7 @@ export function NumberSliderInput({
   }, [value, roundToInteger, roundToMultipleOf]);
 
   useEffect(() => {
-    if (isEditing) {
-      setDraft(displayValue);
-    }
+    if (isEditing) setDraft(displayValue);
   }, [isEditing, displayValue]);
 
   useEffect(() => {
@@ -91,25 +86,18 @@ export function NumberSliderInput({
 
   const normalizeValue = (raw: number): number => {
     let normalized = roundToInteger ? Math.round(raw) : raw;
-
-    if (roundToMultipleOf) {
-      normalized = roundToNearestMultiple(normalized, roundToMultipleOf);
-    }
-
+    if (roundToMultipleOf) normalized = roundToNearestMultiple(normalized, roundToMultipleOf);
     return clamp(normalized, effectiveMin, effectiveMax);
   };
 
   const commitDraft = () => {
     const parsed = Number(draft.trim());
-
     if (!Number.isFinite(parsed)) {
       setDraft(displayValue);
       setIsEditing(false);
       return;
     }
-
-    const nextValue = normalizeValue(parsed);
-    onChange(nextValue);
+    onChange(normalizeValue(parsed));
     setIsEditing(false);
   };
 
@@ -124,19 +112,18 @@ export function NumberSliderInput({
     const names = [externalValueName, externalValue2Name].filter(
       (name): name is string => Boolean(name && name.trim())
     );
-
-    if (names.length === 0) {
-      return "Set External Value";
-    }
-
-    return `Set ${names.join(" / ")}`;
+    return names.length === 0 ? "Set External Value" : `Set ${names.join(" / ")}`;
   })();
 
   const handleSetExternalValues = () => {
     const normalized = normalizeValue(value);
-
     setExternalValue?.(normalized);
     setExternalValue2?.(normalized);
+  };
+
+  // NEW: preset click handler
+  const handlePresetClick = (v: number) => {
+    onChange(normalizeValue(v));
   };
 
   return (
@@ -148,13 +135,8 @@ export function NumberSliderInput({
           <button
             type="button"
             disabled={disabled}
-            onClick={() => {
-              if (!disabled) {
-                setIsEditing(true);
-              }
-            }}
+            onClick={() => !disabled && setIsEditing(true)}
             className="text-sm tabular-nums rounded px-2 py-1 hover:bg-muted disabled:opacity-50"
-            aria-label={`Edit ${label}`}
           >
             {displayValue} {unit}
           </button>
@@ -172,18 +154,12 @@ export function NumberSliderInput({
               onChange={(e) => setDraft(e.target.value)}
               onBlur={commitDraft}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  commitDraft();
-                } else if (e.key === "Escape") {
-                  cancelDraft();
-                }
+                if (e.key === "Enter") commitDraft();
+                else if (e.key === "Escape") cancelDraft();
               }}
               className="w-24 rounded border bg-background px-2 py-1 text-sm text-right tabular-nums"
-              aria-label={`${label} value`}
             />
-            {unit ? (
-              <span className="text-sm text-muted-foreground">{unit}</span>
-            ) : null}
+            {unit && <span className="text-sm text-muted-foreground">{unit}</span>}
           </div>
         )}
       </div>
@@ -194,12 +170,27 @@ export function NumberSliderInput({
         max={effectiveMax}
         step={roundToInteger ? 1 : step}
         disabled={disabled}
-        onValueChange={([next]) => {
-          onChange(normalizeValue(next));
-        }}
+        onValueChange={([next]) => onChange(normalizeValue(next))}
       />
 
-      {hasExternalSetter ? (
+      {/* NEW: preset buttons */}
+      {presetValues.length > 0 && (
+        <div className="flex flex-wrap gap-2 mt-3">
+          {presetValues.map((p) => (
+            <button
+              key={p}
+              type="button"
+              disabled={disabled}
+              onClick={() => handlePresetClick(p)}
+              className="px-3 py-1.5 text-sm rounded-full border hover:bg-muted disabled:opacity-50 tabular-nums"
+            >
+              {formatDisplayValue(p, roundToInteger, roundToMultipleOf)} {unit}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {hasExternalSetter && (
         <button
           type="button"
           disabled={disabled}
@@ -208,14 +199,14 @@ export function NumberSliderInput({
         >
           {buttonLabel}
         </button>
-      ) : null}
+      )}
 
-      {showMaxLimitNotice ? (
+      {showMaxLimitNotice && (
         <div className="mt-3 rounded-md border border-red-500 bg-red-50 px-3 py-2 text-sm text-red-700">
-          Upon activating a Perpetual license, the bounds for this parameter will 
-          change to the following bounds: {min} to {max} {unit ? ` ${unit}` : ""}
+          Upon activating a Perpetual license, the bounds for this parameter will change to the
+          following bounds: {min} to {max} {unit}
         </div>
-      ) : null}
+      )}
     </div>
   );
 }

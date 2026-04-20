@@ -9,7 +9,7 @@ members = [
 incremental = false
 
 [profile.release]
-incremental = false # Disable incremental for a smaller final build
+#incremental = false # Disable incremental for a smaller final build
 codegen-units = 1   # Reduces parallel compilation to allow more optimizations
 lto = true          # Enables Link Time Optimization
 opt-level = "z"     # "z" optimizes for size; use "3" if you prefer raw speed

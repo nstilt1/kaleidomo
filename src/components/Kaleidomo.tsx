@@ -211,7 +211,7 @@ function mergeSettingsWithBase(base: Settings, incoming: unknown): Settings {
 function Kaleidomo() {
   const { isUnlocked, licenseType } = useLicense();
   const { mode: wedgePickerMode, diagonalMultiplier } = useSettings();
-
+  console.log(licenseType);
   const {
     imagePath,
     setImagePath,
@@ -987,6 +987,7 @@ function Kaleidomo() {
               unit="px"
               roundToInteger={false}
               roundToMultipleOf={8}
+              presetValues={[480, 540, 720, 1080, 1440, 2160, 4320, 5550, 8192]}
             />
           </div>
 

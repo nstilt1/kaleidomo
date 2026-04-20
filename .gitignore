@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 
 target/
+tmp/
+.env
+*.ps1

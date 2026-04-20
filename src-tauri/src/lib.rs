@@ -1,4 +1,3 @@
-const VERSION: &str = "0.9.11";
 const PRODUCT_NAME: &str = "Kaleidomo";
 const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/dashboard/downloads";
 const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/shop/kaleidomo-kaleidoscope-generator/";
@@ -24,7 +23,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use std::fs::File;
 use std::io::BufReader;
 
-fn apply_exif_orientation(mut img: image::DynamicImage, path: &str) -> image::DynamicImage {
+fn apply_exif_orientation(img: image::DynamicImage, path: &str) -> image::DynamicImage {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(_) => return img,
@@ -155,7 +154,7 @@ fn clamp(value: &mut f32, min: f32, max: f32) {
     *value = value.min(max);
 }
 
-fn adjust_wedge_params(settings: &mut KaleidoSettings, img_width: u32, img_height: u32, use_gpu: bool) {
+fn adjust_wedge_params(settings: &mut KaleidoSettings, img_width: u32, img_height: u32, _use_gpu: bool) {
     // #[cfg(target_os = "windows")]
     // if true {
     //     settings.triangle_center_x = (img_width - 1) as f32 - settings.triangle_center_x;
@@ -180,7 +179,7 @@ fn adjust_path(path: &String) -> String {
 /// at compile time.
 macro_rules! limit_license {
     ($state:expr, $output_size_w:expr, $output_size_h:expr, $offset_x:expr, $offset_y:expr, $zoom:expr, $tile_count:expr) => {
-        let (unlocked, license_type) = match $state.license_status.check_license(true).await {
+        let (unlocked, _license_type) = match $state.license_status.check_license(true).await {
             Ok(v) => {
                 //$license_data = v.1.clone();
                 log_info!("limit_license initial check was Ok(({}, {}))", v.0, v.1.license_type);
@@ -287,7 +286,7 @@ fn select_image(
         }
     }
 
-    let use_gpu = {
+    let _use_gpu = {
         let guard = match state
             .use_gpu_acceleration
             .lock()
