@@ -13,8 +13,8 @@ openh264 = "0.9.3"
 pollster = "0.4.0"
 rayon = "1.10"
 serde = "1.0.228"
-#software_licensor_static_rust_lib = { path = "/Users/somedooby/Documents/coding/JUCE_code/software-licensor-client-side-library/software_licensor_static_rust_lib", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
-software_licensor_static_rust_lib = { git = "https://github.com/nstilt1/software-licensor-client-side-library", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
+software_licensor_static_rust_lib = { path = "/Users/somedooby/Documents/coding/JUCE_code/software-licensor-client-side-library/software_licensor_static_rust_lib", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
+#software_licensor_static_rust_lib = { git = "https://github.com/nstilt1/software-licensor-client-side-library", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
 #software_licensor_static_rust_lib = { path = "I:\\software_licensor_static_rust_lib\\software-licensor-client-side-library\\software_licensor_static_rust_lib", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
 wgpu = { version = "29", default-features = false, features = [
     "std",

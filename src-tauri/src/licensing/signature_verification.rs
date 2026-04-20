@@ -8,15 +8,16 @@ pub fn verify_cert() -> u8 {
         #[cfg(target_os = "windows")]
         if let Err(e) = verify_sig("Hyperformance Solutions LLC", "Hyperformance Solutions LLC", None) {
             eprintln!("[FATAL] {e}");
-            //std::process::exit(1);
-            let arr = Vec::new();
-            return arr[0];
+            std::process::exit(1);
+            // let arr = Vec::new();
+            // return arr[0];
         }
         #[cfg(target_os = "macos")]
-        if let Err(e) = verify_sig("Developer ID Application: Noah Stiltner (WK272386LM)", "Noah Stiltner", "WK272386LM") {
+        if let Err(e) = verify_sig("Developer ID Application: Noah Stiltner (WK272386LM)", "Noah Stiltner", Some("WK272386LM")) {
             eprintln!("[FATAL] {e}");
-            let arr = Vec::new();
-            return arr[0];
+            // let arr = Vec::new();
+            // return arr[0];
+            std::process::exit(1);
         }
     }
     return 1;
