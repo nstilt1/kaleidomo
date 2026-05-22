@@ -332,6 +332,24 @@ function Kaleidomo() {
     wedgePickerMode
   );
 
+  const effectiveMinZoomState = getEffectiveZoomAndSourceRadius(
+    settings.zoom_min,
+    settings.resolution,
+    imgWidth,
+    imgHeight,
+    settings.tile_count,
+    wedgePickerMode
+  );
+
+  const effectiveMaxZoomState = getEffectiveZoomAndSourceRadius(
+    settings.zoom_max,
+    settings.resolution,
+    imgWidth,
+    imgHeight,
+    settings.tile_count,
+    wedgePickerMode
+  );
+
   const renderPreview = useCallback(
     async (options?: {
       path?: string;
@@ -826,6 +844,8 @@ function Kaleidomo() {
     const { width, height } = calculateDimensions(settings);
 
     try {
+      console.log("settings.still_frame_ending frames = " + settings.still_frame_ending);
+
       const message = await invoke("generate_video", {
         path: imagePath,
         x: settings.x,
@@ -846,8 +866,8 @@ function Kaleidomo() {
         quality: settings.quality,
         triangleRotationDegreesPerFrame: settings.triangle_rotation_degrees_per_frame,
         hueRotationDegreesPerFrame: settings.hue_rotation_degrees_per_frame,
-        zoomMax: settings.zoom_max,
-        zoomMin: settings.zoom_min,
+        zoomMax: effectiveMaxZoomState.effectiveZoom,
+        zoomMin: effectiveMinZoomState.effectiveZoom,
         zoomFn: settings.zoom_fn,
         zoomStartOffset: settings.zoom_start_offset,
         numZoomLoops: settings.num_zoom_loops,

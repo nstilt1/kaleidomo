@@ -586,7 +586,8 @@ pub fn render_video_gpu(
 
     let base_rotation = settings.triangle_rotation_rad;
     let base_hue = settings.hue_rotation as f32;
-    let mut last_frame_slot: Option<usize> = None;
+
+    let mut last_frame: Option<YUVBuffer> = None;
 
     for frame in 0..total_frames {
         settings.triangle_rotation_rad =
@@ -603,26 +604,20 @@ pub fn render_video_gpu(
 
         while let Some(done) = renderer.receive_oldest_blocking()? {
             let rgba = renderer.slot_bytes(done.slot_index)?;
-            let _ = sink.write_rgba_frame(rgba)?;
-            last_frame_slot = Some(done.slot_index);
+            last_frame = Some(sink.write_rgba_frame(rgba)?);
             renderer.release_slot(done.slot_index)?;
         }
     }
 
     for done in renderer.drain_remaining_blocking()? {
         let rgba = renderer.slot_bytes(done.slot_index)?;
-        let _ = sink.write_rgba_frame(rgba)?;
-        last_frame_slot = Some(done.slot_index);
+        last_frame = Some(sink.write_rgba_frame(rgba)?);
         renderer.release_slot(done.slot_index)?;
     }
 
-    if let Some(slot_index) = last_frame_slot {
-        let rgba = renderer.slot_bytes(slot_index).ok().map(|s| s);
-        if let Some(last_rgba) = rgba {
-            let last_yuv = sink.write_rgba_frame(&last_rgba)?;
-            for _ in 0..video_settings.still_frame_ending - 1 {
-                sink.write_yuv_frame(&last_yuv)?;
-            }
+    if let Some(last_frame) = last_frame {
+        for _ in 0..video_settings.still_frame_ending {
+            sink.write_yuv_frame(&last_frame)?;
         }
     }
 
