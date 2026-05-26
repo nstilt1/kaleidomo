@@ -7,7 +7,7 @@ use image::{DynamicImage, GenericImageView};
 use image::{ImageBuffer, Rgba};
 use rayon::prelude::*;
 use serde::Deserialize;
-use std::f32::consts::PI;
+pub use std::f32::consts::PI;
 pub use wgpu;
 
 pub use image;

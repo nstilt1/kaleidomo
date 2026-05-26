@@ -19,6 +19,11 @@ pub struct GpuBackend {
     source: Option<SourceImageGpu>,
     output: Option<OutputResources>,
     last_settings: Option<GpuKaleidoSettings>,
+
+    blit_pipeline: Option<wgpu::RenderPipeline>,
+    blit_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    blit_sampler: Option<wgpu::Sampler>,
+    canvas_intermediate: Option<CanvasIntermediate>,
 }
 
 const DEFAULT_TILE_SIZE: u32 = 4096;
@@ -150,6 +155,10 @@ impl GpuBackend {
             source: None,
             output: None,
             last_settings: None,
+            blit_bind_group_layout: None,
+            blit_pipeline: None,
+            blit_sampler: None,
+            canvas_intermediate: None,
         })
     }
 
@@ -1172,4 +1181,380 @@ fn rgba_len(width: u32, height: u32) -> Result<usize, Box<dyn Error>> {
         .checked_mul(height as usize)
         .and_then(|v| v.checked_mul(4))
         .ok_or_else(|| "RGBA frame size overflow".into())
+}
+
+struct CanvasIntermediate {
+    texture: wgpu::Texture,
+    view:    wgpu::TextureView,
+    width:   u32,
+    height:  u32,
+}
+ 
+impl GpuBackend {
+    // -----------------------------------------------------------------------
+    // Constructor for the Wasm / canvas path.
+    // Call this instead of GpuBackend::new() when you already have a
+    // device + queue from surface negotiation.
+    // `swapchain_format` must match the SurfaceConfiguration format.
+    // -----------------------------------------------------------------------
+    pub fn new_for_canvas(
+        device:           wgpu::Device,
+        queue:            wgpu::Queue,
+        swapchain_format: wgpu::TextureFormat,
+    ) -> Result<Self> {
+        // ── Compute pipeline (identical to GpuBackend::new) ──────────────────
+        let shader = device.create_shader_module(wgpu::include_wgsl!("kaleidomo.wgsl"));
+ 
+        let settings_min_binding_size =
+            non_zero_u64(std::mem::size_of::<GpuKaleidoSettings>() as u64)
+                .context("GpuKaleidoSettings size cannot be zero")?;
+ 
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("kaleidomo.bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: Some(settings_min_binding_size),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+ 
+        let pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("kaleidomo.pipeline_layout"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
+            });
+ 
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("kaleidomo.compute_pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+ 
+        let settings_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kaleidomo.settings_buffer"),
+            size: std::mem::size_of::<GpuKaleidoSettings>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+ 
+        // ── Blit render pipeline (compute intermediate → swap-chain) ─────────
+        //
+        // WebGPU swap-chain textures can't be StorageTextures, so the compute
+        // shader writes to an intermediate Rgba8Unorm texture, then this blit
+        // pipeline copies it to the swap-chain view via a full-screen triangle.
+        let blit_shader_src = r#"
+            @group(0) @binding(0) var t_intermediate : texture_2d<f32>;
+            @group(0) @binding(1) var s_linear       : sampler;
+ 
+            struct VertOut {
+                @builtin(position) pos : vec4<f32>,
+                @location(0)       uv  : vec2<f32>,
+            }
+ 
+            // Full-screen triangle: no vertex buffer needed
+            @vertex
+            fn vs_main(@builtin(vertex_index) vi : u32) -> VertOut {
+                // Vertices at NDC: (-1,-1), (3,-1), (-1,3)
+                let x = f32((vi << 1u) & 2u) * 2.0 - 1.0;
+                let y = f32(vi & 2u) * 2.0 - 1.0;
+                var o : VertOut;
+                o.pos = vec4<f32>(x, y, 0.0, 1.0);
+                // Map NDC [-1,1] → UV [0,1], flip Y for wgpu's top-left origin
+                o.uv  = vec2<f32>((x + 1.0) * 0.5, (1.0 - y) * 0.5);
+                return o;
+            }
+ 
+            @fragment
+            fn fs_main(in : VertOut) -> @location(0) vec4<f32> {
+                return textureSample(t_intermediate, s_linear, in.uv);
+            }
+        "#;
+ 
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label:  Some("kaleidomo.blit_shader"),
+            source: wgpu::ShaderSource::Wgsl(blit_shader_src.into()),
+        });
+ 
+        let blit_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("kaleidomo.blit_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+ 
+        let blit_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("kaleidomo.blit_pipeline_layout"),
+                bind_group_layouts: &[Some(&blit_bind_group_layout)],
+                immediate_size: 0,
+            });
+ 
+        let blit_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label:  Some("kaleidomo.blit_pipeline"),
+                layout: Some(&blit_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module:      &blit_shader,
+                    entry_point: Some("vs_main"),
+                    buffers:     &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module:      &blit_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format:     swapchain_format,
+                        blend:      None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive:     wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample:   wgpu::MultisampleState::default(),
+                // wgpu 29: multiview_mask (not multiview); None = not a multiview pass
+                multiview_mask: None,
+                cache: None,
+            });
+ 
+        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label:           Some("kaleidomo.blit_sampler"),
+            address_mode_u:  wgpu::AddressMode::ClampToEdge,
+            address_mode_v:  wgpu::AddressMode::ClampToEdge,
+            mag_filter:      wgpu::FilterMode::Linear,
+            min_filter:      wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+ 
+        info!("GpuBackend (canvas) initialized successfully");
+ 
+        Ok(Self {
+            device,
+            queue,
+            bind_group_layout,
+            pipeline,
+            settings_buffer,
+            source:               None,
+            output:               None,
+            last_settings:        None,
+            blit_pipeline:        Some(blit_pipeline),
+            blit_bind_group_layout: Some(blit_bind_group_layout),
+            blit_sampler:         Some(blit_sampler),
+            canvas_intermediate:  None,
+        })
+    }
+ 
+    // -----------------------------------------------------------------------
+    // Resize / reconfigure the surface swap-chain (call when canvas resizes).
+    // -----------------------------------------------------------------------
+    pub fn configure_surface(
+        &self,
+        surface: &wgpu::Surface,
+        config:  &wgpu::SurfaceConfiguration,
+    ) {
+        surface.configure(&self.device, config);
+    }
+ 
+    // -----------------------------------------------------------------------
+    // Per-frame render: compute kaleidoscope → intermediate texture, then
+    // blit intermediate → swap-chain TextureView.
+    // `external_settings_buffer` is the pre-allocated uniform buffer owned by
+    // the Wasm engine (avoids a GPU allocation per frame).
+    // -----------------------------------------------------------------------
+    pub fn render_directly_to_view(
+        &mut self,
+        settings:                 &KaleidoSettings,
+        swap_view:                &wgpu::TextureView,
+        external_settings_buffer: &wgpu::Buffer,
+        swapchain_format:         wgpu::TextureFormat,
+    ) -> Result<()> {
+        let width  = settings.output_size_w;
+        let height = settings.output_size_h;
+ 
+        // ── 1. Ensure the intermediate texture matches current output size ────
+        let needs_rebuild = match &self.canvas_intermediate {
+            Some(ci) => ci.width != width || ci.height != height,
+            None     => true,
+        };
+ 
+        if needs_rebuild {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("kaleidomo.canvas_intermediate"),
+                size:  wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count:    1,
+                dimension:       wgpu::TextureDimension::D2,
+                format:          wgpu::TextureFormat::Rgba8Unorm,
+                // STORAGE_BINDING  → compute writes here
+                // TEXTURE_BINDING  → blit samples from here
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                     | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.canvas_intermediate = Some(CanvasIntermediate { texture, view, width, height });
+        }
+ 
+        let intermediate_view = &self
+            .canvas_intermediate
+            .as_ref()
+            .context("canvas_intermediate missing after ensure")?
+            .view;
+ 
+        // ── 2. Upload per-frame settings uniform ─────────────────────────────
+        let source = self
+            .source
+            .as_ref()
+            .context("no source image loaded; call set_source_image first")?;
+ 
+        let gpu_settings = GpuKaleidoSettings::from_parts(settings, source, 0, 0);
+ 
+        self.queue.write_buffer(
+            external_settings_buffer,
+            0,
+            bytemuck::bytes_of(&gpu_settings),
+        );
+ 
+        // ── 3. Compute pass: kaleidoscope → intermediate ──────────────────────
+        let compute_bind_group =
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label:  Some("kaleidomo.canvas_compute_bg"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding:  0,
+                        resource: wgpu::BindingResource::TextureView(&source.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  1,
+                        resource: wgpu::BindingResource::TextureView(intermediate_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  2,
+                        resource: external_settings_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+ 
+        let blit_bgl = self
+            .blit_bind_group_layout
+            .as_ref()
+            .context("blit_bind_group_layout missing; use new_for_canvas()")?;
+        let blit_sampler = self
+            .blit_sampler
+            .as_ref()
+            .context("blit_sampler missing; use new_for_canvas()")?;
+        let blit_pipeline = self
+            .blit_pipeline
+            .as_ref()
+            .context("blit_pipeline missing; use new_for_canvas()")?;
+ 
+        let blit_bind_group =
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label:  Some("kaleidomo.blit_bg"),
+                layout: blit_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding:  0,
+                        resource: wgpu::BindingResource::TextureView(intermediate_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  1,
+                        resource: wgpu::BindingResource::Sampler(blit_sampler),
+                    },
+                ],
+            });
+ 
+        let mut encoder = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("kaleidomo.canvas_encoder") },
+        );
+ 
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("kaleidomo.canvas_compute_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &compute_bind_group, &[]);
+            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+        }
+ 
+        // ── 4. Render pass: blit intermediate → swap-chain ───────────────────
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kaleidomo.blit_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view:           swap_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load:  wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes:        None,
+                occlusion_query_set:     None,
+                // wgpu 29: multiview_mask field required; None = no multiview
+                multiview_mask: None,
+            });
+            pass.set_pipeline(blit_pipeline);
+            pass.set_bind_group(0, &blit_bind_group, &[]);
+            pass.draw(0..3, 0..1); // full-screen triangle, no vertex buffer
+        }
+ 
+        self.queue.submit(Some(encoder.finish()));
+        Ok(())
+    }
 }

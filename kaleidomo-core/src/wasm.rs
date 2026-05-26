@@ -1,141 +1,599 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::f32::consts::PI;
+
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{HtmlCanvasElement, window};
+
 use crate::backends::gpu::{GpuBackend, GpuKaleidoSettings};
 use crate::{KaleidoSettings, KaleidoType};
-use image::DynamicImage;
-use std::error::Error;
+
+// ---------------------------------------------------------------------------
+// VideoSettings — mirrors the native struct but is wasm_bindgen-compatible
+// ---------------------------------------------------------------------------
+
+/// Animation parameters passed from TypeScript. All fields are public so
+/// they can be set directly from JS via a plain object converted with
+/// `serde-wasm-bindgen`, or built field-by-field.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct WasmVideoSettings {
+    /// Total loop duration in seconds (e.g. 10.0)
+    pub animation_duration: f32,
+    /// How many radians to sweep across the rotation range per loop
+    pub rotation_range: f32,
+    pub rotation_cycles: f32,
+    pub rotation_start_offset: f32,
+    /// "linear" | "triangle" | "sawtooth" | "sin" | "sin2" | "cos" | "-cos"
+    rotation_fn: String,
+    /// Hue sweep range in degrees (e.g. 60)
+    pub hue_range: i32,
+    pub hue_cycles: f32,
+    pub hue_start_offset: f32,
+    hue_fn: String,
+    pub fps: u32,
+    pub zoom_max: f32,
+    pub zoom_min: f32,
+    zoom_fn: String,
+    pub zoom_start_offset: f32,
+    pub num_zoom_loops: u32,
+}
+
+#[wasm_bindgen]
+impl WasmVideoSettings {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> WasmVideoSettings {
+        WasmVideoSettings {
+            animation_duration: 10.0,
+            rotation_range: 0.3,
+            rotation_cycles: 1.0,
+            rotation_start_offset: 0.0,
+            rotation_fn: "sin".to_string(),
+            hue_range: 60,
+            hue_cycles: 1.0,
+            hue_start_offset: 0.0,
+            hue_fn: "sin".to_string(),
+            fps: 25,
+            zoom_max: 1.2,
+            zoom_min: 0.8,
+            zoom_fn: "sin".to_string(),
+            zoom_start_offset: 0.0,
+            num_zoom_loops: 1,
+        }
+    }
+
+    // String setters (wasm_bindgen can't expose String fields directly)
+    pub fn set_rotation_fn(&mut self, f: String) { self.rotation_fn = f; }
+    pub fn set_hue_fn(&mut self, f: String)      { self.hue_fn = f; }
+    pub fn set_zoom_fn(&mut self, f: String)     { self.zoom_fn = f; }
+
+    pub fn get_rotation_fn(&self) -> String { self.rotation_fn.clone() }
+    pub fn get_hue_fn(&self)      -> String { self.hue_fn.clone() }
+    pub fn get_zoom_fn(&self)     -> String { self.zoom_fn.clone() }
+}
+
+// ---------------------------------------------------------------------------
+// Modulation helpers (identical logic to lib.rs / rlib.rs)
+// ---------------------------------------------------------------------------
+
+fn modulate(
+    settings: &WasmVideoSettings,
+    frame: u32,
+    range_max: f32,
+    range_min: f32,
+    num_loops: f32,
+    start_offset: f32,
+    function: &str,
+) -> f32 {
+    let range = range_max - range_min;
+    let frame_count = settings.animation_duration * settings.fps as f32;
+
+    match function.to_ascii_lowercase().as_str() {
+        "triangle" => {
+            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
+            let phase = phase.fract();
+            let tri = 1.0 - (2.0 * phase - 1.0).abs();
+            range_min + tri * range
+        }
+        "sawtooth" | "linear" | "saw" => {
+            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
+            range_min + phase.fract() * range
+        }
+        "sin" => {
+            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
+            let sin_norm = (f32::sin(phase * 2.0 * PI) + 1.0) * 0.5;
+            range_min + sin_norm * range
+        }
+        "sin2" => {
+            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
+            let sin2_norm = f32::sin(phase * 2.0 * PI).powi(2);
+            range_min + sin2_norm * range
+        }
+        "cos" => {
+            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
+            let cos_norm = (f32::cos(phase * 2.0 * PI) + 1.0) * 0.5;
+            range_min + cos_norm * range
+        }
+        "-cos" => {
+            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
+            let neg_cos_norm = (1.0 - f32::cos(phase * 2.0 * PI)) * 0.5;
+            range_min + neg_cos_norm * range
+        }
+        _ => range_min,
+    }
+}
+
+#[inline]
+fn degrees_to_radians(degrees: f32) -> f32 {
+    degrees * (PI / 180.0)
+}
+
+fn modulate_zoom(vs: &WasmVideoSettings, frame: u32) -> f32 {
+    modulate(
+        vs,
+        frame,
+        vs.zoom_max,
+        vs.zoom_min,
+        vs.num_zoom_loops as f32,
+        vs.zoom_start_offset,
+        &vs.zoom_fn.clone(),
+    )
+}
+
+fn modulate_rotation(vs: &WasmVideoSettings, frame: u32, base_rotation: f32) -> f32 {
+    modulate(
+        vs,
+        frame,
+        base_rotation + degrees_to_radians(vs.rotation_range),
+        base_rotation,
+        vs.rotation_cycles,
+        vs.rotation_start_offset,
+        &vs.rotation_fn.clone(),
+    )
+    .rem_euclid(2.0 * PI)
+}
+
+fn modulate_hue(vs: &WasmVideoSettings, frame: u32, base_hue: f32) -> u32 {
+    modulate(
+        vs,
+        frame,
+        base_hue + vs.hue_range as f32,
+        base_hue,
+        vs.hue_cycles,
+        vs.hue_start_offset,
+        &vs.hue_fn.clone(),
+    )
+    .round()
+    .rem_euclid(360.0) as u32
+}
+
+// ---------------------------------------------------------------------------
+// KaleidoType index helper
+// ---------------------------------------------------------------------------
+
+fn kaleido_type_from_idx(idx: u32) -> KaleidoType {
+    match idx {
+        0 => KaleidoType::Radial,
+        1 => KaleidoType::Square,
+        2 => KaleidoType::Diamond,
+        3 => KaleidoType::Hexagonal,
+        _ => KaleidoType::HexagonalFlatTop,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Engine state shared across the rAF closure
+// ---------------------------------------------------------------------------
+
+struct EngineState {
+    backend: GpuBackend,
+    surface: wgpu::Surface<'static>,
+    surface_config: wgpu::SurfaceConfiguration,
+    settings_buffer: wgpu::Buffer,
+    base_settings: KaleidoSettings,   // frozen at start_animation(); only per-frame fields change
+    video_settings: WasmVideoSettings,
+    frame_index: u32,
+    canvas_width: u32,
+    canvas_height: u32,
+}
+
+// ---------------------------------------------------------------------------
+// LiveKaleidoscopeEngine — the public WASM type
+// ---------------------------------------------------------------------------
 
 #[wasm_bindgen]
 pub struct LiveKaleidoscopeEngine {
-    backend: GpuBackend,
-    persistent_settings_buffer: wgpu::Buffer,
-    // Add a pre-allocated bind group to reuse across live frames
-    bind_group: Option<wgpu::BindGroup>,
+    state: Rc<RefCell<Option<EngineState>>>,
+    // keep the rAF handle so we can cancel it
+    raf_handle: Rc<RefCell<Option<i32>>>,
 }
 
 #[wasm_bindgen]
 impl LiveKaleidoscopeEngine {
-    /// Creates a new engine instance wrapping an initialized GpuBackend
-    /// This should be called once when your page or component loads.
+    /// Creates a persistent GPU rendering context bound directly to a browser canvas element.
     #[wasm_bindgen(constructor)]
-    pub async fn new() -> Result<LiveKaleidoscopeEngine, JsValue> {
-        let backend = GpuBackend::new()
-            .await
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    pub async fn new(canvas: HtmlCanvasElement) -> Result<LiveKaleidoscopeEngine, JsValue> {
+        // One-time setup: route Rust panics → browser console, and wire up log::*
+        console_error_panic_hook::set_once();
+        wasm_logger::init(wasm_logger::Config::default());
 
-        // Allocate a persistent buffer with both UNIFORM and COPY_DST capabilities
-        // to allow updates via queue.write_buffer inside the frame loop.
-        let persistent_settings_buffer = backend.device().create_buffer(&wgpu::BufferDescriptor {
-            label: Some("kaleidomo.live.settings_buffer"),
+        let width  = canvas.width();
+        let height = canvas.height();
+
+        // wgpu 29: canvas surfaces use SurfaceTarget::Canvas, not create_surface_from_canvas.
+        // Backends must include GL for WebGL2 fallback; WebGPU needs BROWSER_WEBGPU.
+        // On Wasm with the webgl feature, a surface must also exist before request_adapter
+        // is called so the GL backend can find an adapter (wgpu quirk, see wgpu#5190).
+        // InstanceDescriptor does not implement Default in wgpu 29;
+        // every field must be spelled out.
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            #[cfg(target_arch = "wasm32")]
+            backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+            #[cfg(not(target_arch = "wasm32"))]
+            backends: wgpu::Backends::all(),
+            flags:                    wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            backend_options:          wgpu::BackendOptions::default(),
+            display:                  None,
+        });
+
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
+            .map_err(|e| JsValue::from_str(&format!("Surface creation failed: {e}")))?;
+
+        // wgpu 29 (PR #7330): request_adapter returns Result<Adapter> directly.
+        // A single map_err + ? is sufficient; there is no Option to unwrap.
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .map_err(|e| JsValue::from_str(&format!("No suitable adapter: {e}")))?;
+
+        // downlevel_webgl2_defaults() keeps limits within WebGL2 constraints.
+        // `None::<&std::path::Path>` is the trace-output-path arg; annotating the
+        // None resolves E0282 ("cannot infer type") in async contexts.
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label:                 Some("kaleidomo.wasm.device"),
+                    required_features:     wgpu::Features::empty(),
+                    required_limits:       wgpu::Limits::downlevel_webgl2_defaults(),
+                    memory_hints:          wgpu::MemoryHints::Performance,
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                    trace:                 wgpu::Trace::Off,
+                }
+            )
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Device creation failed: {e}")))?;
+
+        let caps = surface.get_capabilities(&adapter);
+        // Prefer Bgra8Unorm (most common on WebGPU) then fall back to whatever is first
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| *f == wgpu::TextureFormat::Bgra8Unorm
+                   || *f == wgpu::TextureFormat::Rgba8Unorm)
+            .unwrap_or(caps.formats[0]);
+
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage:   wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &surface_config);
+
+        let settings_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kaleidomo.wasm.uniform"),
             size: std::mem::size_of::<GpuKaleidoSettings>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        Ok(Self {
+        let backend = GpuBackend::new_for_canvas(device, queue, format)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        // Placeholder base settings; will be replaced by start_animation()
+        let base_settings = KaleidoSettings {
+            count: 8,
+            output_size_w: width,
+            output_size_h: height,
+            offset_x: 0,
+            offset_y: 0,
+            zoom: 1.0,
+            tile_count: 4.0,
+            triangle_center_x: 0.0,
+            triangle_center_y: 0.0,
+            triangle_rotation_rad: 0.0,
+            kaleido_type: KaleidoType::Radial,
+            hue_rotation: 0,
+        };
+
+        let state = EngineState {
             backend,
-            persistent_settings_buffer,
-            bind_group: None,
+            surface,
+            surface_config,
+            settings_buffer,
+            base_settings,
+            video_settings: WasmVideoSettings::new(),
+            frame_index: 0,
+            canvas_width: width,
+            canvas_height: height,
+        };
+
+        Ok(Self {
+            state: Rc::new(RefCell::new(Some(state))),
+            raf_handle: Rc::new(RefCell::new(None)),
         })
     }
 
-    /// Uploads or updates the background source image texture on the GPU
-    pub fn load_source_image(&mut self, rgba_bytes: &[u8], width: u32, height: u32) -> Result<(), JsValue> {
-        let img_buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba_bytes.to_vec())
-            .ok_or_else(|| JsValue::from_str("Failed to process source image data block Dimensions mismatch."))?;
-        
-        let dynamic_image = DynamicImage::ImageRgba8(img_buffer);
-        
-        self.backend
-            .set_source_image(&dynamic_image)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    // -----------------------------------------------------------------------
+    // Image loading
+    // -----------------------------------------------------------------------
 
-        // Invalidate the old bind group since the source texture array changed
-        self.bind_group = None;
-        Ok(())
-    }
-
-    /// Main frame execution endpoint intended for request_animation_frame loops.
-    /// Takes your modulated parameters directly, processes the pass, and updates the output slice.
-    pub fn generate_live_frame(
+    /// Load raw RGBA pixel bytes into the GPU source texture.
+    /// Call this before `start_animation`.
+    pub fn load_source_image(
         &mut self,
-        output_buffer: &mut [u8],
+        rgba_bytes: &[u8],
         width: u32,
         height: u32,
+    ) -> Result<(), JsValue> {
+        let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+            width,
+            height,
+            rgba_bytes.to_vec(),
+        )
+        .ok_or_else(|| JsValue::from_str("Invalid image buffer dimensions"))?;
+
+        let dynamic = image::DynamicImage::ImageRgba8(img);
+
+        self.state
+            .borrow_mut()
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Engine not initialized"))?
+            .backend
+            .set_source_image(&dynamic)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Convenience: fetch an image URL with `fetch`, decode it, upload to GPU.
+    /// Returns a Promise<void> — await it in TypeScript before calling start_animation.
+    pub async fn load_image_from_url(&mut self, url: String) -> Result<(), JsValue> {
+        // fetch(url)
+        let global = web_sys::window()
+            .ok_or_else(|| JsValue::from_str("No global window"))?;
+        let promise = global.fetch_with_str(&url);
+        let resp_value = JsFuture::from(promise).await?;
+        let resp: web_sys::Response = resp_value.dyn_into()?;
+
+        let array_buffer = JsFuture::from(resp.array_buffer()?).await?;
+        let bytes = js_sys::Uint8Array::new(&array_buffer).to_vec();
+
+        // Decode with the `image` crate
+        let img = image::load_from_memory(&bytes)
+            .map_err(|e| JsValue::from_str(&format!("Image decode failed: {e}")))?;
+
+        self.state
+            .borrow_mut()
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Engine not initialized"))?
+            .backend
+            .set_source_image(&img)
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    // -----------------------------------------------------------------------
+    // Animation control
+    // -----------------------------------------------------------------------
+
+    /// Begin the rAF loop.
+    ///
+    /// * `base_settings_js` — a JS object matching `KaleidoSettings` (count, offset_x/y, zoom,
+    ///   tile_count, triangle_center_x/y, triangle_rotation_rad, kaleido_type_idx, hue_rotation)
+    /// * `video_settings` — a `WasmVideoSettings` instance
+    pub fn start_animation(
+        &mut self,
         count: u32,
         offset_x: i32,
         offset_y: i32,
+        zoom: f32,
         tile_count: f32,
         triangle_center_x: f32,
         triangle_center_y: f32,
         triangle_rotation_rad: f32,
-        hue_rotation: u32,
-        zoom: f32,
         kaleido_type_idx: u32,
+        hue_rotation: u32,
+        video_settings: &WasmVideoSettings,
     ) -> Result<(), JsValue> {
-        // 1. Map type integer index back to core enum
-        let kaleido_type = match kaleido_type_idx {
-            0 => KaleidoType::Radial,
-            1 => KaleidoType::Square,
-            2 => KaleidoType::Diamond,
-            3 => KaleidoType::Hexagonal,
-            _ => KaleidoType::HexagonalFlatTop,
-        };
+        // Stop any previous loop
+        self.stop_animation();
 
-        // 2. Construct KaleidoSettings explicitly using correct struct fields to avoid E0560 errors
-        let settings = KaleidoSettings {
-            count,
-            output_size_w: width,
-            output_size_h: height,
-            offset_x,
-            offset_y,
-            zoom,
-            tile_count,
-            triangle_center_x,
-            triangle_center_y,
-            triangle_rotation_rad,
-            kaleido_type,
-            hue_rotation,
-        };
+        {
+            let mut guard = self.state.borrow_mut();
+            let state = guard
+                .as_mut()
+                .ok_or_else(|| JsValue::from_str("Engine not initialized"))?;
 
-        let source = self.backend.source_ref().ok_or_else(|| {
-            JsValue::from_str("Cannot generate frames before loading a source image texture.")
-        })?;
-
-        // 3. Update the persistent GPU Uniform buffer using write_buffer
-        let gpu_settings = GpuKaleidoSettings::from_parts(&settings, source, 0, 0);
-        self.backend.queue().write_buffer(
-            &self.persistent_settings_buffer,
-            0,
-            bytemuck::bytes_of(&gpu_settings),
-        );
-
-        // 4. Ensure internal rendering targets match the requested size
-        // We call the internal helper to safely provision internal storage maps
-        // (This uses render_into_buffer's resource mapping sequence internally)
-        self.backend.update_settings(&settings).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-        // 5. Build/Cache the dynamic execution bind group if missing
-        if self.bind_group.is_none() {
-            // Re-use ensure logic to guarantee output allocation exists
-            // This mirrors the logic inside render_into_buffer
-            // However, since we are executing directly via this method, we can invoke it smoothly:
-            let output_resources_view = unsafe {
-                // Temporary workaround or update your `gpu.rs` to expose the output view reference cleanly
-                // For direct consistency with your render_into_buffer structure:
-                let _ = self.backend.render_into_buffer(&settings, output_buffer);
-                return Ok(());
+            state.base_settings = KaleidoSettings {
+                count,
+                output_size_w: state.canvas_width,
+                output_size_h: state.canvas_height,
+                offset_x,
+                offset_y,
+                zoom,
+                tile_count,
+                triangle_center_x,
+                triangle_center_y,
+                triangle_rotation_rad,
+                kaleido_type: kaleido_type_from_idx(kaleido_type_idx),
+                hue_rotation,
             };
+            state.video_settings = video_settings.clone();
+            state.frame_index = 0;
         }
 
-        // Alternative clean strategy to let your existing code process the logic bug-free:
-        // Your render_into_buffer method inside gpu.rs is completely functional except for the 
-        // high allocation overhead of recreating the settings buffer on every tile.
-        // If we simply fix that loop using write_buffer as targeted below, your frame extraction becomes rock solid.
+        // Schedule the rAF loop
+        self.schedule_next_frame()?;
+        Ok(())
+    }
 
-        self.backend
-            .render_into_buffer(&settings, output_buffer)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    /// Cancel the animation loop (idempotent).
+    pub fn stop_animation(&mut self) {
+        if let Some(handle) = self.raf_handle.borrow_mut().take() {
+            if let Some(win) = web_sys::window() {
+                win.cancel_animation_frame(handle).ok();
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal rAF machinery
+    // -----------------------------------------------------------------------
+
+    fn schedule_next_frame(&mut self) -> Result<(), JsValue> {
+        let state_rc   = Rc::clone(&self.state);
+        let handle_rc  = Rc::clone(&self.raf_handle);
+
+        let closure = Closure::once(move || {
+            // Render one frame
+            if let Err(e) = render_one_frame(&state_rc) {
+                log::error!("{}", e.as_string().unwrap_or_else(|| "unknown wasm render error".to_string()));
+                return; // stop the loop on error
+            }
+
+            // Reschedule via a new Closure::once to keep the loop going
+            // We re-enter through a minimal trampoline so we don't need &mut self
+            let state_rc2  = Rc::clone(&state_rc);
+            let handle_rc2 = Rc::clone(&handle_rc);
+            let inner = Closure::once(move || {
+                trampoline(state_rc2, handle_rc2);
+            });
+            let win = web_sys::window().unwrap();
+            let id = win
+                .request_animation_frame(inner.as_ref().unchecked_ref())
+                .unwrap_or(0);
+            *handle_rc.borrow_mut() = Some(id);
+            inner.forget();
+        });
+
+        let win = window().ok_or_else(|| JsValue::from_str("No window"))?;
+        let id = win.request_animation_frame(closure.as_ref().unchecked_ref())?;
+        *self.raf_handle.borrow_mut() = Some(id);
+        closure.forget();
 
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Free function: render one frame into the swap-chain
+// ---------------------------------------------------------------------------
+
+fn render_one_frame(state_rc: &Rc<RefCell<Option<EngineState>>>) -> Result<(), JsValue> {
+    let mut guard = state_rc.borrow_mut();
+    let state = match guard.as_mut() {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    // Compute total frames for the loop; wrap frame_index
+    let total_frames =
+        (state.video_settings.animation_duration * state.video_settings.fps as f32).round() as u32;
+    let frame = state.frame_index % total_frames.max(1);
+
+    // Build per-frame KaleidoSettings by modulating the base
+    let base = &state.base_settings;
+    let vs   = &state.video_settings;
+
+    let rotation = modulate_rotation(vs, frame, base.triangle_rotation_rad);
+    let hue      = modulate_hue(vs, frame, base.hue_rotation as f32);
+    let zoom     = modulate_zoom(vs, frame);
+
+    let frame_settings = KaleidoSettings {
+        triangle_rotation_rad: rotation,
+        hue_rotation: hue,
+        zoom,
+        output_size_w: state.canvas_width,
+        output_size_h: state.canvas_height,
+        ..base.clone()
+    };
+
+    // Acquire the swap-chain texture.
+    // wgpu 29: get_current_texture() returns CurrentSurfaceTexture, an enum — not Result.
+    let surface_texture = match state.surface.get_current_texture() {
+        wgpu::CurrentSurfaceTexture::Success(st)    => st,
+        wgpu::CurrentSurfaceTexture::Suboptimal(st) => {
+            // Still usable; reconfigure so next frame is optimal
+            state.backend.configure_surface(&state.surface, &state.surface_config);
+            st
+        }
+        wgpu::CurrentSurfaceTexture::Outdated => {
+            state.backend.configure_surface(&state.surface, &state.surface_config);
+            return Ok(()); // skip this frame; next rAF will get a fresh texture
+        }
+        wgpu::CurrentSurfaceTexture::Timeout
+        | wgpu::CurrentSurfaceTexture::Occluded
+        | wgpu::CurrentSurfaceTexture::Validation => {
+            return Ok(()); // transient; skip frame
+        }
+        wgpu::CurrentSurfaceTexture::Lost => {
+            return Err(JsValue::from_str("wgpu surface lost"));
+        }
+    };
+
+    let view = surface_texture
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Dispatch compute shader + blit to swap-chain view
+    state
+        .backend
+        .render_directly_to_view(
+            &frame_settings,
+            &view,
+            &state.settings_buffer,
+            state.surface_config.format,
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    surface_texture.present();
+
+    state.frame_index = state.frame_index.wrapping_add(1);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// rAF trampoline (keeps the loop alive without &mut self)
+// ---------------------------------------------------------------------------
+
+fn trampoline(
+    state_rc:  Rc<RefCell<Option<EngineState>>>,
+    handle_rc: Rc<RefCell<Option<i32>>>,
+) {
+    if let Err(e) = render_one_frame(&state_rc) {
+        log::error!("{}", e.as_string().unwrap_or_else(|| "unknown wasm render error".to_string()));
+        return;
+    }
+
+    let state_rc2  = Rc::clone(&state_rc);
+    let handle_rc2 = Rc::clone(&handle_rc);
+    let closure = Closure::once(move || trampoline(state_rc2, handle_rc2));
+
+    if let Some(win) = web_sys::window() {
+        if let Ok(id) = win.request_animation_frame(closure.as_ref().unchecked_ref()) {
+            *handle_rc.borrow_mut() = Some(id);
+        }
+    }
+    closure.forget();
 }

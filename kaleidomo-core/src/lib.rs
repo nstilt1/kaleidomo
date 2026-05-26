@@ -15,6 +15,8 @@ use serde::Deserialize;
 #[cfg(target_arch = "wasm32")]
 pub use wasm::*;
 
+use core::f32::consts::PI;
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub enum KaleidoType {
     Radial,
