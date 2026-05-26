@@ -8,14 +8,9 @@ anyhow = "1.0.102"
 bytemuck = "1.25.0"
 image = "0.24.0"
 log = "0.4.29"
-minimp4 = "0.1.2"
-openh264 = "0.9.3"
 pollster = "0.4.0"
 rayon = "1.10"
 serde = "1.0.228"
-#software_licensor_static_rust_lib = { path = "/Users/somedooby/Documents/coding/JUCE_code/software-licensor-client-side-library/software_licensor_static_rust_lib", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
-software_licensor_static_rust_lib = { git = "https://github.com/nstilt1/software-licensor-client-side-library", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
-#software_licensor_static_rust_lib = { path = "I:\\software_licensor_static_rust_lib\\software-licensor-client-side-library\\software_licensor_static_rust_lib", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
 wgpu = { version = "29", default-features = false, features = [
     "std",
     "wgsl",
@@ -24,6 +19,31 @@ wgpu = { version = "29", default-features = false, features = [
     "metal",
     "vulkan",
 ] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+minimp4 = "0.1.2"
+openh264 = "0.9.3"
+#software_licensor_static_rust_lib = { path = "/Users/somedooby/Documents/coding/JUCE_code/software-licensor-client-side-library/software_licensor_static_rust_lib", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
+software_licensor_static_rust_lib = { git = "https://github.com/nstilt1/software-licensor-client-side-library", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
+#software_licensor_static_rust_lib = { path = "I:\\software_licensor_static_rust_lib\\software-licensor-client-side-library\\software_licensor_static_rust_lib", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
+version = "0.3"
+features = [
+    "HtmlCanvasElement",
+    "Window",
+    "Document",
+    "Element",
+    "Gpu",
+    "GpuAdapter",
+    "GpuDevice"
+]
+
 
 [features]
 soft_backend = []

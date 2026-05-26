@@ -17,11 +17,18 @@ pub mod avx2;
 ))]
 pub mod sse2;
 
-#[cfg(any(not(target_arch = "aarch64"), test, feature = "soft_backend"))]
+#[cfg(
+    any(
+        not(any(target_arch = "aarch64", target_arch = "wasm32")), 
+        test, 
+        feature = "soft_backend"
+    )
+)]
 mod scalar;
 
 pub mod gpu;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub trait KaleidoBackend: Sized + Copy {
     /// The number of floats that the register can hold.
     const NUM_FLOATS: usize;
@@ -151,6 +158,7 @@ pub trait KaleidoBackend: Sized + Copy {
     ) -> (Self, Self);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub trait DaydreamBackend: KaleidoBackend {
     type IntegerRegister: Sized + Copy;
     /// Loads integer pixel coordinates into RGB registers.
@@ -212,6 +220,7 @@ pub type Register = core::arch::x86_64::__m256;
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub type Register = f32;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn inner_loop<B: KaleidoBackend + DaydreamBackend>(
     y: usize,
     row: &mut [u8],

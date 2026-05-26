@@ -5,7 +5,7 @@ pub use core::arch::x86_64::*;
 
 use image::GenericImageView;
 
-use crate::{DaydreamBackend, DynamicImage, KaleidoBackend};
+use crate::{DaydreamBackend, image::DynamicImage, KaleidoBackend};
 
 #[target_feature(enable = "avx2")]
 #[inline]
