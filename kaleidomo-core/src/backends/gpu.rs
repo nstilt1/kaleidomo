@@ -14,6 +14,8 @@ pub struct GpuBackend {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
 
+    settings_buffer: wgpu::Buffer,
+
     source: Option<SourceImageGpu>,
     output: Option<OutputResources>,
     last_settings: Option<GpuKaleidoSettings>,
@@ -130,6 +132,13 @@ impl GpuBackend {
             cache: None,
         });
 
+        let settings_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("kaleidomo.persistent_settings_buffer"),
+            size: std::mem::size_of::<GpuKaleidoSettings>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         info!("GpuBackend initialized successfully");
 
         Ok(Self {
@@ -137,6 +146,7 @@ impl GpuBackend {
             queue,
             bind_group_layout,
             pipeline,
+            settings_buffer,
             source: None,
             output: None,
             last_settings: None,
@@ -362,11 +372,11 @@ impl GpuBackend {
                 );
                 self.last_settings = Some(gpu_settings);
 
-                let settings_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("kaleidomo.settings_buffer"),
-                    contents: bytemuck::bytes_of(&gpu_settings),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
+                self.queue.write_buffer(
+                    &self.settings_buffer,
+                    0,
+                    bytemuck::bytes_of(&gpu_settings),
+                );
 
                 let output_resources = match self.output.as_ref() {
                     Some(resources) => resources,
@@ -390,7 +400,7 @@ impl GpuBackend {
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: settings_buffer.as_entire_binding(),
+                            resource: self.settings_buffer.as_entire_binding(),
                         },
                     ],
                 });

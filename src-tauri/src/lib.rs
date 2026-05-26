@@ -581,12 +581,9 @@ async fn generate_video(
     kaleido_type: String,
     mut tile_count: f32,
     hue_rotation: u32,
-    frame_count: u32,
     still_frame_ending: u32,
     fps: u32,
     quality: f32,
-    triangle_rotation_degrees_per_frame: f32,
-    hue_rotation_degrees_per_frame: f32,
     mut zoom_max: f32,
     mut zoom_min: f32,
     zoom_fn: String,
@@ -594,6 +591,16 @@ async fn generate_video(
     num_zoom_loops: u32,
     img_width: u32,
     img_height: u32,
+    // new video settings
+    animation_duration: f32,
+    rotation_range: f32,
+    rotation_cycles: f32,
+    rotation_start_offset: f32,
+    rotation_fn: String,
+    hue_range: i32,
+    hue_cycles: f32,
+    hue_start_offset: f32,
+    hue_fn: String,
 ) -> Result<String, String> {
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count);
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_max, tile_count);
@@ -640,12 +647,18 @@ async fn generate_video(
     };
 
     let video_settings = kaleidomo_core::VideoSettings {
-        frame_count,
+        animation_duration,
+        rotation_range,
+        rotation_cycles,
+        rotation_start_offset,
+        rotation_fn,
+        hue_range,
+        hue_cycles,
+        hue_start_offset,
+        hue_fn,
         still_frame_ending,
         fps,
         quality,
-        triangle_rotation_degrees_per_frame,
-        hue_rotation_degrees_per_frame,
         zoom_max,
         zoom_min,
         zoom_fn,

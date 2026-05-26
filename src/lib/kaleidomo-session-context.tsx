@@ -13,17 +13,23 @@ export type Settings = {
   offset_x: number;
   offset_y: number;
   aspect_ratio_mode: string;
-  frame_count: number;
   still_frame_ending: number;
   fps: number;
   quality: number;
-  triangle_rotation_degrees_per_frame: number;
-  hue_rotation_degrees_per_frame: number;
   zoom_max: number;
   zoom_min: number;
   zoom_fn: string;
   zoom_start_offset: number;
   num_zoom_loops: number;
+  animation_duration: number;
+  rotation_range: number;
+  rotation_cycles: number;
+  rotation_start_offset: number;
+  rotation_fn: string;
+  hue_range: number;
+  hue_cycles: number;
+  hue_start_offset: number;
+  hue_fn: string;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -39,17 +45,23 @@ export const DEFAULT_SETTINGS: Settings = {
   offset_x: 0,
   offset_y: 0,
   aspect_ratio_mode: "preset",
-  frame_count: 360,
   still_frame_ending: 0,
   fps: 30,
   quality: 0.1,
-  triangle_rotation_degrees_per_frame: 1.0,
-  hue_rotation_degrees_per_frame: 1.0,
   zoom_max: 1.0,
   zoom_min: 1.0,
   zoom_fn: "sin",
   zoom_start_offset: 0.0,
   num_zoom_loops: 1,
+  animation_duration: 12,
+  rotation_range: 360,
+  rotation_cycles: 1,
+  rotation_start_offset: 0,
+  rotation_fn: "sin",
+  hue_range: 360,
+  hue_cycles: 1,
+  hue_start_offset: 0,
+  hue_fn: "sawtooth"
 };
 
 type KaleidomoSessionContextValue = {

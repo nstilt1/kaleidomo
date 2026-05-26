@@ -1136,7 +1136,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.7.4",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1489,6 +1489,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -5007,8 +5017,8 @@ dependencies = [
 
 [[package]]
 name = "software_licensor_static_rust_lib"
-version = "0.1.0"
-source = "git+https://github.com/nstilt1/software-licensor-client-side-library#30e8b151a281d3a5083ed81e3971f642daeb3800"
+version = "0.1.1"
+source = "git+https://github.com/nstilt1/software-licensor-client-side-library#e1aa3d6d88a7723850d703008fb39dbd145a1693"
 dependencies = [
  "aes-gcm",
  "ash",
@@ -5016,6 +5026,7 @@ dependencies = [
  "chacha20poly1305",
  "core-foundation",
  "directories",
+ "fs2",
  "hex",
  "hkdf",
  "libc",

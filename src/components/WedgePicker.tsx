@@ -14,17 +14,23 @@ type Settings = {
   offset_x: number;
   offset_y: number;
   aspect_ratio_mode: string;
-  frame_count: number;
   still_frame_ending: number;
   fps: number;
   quality: number;
-  triangle_rotation_degrees_per_frame: number;
-  hue_rotation_degrees_per_frame: number;
   zoom_max: number;
   zoom_min: number;
   zoom_fn: string;
   zoom_start_offset: number;
   num_zoom_loops: number;
+  animation_duration: number;
+  rotation_range: number;
+  rotation_cycles: number;
+  rotation_start_offset: number;
+  rotation_fn: string;
+  hue_range: number;
+  hue_cycles: number;
+  hue_start_offset: number;
+  hue_fn: string;
 };
 
 interface PickerProps {

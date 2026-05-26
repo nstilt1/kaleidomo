@@ -73,17 +73,23 @@ type Settings = {
   offset_x: number;
   offset_y: number;
   aspect_ratio_mode: string;
-  frame_count: number;
   still_frame_ending: number;
   fps: number;
   quality: number;
-  triangle_rotation_degrees_per_frame: number;
-  hue_rotation_degrees_per_frame: number;
   zoom_max: number;
   zoom_min: number;
   zoom_fn: string;
   zoom_start_offset: number;
   num_zoom_loops: number;
+  animation_duration: number;
+  rotation_range: number;
+  rotation_cycles: number;
+  rotation_start_offset: number;
+  rotation_fn: string;
+  hue_range: number;
+  hue_cycles: number;
+  hue_start_offset: number;
+  hue_fn: string;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -106,17 +112,23 @@ const IMAGE_SETTING_KEYS = [
 ] as const satisfies readonly (keyof Settings)[];
 
 const VIDEO_SETTING_KEYS = [
-  "frame_count",
   "still_frame_ending",
   "fps",
   "quality",
-  "triangle_rotation_degrees_per_frame",
-  "hue_rotation_degrees_per_frame",
   "zoom_max",
   "zoom_min",
   "zoom_fn",
   "zoom_start_offset",
   "num_zoom_loops",
+  "animation_duration",
+  "rotation_range",
+  "rotation_cycles",
+  "rotation_start_offset",
+  "rotation_fn",
+  "hue_range",
+  "hue_cycles",
+  "hue_start_offset",
+  "hue_fn",
 ] as const satisfies readonly (keyof Settings)[];
 
 const DEFAULT_SETTINGS: Settings = {
@@ -132,17 +144,23 @@ const DEFAULT_SETTINGS: Settings = {
   offset_x: 0,
   offset_y: 0,
   aspect_ratio_mode: "preset",
-  frame_count: 360,
   still_frame_ending: 0,
   fps: 30,
   quality: 0.1,
-  triangle_rotation_degrees_per_frame: 1.0,
-  hue_rotation_degrees_per_frame: 1.0,
   zoom_max: 1.0,
   zoom_min: 1.0,
   zoom_fn: "sin",
   zoom_start_offset: 0.0,
   num_zoom_loops: 1,
+  animation_duration: 12,
+  rotation_range: 360,
+  rotation_cycles: 1,
+  rotation_start_offset: 0,
+  rotation_fn: "sin",
+  hue_range: 360,
+  hue_cycles: 1,
+  hue_start_offset: 0,
+  hue_fn: "sawtooth"
 };
 
 function clampMin(value: number, min: number) {
@@ -210,6 +228,60 @@ function mergeSettingsWithBase(base: Settings, incoming: unknown): Settings {
     ...base,
     ...incoming,
   } as Settings;
+}
+
+function migrateVideoSettings(incoming: unknown): Partial<Settings> {
+  if (!isRecord(incoming)) {
+    return {};
+  }
+
+  const migrated = { ...incoming } as Partial<Settings> & Record<string, unknown>;
+
+  const oldFrameCount =
+    typeof incoming.frame_count === "number" && Number.isFinite(incoming.frame_count)
+      ? incoming.frame_count
+      : undefined;
+
+  const fps =
+    typeof incoming.fps === "number" && Number.isFinite(incoming.fps)
+      ? incoming.fps
+      : DEFAULT_SETTINGS.fps;
+
+  if (oldFrameCount !== undefined && typeof migrated.animation_duration !== "number") {
+    migrated.animation_duration = oldFrameCount / Math.max(1, fps);
+  }
+
+  if (
+    typeof incoming.triangle_rotation_degrees_per_frame === "number" &&
+    Number.isFinite(incoming.triangle_rotation_degrees_per_frame) &&
+    typeof migrated.rotation_range !== "number"
+  ) {
+    migrated.rotation_range =
+      incoming.triangle_rotation_degrees_per_frame *
+      (oldFrameCount ?? Math.round(DEFAULT_SETTINGS.animation_duration * fps));
+    migrated.rotation_cycles = 1;
+    migrated.rotation_start_offset = 0;
+    migrated.rotation_fn = "sawtooth";
+  }
+
+  if (
+    typeof incoming.hue_rotation_degrees_per_frame === "number" &&
+    Number.isFinite(incoming.hue_rotation_degrees_per_frame) &&
+    typeof migrated.hue_range !== "number"
+  ) {
+    migrated.hue_range =
+      incoming.hue_rotation_degrees_per_frame *
+      (oldFrameCount ?? Math.round(DEFAULT_SETTINGS.animation_duration * fps));
+    migrated.hue_cycles = 1;
+    migrated.hue_start_offset = 0;
+    migrated.hue_fn = "sawtooth";
+  }
+
+  delete migrated.frame_count;
+  delete migrated.triangle_rotation_degrees_per_frame;
+  delete migrated.hue_rotation_degrees_per_frame;
+
+  return migrated;
 }
 
 function Kaleidomo() {
@@ -622,7 +694,10 @@ function Kaleidomo() {
         throw new Error("Preset file is not a valid object.");
       }
 
-      const mergedSettings = mergeSettingsWithBase(DEFAULT_SETTINGS, parsed.settings);
+      const mergedSettings = mergeSettingsWithBase(
+        DEFAULT_SETTINGS, 
+        migrateVideoSettings(parsed.settings)
+      );
       setSettings(mergedSettings);
 
       const nextCount =
@@ -860,12 +935,9 @@ function Kaleidomo() {
         kaleidoType,
         tileCount: settings.tile_count,
         hueRotation: settings.hue_rotate,
-        frameCount: settings.frame_count,
         stillFrameEnding: settings.still_frame_ending,
         fps: settings.fps,
         quality: settings.quality,
-        triangleRotationDegreesPerFrame: settings.triangle_rotation_degrees_per_frame,
-        hueRotationDegreesPerFrame: settings.hue_rotation_degrees_per_frame,
         zoomMax: effectiveMaxZoomState.effectiveZoom,
         zoomMin: effectiveMinZoomState.effectiveZoom,
         zoomFn: settings.zoom_fn,
@@ -873,6 +945,15 @@ function Kaleidomo() {
         numZoomLoops: settings.num_zoom_loops,
         imgWidth,
         imgHeight,
+        animationDuration: settings.animation_duration,
+        rotationRange: settings.rotation_range,
+        rotationCycles: settings.rotation_cycles,
+        rotationStartOffset: settings.rotation_start_offset,
+        rotationFn: settings.rotation_fn,
+        hueRange: settings.hue_range,
+        hueCycles: settings.hue_cycles,
+        hueStartOffset: settings.hue_start_offset,
+        hueFn: settings.hue_fn,
       });
 
       alert(String(message));
@@ -1129,15 +1210,15 @@ function Kaleidomo() {
             </div>
 
             <NumberSliderInput
-              label="Frame Count"
-              value={settings.frame_count}
-              min={1}
+              label="Animation Duration"
+              value={settings.animation_duration}
+              min={0.1}
               shouldLimit={!isUnlocked}
-              limitedCap={1800}
-              max={7200}
-              step={1}
-              onChange={(v) => setSettings((s) => ({ ...s, frame_count: v }))}
-              unit="frames"
+              limitedCap={12}
+              max={600}
+              step={0.1}
+              onChange={(v) => setSettings((s) => ({ ...s, animation_duration: v }))}
+              unit="seconds"
               roundToInteger={true}
             />
             <NumberSliderInput
@@ -1173,35 +1254,143 @@ function Kaleidomo() {
               roundToInteger={false}
             />
             <NumberSliderInput
-              label="Angle rotation rate"
-              value={settings.triangle_rotation_degrees_per_frame}
-              min={-30.0}
-              max={30.0}
+              label="Triangle Rotation Range"
+              value={settings.rotation_range}
+              min={-720.0}
+              max={720.0}
               step={0.01}
               onChange={(v) =>
                 setSettings((s) => ({
                   ...s,
-                  triangle_rotation_degrees_per_frame: v,
+                  rotation_range: v,
                 }))
               }
-              unit="degrees per frame"
+              unit="degrees"
               roundToInteger={false}
             />
             <NumberSliderInput
-              label="Color changing rate"
-              value={settings.hue_rotation_degrees_per_frame}
-              min={-30.0}
-              max={30.0}
+              label="# Rotation Cycles"
+              value={settings.rotation_cycles}
+              min={0.1}
+              max={16}
+              step={0.1}
+              onChange={(v) => 
+                setSettings((s) => ({
+                  ...s,
+                  rotation_cycles: v,
+                }))
+              }
+              unit="cycles"
+              roundToInteger={false}
+            />
+            <NumberSliderInput
+              label="Rotation phase offset"
+              value={settings.rotation_start_offset}
+              min={-360}
+              max={360}
+              step={0.1}
+              onChange={(v) => 
+                setSettings((s) => ({
+                  ...s,
+                  rotation_start_offset: v,
+                }))
+              }
+              unit="cycles"
+              roundToInteger={false}
+              presetValues={[0, 90, 180]}
+            />
+
+            <Select
+              onValueChange={(v) => setSettings((s) => ({ ...s, rotation_fn: v }))}
+              value={settings.rotation_fn}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Select rotation function" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectLabel>Rotation Function</SelectLabel>
+                  <SelectItem value="triangle">Triangle Wave</SelectItem>
+                  <SelectItem value="sawtooth">Sawtooth Wave</SelectItem>
+                  <SelectItem value="sin">Sine Wave</SelectItem>
+                  <SelectItem value="sin2">sin<sup>2</sup></SelectItem>
+                  <SelectItem value="cos">cos</SelectItem>
+                  <SelectItem value="-cos">-cos</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            
+            <NumberSliderInput
+              label="Color changing range"
+              value={settings.hue_range}
+              min={-720.0}
+              max={720.0}
               step={0.01}
               onChange={(v) =>
                 setSettings((s) => ({
                   ...s,
-                  hue_rotation_degrees_per_frame: v,
+                  hue_range: v,
                 }))
               }
-              unit="degrees per frame"
+              unit="degrees"
               roundToInteger={false}
+              presetValues={[-360, 0, 360]}
             />
+
+            <NumberSliderInput
+              label="# Color changing cycles"
+              value={settings.hue_cycles}
+              min={0}
+              max={16.0}
+              step={0.01}
+              onChange={(v) =>
+                setSettings((s) => ({
+                  ...s,
+                  hue_cycles: v,
+                }))
+              }
+              unit="degrees"
+              roundToInteger={false}
+              presetValues={[0, 1, 2, 3, 4, 5]}
+            />
+
+
+            <NumberSliderInput
+              label="Color changing phase offset"
+              value={settings.hue_start_offset}
+              min={-360}
+              max={360}
+              step={0.1}
+              onChange={(v) => 
+                setSettings((s) => ({
+                  ...s,
+                  hue_start_offset: v,
+                }))
+              }
+              unit="cycles"
+              roundToInteger={false}
+              presetValues={[0, 90, 180]}
+            />
+
+            <Select
+              onValueChange={(v) => setSettings((s) => ({ ...s, hue_fn: v }))}
+              value={settings.hue_fn}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Select color changing function" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectLabel>Color changing function Function</SelectLabel>
+                  <SelectItem value="triangle">Triangle Wave</SelectItem>
+                  <SelectItem value="sawtooth">Sawtooth Wave</SelectItem>
+                  <SelectItem value="sin">sin</SelectItem>
+                  <SelectItem value="sin2">sin<sup>2</sup></SelectItem>
+                  <SelectItem value="cos">cos</SelectItem>
+                  <SelectItem value="-cos">-cos</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
             <NumberSliderInput
               label="Max Zoom"
               value={settings.zoom_max}
@@ -1244,8 +1433,12 @@ function Kaleidomo() {
               <SelectContent>
                 <SelectGroup>
                   <SelectLabel>Zoom Function</SelectLabel>
+                  <SelectItem value="triangle">Triangle Wave</SelectItem>
+                  <SelectItem value="sawtooth">Sawtooth Wave</SelectItem>
                   <SelectItem value="sin">Sine Wave</SelectItem>
-                  <SelectItem value="sawtooth">Triangle Wave</SelectItem>
+                  <SelectItem value="sin2">sin<sup>2</sup></SelectItem>
+                  <SelectItem value="cos">cos</SelectItem>
+                  <SelectItem value="-cos">-cos</SelectItem>
                 </SelectGroup>
               </SelectContent>
             </Select>
