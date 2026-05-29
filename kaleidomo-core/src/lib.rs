@@ -11,13 +11,15 @@ pub use rlib::*;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
+#[cfg(not(target_arch = "wasm32"))]
 use serde::Deserialize;
 #[cfg(target_arch = "wasm32")]
 pub use wasm::*;
 
 use core::f32::consts::PI;
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(Deserialize))]
 pub enum KaleidoType {
     Radial,
     Square,
@@ -26,8 +28,9 @@ pub enum KaleidoType {
     HexagonalFlatTop,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(Deserialize))]
+#[cfg_attr(not(target_arch = "wasm32"), serde(rename_all = "camelCase"))]
 pub struct KaleidoSettings {
     pub count: u32,       // Number of reflections (e.g., 8)
     pub output_size_w: u32,

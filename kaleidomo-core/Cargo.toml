@@ -8,7 +8,6 @@ anyhow  = "1.0.102"
 bytemuck = "1.25.0"
 log     = "0.4.29"
 pollster = "0.4.0"
-serde   = { version = "1.0.228", features = ["derive"] }
 
 # image: no default features; each target opts in to only what it needs
 image = { version = "0.24.0", default-features = false }
@@ -22,6 +21,7 @@ wgpu = { version = "29", default-features = false, features = ["std", "wgsl"] }
 rayon    = "1.10"
 minimp4  = "0.1.2"
 openh264 = "0.9.3"
+serde   = { version = "1.0.228", features = ["derive"] }
 software_licensor_static_rust_lib = { git = "https://github.com/nstilt1/software-licensor-client-side-library", package = "software_licensor_static_rust_lib", features = ["rlib", "serde", "logging"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.wgpu]
@@ -37,7 +37,7 @@ features = ["png", "jpeg"]
 # ── Wasm ─────────────────────────────────────────────────────────────────────
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen         = "0.2"
+wasm-bindgen         = "=0.2.108"
 wasm-bindgen-futures = "0.4"
 js-sys               = "0.3"
 # Routes log::error! / log::warn! etc. to the browser console
@@ -54,8 +54,10 @@ features = ["png", "jpeg", "webp"]
 [target.'cfg(target_arch = "wasm32")'.dependencies.wgpu]
 version = "29"
 default-features = false
-# webgpu = native WebGPU; webgl = WebGL2 fallback for older browsers
-features = ["std", "wgsl", "webgpu", "webgl"]
+# webgpu  = native WebGPU API path
+# webgl   = gates the GLES backend on wasm32 only (no native bleed-through)
+# gles    = the actual GLES/WebGL2 backend implementation code
+features = ["std", "wgsl", "webgpu", "webgl", "gles"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"
@@ -76,6 +78,7 @@ features = [
 
 [features]
 soft_backend = []
+dev = []
 
 # Required by wasm-pack / Trunk to emit both a .wasm and a native rlib
 [lib]

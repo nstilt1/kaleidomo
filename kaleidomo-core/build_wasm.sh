@@ -1,12 +1,25 @@
+#!/usr/bin/env bash
+
+RUSTFLAGS="--cfg=web_sys_unstable_apis" \
 cargo build --release --target wasm32-unknown-unknown
-
+#cargo build --release --target wasm32-unknown-unknown --features dev
+ 
 wasm-bindgen --target web \
-    --out-dir ../src/wasm \
+    --out-dir ../pkg/src/wasm \
     ../target/wasm32-unknown-unknown/release/kaleidomo_core.wasm
-
-wasm-opt ../src/wasm/kaleidomo_core.wasm \
-    -o ../src/wasm/kaleidomo_core_bg.wasm \
+ 
+# wasm-bindgen outputs kaleidomo_core_bg.wasm — optimise that file in-place
+wasm-opt ../pkg/src/wasm/kaleidomo_core_bg.wasm \
+    -o ../pkg/src/wasm/kaleidomo_core_bg.wasm \
     -Oz \
     --enable-bulk-memory --enable-sign-ext --enable-nontrapping-float-to-int
-
+ 
 echo "Build successful"
+
+rm -rf ../pkg/src/wasm/*.br
+rm -rf ../pkg/src/wasm/*.gz
+
+brotli --best ../pkg/src/wasm/kaleidomo_core_bg.wasm
+gzip -k -9 ../pkg/src/wasm/kaleidomo_core_bg.wasm
+
+echo "Compressed wasm files"

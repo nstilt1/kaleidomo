@@ -6,9 +6,23 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{HtmlCanvasElement, window};
+//use wgpu::rwh::DisplayHandle;
 
 use crate::backends::gpu::{GpuBackend, GpuKaleidoSettings};
 use crate::{KaleidoSettings, KaleidoType};
+
+use wgpu::rwh::{DisplayHandle, HasDisplayHandle};
+
+#[derive(Debug)]
+struct WebDisplayHandle;
+
+impl HasDisplayHandle for WebDisplayHandle {
+    fn display_handle(
+        &self,
+    ) -> Result<DisplayHandle<'_>, wgpu::rwh::HandleError> {
+        Ok(DisplayHandle::web())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // VideoSettings — mirrors the native struct but is wasm_bindgen-compatible
@@ -197,6 +211,8 @@ struct EngineState {
     frame_index: u32,
     canvas_width: u32,
     canvas_height: u32,
+    started_at_ms: f64,
+    last_render_ms: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -233,10 +249,11 @@ impl LiveKaleidoscopeEngine {
             backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
             #[cfg(not(target_arch = "wasm32"))]
             backends: wgpu::Backends::all(),
-            flags:                    wgpu::InstanceFlags::default(),
+            flags: wgpu::InstanceFlags::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            backend_options:          wgpu::BackendOptions::default(),
-            display:                  None,
+            backend_options: wgpu::BackendOptions::default(),
+
+            display: Some(Box::new(WebDisplayHandle)),
         });
 
         let surface = instance
@@ -247,13 +264,27 @@ impl LiveKaleidoscopeEngine {
         // A single map_err + ? is sufficient; there is no Option to unwrap.
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: wgpu::PowerPreference::None,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
             .await
             .map_err(|e| JsValue::from_str(&format!("No suitable adapter: {e}")))?;
 
+        let info = adapter.get_info();
+        let limits = adapter.limits();
+
+        let is_webgl = info.backend == wgpu::Backend::Gl;
+        let supports_compute_storage_texture =
+            limits.max_storage_textures_per_shader_stage > 0;
+
+        if is_webgl || !supports_compute_storage_texture {
+            return Err(format!(
+                "GPU kaleidoscope requires WebGPU with compute storage textures. Detected backend: {:?}, adapter: {}",
+                info.backend, info.name
+            ).into());
+        }
+        
         // downlevel_webgl2_defaults() keeps limits within WebGL2 constraints.
         // `None::<&std::path::Path>` is the trace-output-path arg; annotating the
         // None resolves E0282 ("cannot infer type") in async contexts.
@@ -329,6 +360,8 @@ impl LiveKaleidoscopeEngine {
             frame_index: 0,
             canvas_width: width,
             canvas_height: height,
+            started_at_ms: 0.0,
+            last_render_ms: 0.0,
         };
 
         Ok(Self {
@@ -441,6 +474,8 @@ impl LiveKaleidoscopeEngine {
             };
             state.video_settings = video_settings.clone();
             state.frame_index = 0;
+            state.started_at_ms = 0.0;
+            state.last_render_ms = 0.0;
         }
 
         // Schedule the rAF loop
@@ -462,28 +497,28 @@ impl LiveKaleidoscopeEngine {
     // -----------------------------------------------------------------------
 
     fn schedule_next_frame(&mut self) -> Result<(), JsValue> {
-        let state_rc   = Rc::clone(&self.state);
-        let handle_rc  = Rc::clone(&self.raf_handle);
+        let state_rc = Rc::clone(&self.state);
+        let handle_rc = Rc::clone(&self.raf_handle);
 
-        let closure = Closure::once(move || {
-            // Render one frame
-            if let Err(e) = render_one_frame(&state_rc) {
+        let closure = Closure::once(move |now_ms: f64| {
+            if let Err(e) = render_one_frame(&state_rc, now_ms) {
                 log::error!("{}", e.as_string().unwrap_or_else(|| "unknown wasm render error".to_string()));
-                return; // stop the loop on error
+                return;
             }
 
-            // Reschedule via a new Closure::once to keep the loop going
-            // We re-enter through a minimal trampoline so we don't need &mut self
-            let state_rc2  = Rc::clone(&state_rc);
+            let state_rc2 = Rc::clone(&state_rc);
             let handle_rc2 = Rc::clone(&handle_rc);
-            let inner = Closure::once(move || {
-                trampoline(state_rc2, handle_rc2);
+
+            let inner = Closure::once(move |next_now_ms: f64| {
+                trampoline(state_rc2, handle_rc2, next_now_ms);
             });
-            let win = web_sys::window().unwrap();
-            let id = win
-                .request_animation_frame(inner.as_ref().unchecked_ref())
-                .unwrap_or(0);
-            *handle_rc.borrow_mut() = Some(id);
+
+            if let Some(win) = web_sys::window() {
+                if let Ok(id) = win.request_animation_frame(inner.as_ref().unchecked_ref()) {
+                    *handle_rc.borrow_mut() = Some(id);
+                }
+            }
+
             inner.forget();
         });
 
@@ -494,23 +529,128 @@ impl LiveKaleidoscopeEngine {
 
         Ok(())
     }
+
+    #[cfg(feature = "dev")]
+    pub fn render_frame(
+        &mut self,
+        count: u32,
+        offset_x: i32,
+        offset_y: i32,
+        zoom: f32,
+        tile_count: f32,
+        triangle_center_x: f32,
+        triangle_center_y: f32,
+        triangle_rotation_rad: f32,
+        kaleido_type_idx: u32,
+        hue_rotation: u32,
+        video_settings: &WasmVideoSettings,
+        frame: u32,
+    ) -> Result<(), JsValue> {
+        {
+            let mut guard = self.state.borrow_mut();
+            let state = guard
+                .as_mut()
+                .ok_or_else(|| JsValue::from_str("Engine not initialized"))?;
+
+            state.base_settings = KaleidoSettings {
+                count,
+                output_size_w: state.canvas_width,
+                output_size_h: state.canvas_height,
+                offset_x,
+                offset_y,
+                zoom,
+                tile_count,
+                triangle_center_x,
+                triangle_center_y,
+                triangle_rotation_rad,
+                kaleido_type: kaleido_type_from_idx(kaleido_type_idx),
+                hue_rotation,
+            };
+
+            state.video_settings = video_settings.clone();
+            state.frame_index = frame;
+        }
+
+        render_one_frame(&self.state, 0.0)
+    }
+
+    pub fn update_animation_settings(
+        &mut self,
+        count: u32,
+        offset_x: i32,
+        offset_y: i32,
+        zoom: f32,
+        tile_count: f32,
+        triangle_center_x: f32,
+        triangle_center_y: f32,
+        triangle_rotation_rad: f32,
+        kaleido_type_idx: u32,
+        hue_rotation: u32,
+        video_settings: &WasmVideoSettings,
+    ) -> Result<(), JsValue> {
+        let mut guard = self.state.borrow_mut();
+        let state = guard
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("Engine not initialized"))?;
+
+        state.base_settings = KaleidoSettings {
+            count,
+            output_size_w: state.canvas_width,
+            output_size_h: state.canvas_height,
+            offset_x,
+            offset_y,
+            zoom,
+            tile_count,
+            triangle_center_x,
+            triangle_center_y,
+            triangle_rotation_rad,
+            kaleido_type: kaleido_type_from_idx(kaleido_type_idx),
+            hue_rotation,
+        };
+
+        state.video_settings = video_settings.clone();
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Free function: render one frame into the swap-chain
 // ---------------------------------------------------------------------------
 
-fn render_one_frame(state_rc: &Rc<RefCell<Option<EngineState>>>) -> Result<(), JsValue> {
+fn render_one_frame(
+    state_rc: &Rc<RefCell<Option<EngineState>>>,
+    now_ms: f64,
+) -> Result<(), JsValue> {
     let mut guard = state_rc.borrow_mut();
     let state = match guard.as_mut() {
         Some(s) => s,
         None => return Ok(()),
     };
 
-    // Compute total frames for the loop; wrap frame_index
-    let total_frames =
-        (state.video_settings.animation_duration * state.video_settings.fps as f32).round() as u32;
-    let frame = state.frame_index % total_frames.max(1);
+    if state.started_at_ms <= 0.0 {
+        state.started_at_ms = now_ms;
+        state.last_render_ms = 0.0;
+    }
+
+    let fps = state.video_settings.fps.max(1) as f64;
+    let target_frame_ms = 1000.0 / fps;
+
+    if state.last_render_ms > 0.0 && now_ms - state.last_render_ms < target_frame_ms {
+        return Ok(());
+    }
+
+    state.last_render_ms = now_ms;
+
+    let animation_duration_seconds = state.video_settings.animation_duration.max(0.001) as f64;
+    let animation_duration_ms = animation_duration_seconds * 1000.0;
+
+    let elapsed_ms = (now_ms - state.started_at_ms).max(0.0);
+    let loop_elapsed_ms = elapsed_ms.rem_euclid(animation_duration_ms);
+    let progress = loop_elapsed_ms / animation_duration_ms;
+
+    let total_frames = (animation_duration_seconds * fps).round().max(1.0) as u32;
+    let frame = ((progress * total_frames as f64).floor() as u32) % total_frames;
 
     // Build per-frame KaleidoSettings by modulating the base
     let base = &state.base_settings;
@@ -569,7 +709,6 @@ fn render_one_frame(state_rc: &Rc<RefCell<Option<EngineState>>>) -> Result<(), J
 
     surface_texture.present();
 
-    state.frame_index = state.frame_index.wrapping_add(1);
     Ok(())
 }
 
@@ -578,22 +717,27 @@ fn render_one_frame(state_rc: &Rc<RefCell<Option<EngineState>>>) -> Result<(), J
 // ---------------------------------------------------------------------------
 
 fn trampoline(
-    state_rc:  Rc<RefCell<Option<EngineState>>>,
+    state_rc: Rc<RefCell<Option<EngineState>>>,
     handle_rc: Rc<RefCell<Option<i32>>>,
+    now_ms: f64,
 ) {
-    if let Err(e) = render_one_frame(&state_rc) {
+    if let Err(e) = render_one_frame(&state_rc, now_ms) {
         log::error!("{}", e.as_string().unwrap_or_else(|| "unknown wasm render error".to_string()));
         return;
     }
 
-    let state_rc2  = Rc::clone(&state_rc);
+    let state_rc2 = Rc::clone(&state_rc);
     let handle_rc2 = Rc::clone(&handle_rc);
-    let closure = Closure::once(move || trampoline(state_rc2, handle_rc2));
+
+    let closure = Closure::once(move |next_now_ms: f64| {
+        trampoline(state_rc2, handle_rc2, next_now_ms);
+    });
 
     if let Some(win) = web_sys::window() {
         if let Ok(id) = win.request_animation_frame(closure.as_ref().unchecked_ref()) {
             *handle_rc.borrow_mut() = Some(id);
         }
     }
+
     closure.forget();
 }

@@ -15,6 +15,7 @@ pub use pollster;
 
 pub use software_licensor_static_rust_lib::{LicenseData, lib_api::LicenseStatus, lib_api::{get_machine_stats_for_display, StatsDisplay}};
 pub use software_licensor_static_rust_lib;
+use crate::{KaleidoSettings, VideoSettings, modulate};
 use crate::backends::gpu::{GpuBackend, GpuVideoRenderer};
 pub use crate::backends::{KaleidoBackend, DaydreamBackend, Register, inner_loop};
 
@@ -617,7 +618,9 @@ pub fn render_video_gpu(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::KaleidoType;
+
+use super::*;
     use image::{DynamicImage, RgbaImage};
 
     #[test]
