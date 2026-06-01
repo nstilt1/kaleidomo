@@ -19,8 +19,10 @@ pub mod sse2;
 
 #[cfg(
     any(
-        not(any(target_arch = "aarch64", target_arch = "wasm32")), 
-        test, 
+        all(
+            not(any(target_arch = "aarch64", target_arch = "wasm32")), 
+            all(not(target_arch = "wasm32"), test)
+        ),
         feature = "soft_backend"
     )
 )]

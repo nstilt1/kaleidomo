@@ -53,6 +53,11 @@ pub struct WasmVideoSettings {
     zoom_fn: String,
     pub zoom_start_offset: f32,
     pub num_zoom_loops: u32,
+    pub orientation_range: f32,
+    pub orientation_cycles: f32,
+    pub orientation_start_offset: f32,
+    orientation_fn: String,
+    pub orientation_duration: f32,
 }
 
 #[wasm_bindgen]
@@ -75,6 +80,11 @@ impl WasmVideoSettings {
             zoom_fn: "sin".to_string(),
             zoom_start_offset: 0.0,
             num_zoom_loops: 1,
+            orientation_range: 0.25,
+            orientation_cycles: 1.0,
+            orientation_start_offset: 0.0,
+            orientation_fn: "none".to_string(),
+            orientation_duration: 201.0,
         }
     }
 
@@ -86,101 +96,199 @@ impl WasmVideoSettings {
     pub fn get_rotation_fn(&self) -> String { self.rotation_fn.clone() }
     pub fn get_hue_fn(&self)      -> String { self.hue_fn.clone() }
     pub fn get_zoom_fn(&self)     -> String { self.zoom_fn.clone() }
+
+    // Orientation modulation
+    pub fn set_orientation_fn(&mut self, f: String) { self.orientation_fn = f; }
+    pub fn get_orientation_fn(&self) -> String { self.orientation_fn.clone() }
 }
 
 // ---------------------------------------------------------------------------
 // Modulation helpers (identical logic to lib.rs / rlib.rs)
 // ---------------------------------------------------------------------------
 
-fn modulate(
-    settings: &WasmVideoSettings,
-    frame: u32,
-    range_max: f32,
-    range_min: f32,
-    num_loops: f32,
-    start_offset: f32,
-    function: &str,
-) -> f32 {
-    let range = range_max - range_min;
-    let frame_count = settings.animation_duration * settings.fps as f32;
+mod modulation {
+    use core::f32::consts::PI;
+    use super::WasmVideoSettings;
+    pub fn modulate(
+        settings: &WasmVideoSettings,
+        frame: u32,
+        range_max: f32,
+        range_min: f32,
+        num_loops: f32,
+        start_offset: f32,
+        function: &str,
+    ) -> f32 {
+        let range = range_max - range_min;
+        let elapsed_seconds = frame as f32 / settings.fps.max(1) as f32;
+        let phase_base = elapsed_seconds / settings.animation_duration.max(0.001);
 
-    match function.to_ascii_lowercase().as_str() {
-        "triangle" => {
-            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
-            let phase = phase.fract();
-            let tri = 1.0 - (2.0 * phase - 1.0).abs();
-            range_min + tri * range
+        match function.to_ascii_lowercase().as_str() {
+            "triangle" => {
+                let phase = phase_base * num_loops + start_offset;
+                let phase = phase.rem_euclid(1.0);
+                let tri = 1.0 - (2.0 * phase - 1.0).abs();
+                range_min + tri * range
+            }
+            "sawtooth" | "linear" | "saw" => {
+                let phase = phase_base * num_loops + start_offset;
+                range_min + phase.rem_euclid(1.0) * range
+            }
+            "sin" => {
+                let phase = phase_base * num_loops + start_offset;
+                let sin_norm = (f32::sin(phase * 2.0 * PI) + 1.0) * 0.5;
+                range_min + sin_norm * range
+            }
+            "sin2" => {
+                let phase = phase_base * num_loops + start_offset;
+                let sin2_norm = f32::sin(phase * 2.0 * PI).powi(2);
+                range_min + sin2_norm * range
+            }
+            "cos" => {
+                let phase = phase_base * num_loops + start_offset;
+                let cos_norm = (f32::cos(phase * 2.0 * PI) + 1.0) * 0.5;
+                range_min + cos_norm * range
+            }
+            "-cos" => {
+                let phase = phase_base * num_loops + start_offset;
+                let neg_cos_norm = (1.0 - f32::cos(phase * 2.0 * PI)) * 0.5;
+                range_min + neg_cos_norm * range
+            }
+            _ => range_min,
         }
-        "sawtooth" | "linear" | "saw" => {
-            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
-            range_min + phase.fract() * range
-        }
-        "sin" => {
-            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
-            let sin_norm = (f32::sin(phase * 2.0 * PI) + 1.0) * 0.5;
-            range_min + sin_norm * range
-        }
-        "sin2" => {
-            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
-            let sin2_norm = f32::sin(phase * 2.0 * PI).powi(2);
-            range_min + sin2_norm * range
-        }
-        "cos" => {
-            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
-            let cos_norm = (f32::cos(phase * 2.0 * PI) + 1.0) * 0.5;
-            range_min + cos_norm * range
-        }
-        "-cos" => {
-            let phase = (frame as f32 / frame_count) * num_loops + start_offset;
-            let neg_cos_norm = (1.0 - f32::cos(phase * 2.0 * PI)) * 0.5;
-            range_min + neg_cos_norm * range
-        }
-        _ => range_min,
     }
-}
 
-#[inline]
-fn degrees_to_radians(degrees: f32) -> f32 {
-    degrees * (PI / 180.0)
-}
+    pub fn modulate_by_time(
+        elapsed_seconds: f32,
+        range: f32,
+        min_value: f32,
+        cycles_per_second: f32,
+        start_offset: f32,
+        fn_name: &str,
+    ) -> f32 {
+        let phase = elapsed_seconds * cycles_per_second + start_offset;
+        let p = phase.rem_euclid(1.0);
 
-fn modulate_zoom(vs: &WasmVideoSettings, frame: u32) -> f32 {
-    modulate(
-        vs,
-        frame,
-        vs.zoom_max,
-        vs.zoom_min,
-        vs.num_zoom_loops as f32,
-        vs.zoom_start_offset,
-        &vs.zoom_fn.clone(),
-    )
-}
+        let t = match fn_name {
+            "linear" | "saw" | "sawtooth" => p,
+            "triangle" => {
+                if p < 0.5 {
+                    p * 2.0
+                } else {
+                    2.0 - p * 2.0
+                }
+            }
+            "sin" => (phase * std::f32::consts::TAU).sin() * 0.5 + 0.5,
+            "sin2" => (phase * std::f32::consts::TAU).sin().powi(2),
+            "-cos" | "negcos" => 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos(),
+            _ => p,
+        };
 
-fn modulate_rotation(vs: &WasmVideoSettings, frame: u32, base_rotation: f32) -> f32 {
-    modulate(
-        vs,
-        frame,
-        base_rotation + degrees_to_radians(vs.rotation_range),
-        base_rotation,
-        vs.rotation_cycles,
-        vs.rotation_start_offset,
-        &vs.rotation_fn.clone(),
-    )
-    .rem_euclid(2.0 * PI)
-}
+        min_value + range * t
+    }
 
-fn modulate_hue(vs: &WasmVideoSettings, frame: u32, base_hue: f32) -> u32 {
-    modulate(
-        vs,
-        frame,
-        base_hue + vs.hue_range as f32,
-        base_hue,
-        vs.hue_cycles,
-        vs.hue_start_offset,
-        &vs.hue_fn.clone(),
-    )
-    .round()
-    .rem_euclid(360.0) as u32
+    pub fn orientation_to_hero_params(value: f32) -> (f32, f32, f32) {
+        let left_x = 515.1039592844847_f32;
+        let right_x = 1547.0_f32;
+        let center_y = 755.3734001945962_f32;
+
+        let center_x = (left_x + right_x) * 0.5;
+        let radius = (right_x - left_x) * 0.5;
+
+        let circle_angle = PI + value * PI * 2.0;
+
+        let triangle_center_x = center_x + circle_angle.cos() * radius;
+        let triangle_center_y = center_y + circle_angle.sin() * radius;
+
+        let desired_left_rotation = 6.22_f32;
+        let triangle_rotation_rad = desired_left_rotation + (circle_angle - PI);
+
+        (triangle_center_x, triangle_center_y, triangle_rotation_rad)
+    }
+
+    pub fn modulate_orientation(vs: &WasmVideoSettings, elapsed_seconds: f32) -> f32 {
+        if vs.orientation_duration <= 0.0 {
+            return 0.0;
+        }
+
+        modulate_by_time(
+            elapsed_seconds,
+            vs.orientation_range,
+            0.0,
+            1.0 / vs.orientation_duration,
+            vs.orientation_start_offset,
+            &vs.orientation_fn,
+        )
+    }
+
+    #[inline]
+    fn degrees_to_radians(degrees: f32) -> f32 {
+        degrees * (PI / 180.0)
+    }
+
+    pub fn modulate_zoom(vs: &WasmVideoSettings, frame: u32) -> f32 {
+        modulate(
+            vs,
+            frame,
+            vs.zoom_max,
+            vs.zoom_min,
+            vs.num_zoom_loops as f32,
+            vs.zoom_start_offset,
+            &vs.zoom_fn.clone(),
+        )
+    }
+
+    pub fn modulate_rotation(vs: &WasmVideoSettings, frame: u32, base_rotation: f32) -> f32 {
+        modulate(
+            vs,
+            frame,
+            base_rotation + degrees_to_radians(vs.rotation_range),
+            base_rotation,
+            vs.rotation_cycles,
+            vs.rotation_start_offset,
+            &vs.rotation_fn.clone(),
+        )
+        .rem_euclid(2.0 * PI)
+    }
+
+    pub fn modulate_zoom_time(vs: &WasmVideoSettings, elapsed_seconds: f32) -> f32 {
+        modulate_by_time(
+            elapsed_seconds,
+            vs.zoom_max - vs.zoom_min,
+            vs.zoom_min,
+            vs.num_zoom_loops as f32 / vs.animation_duration.max(0.001),
+            vs.zoom_start_offset,
+            &vs.zoom_fn,
+        )
+    }
+
+    pub fn modulate_rotation_time(
+        vs: &WasmVideoSettings,
+        elapsed_seconds: f32,
+        base_rotation: f32,
+    ) -> f32 {
+        modulate_by_time(
+            elapsed_seconds,
+            degrees_to_radians(vs.rotation_range),
+            base_rotation,
+            vs.rotation_cycles / vs.animation_duration.max(0.001),
+            vs.rotation_start_offset,
+            &vs.rotation_fn,
+        )
+    }
+
+    pub fn modulate_hue(vs: &WasmVideoSettings, frame: u32, base_hue: f32) -> u32 {
+        modulate(
+            vs,
+            frame,
+            base_hue + vs.hue_range as f32,
+            base_hue,
+            vs.hue_cycles,
+            vs.hue_start_offset,
+            &vs.hue_fn.clone(),
+        )
+        .round()
+        .rem_euclid(360.0) as u32
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -642,26 +750,38 @@ fn render_one_frame(
 
     state.last_render_ms = now_ms;
 
-    let animation_duration_seconds = state.video_settings.animation_duration.max(0.001) as f64;
-    let animation_duration_ms = animation_duration_seconds * 1000.0;
-
     let elapsed_ms = (now_ms - state.started_at_ms).max(0.0);
-    let loop_elapsed_ms = elapsed_ms.rem_euclid(animation_duration_ms);
-    let progress = loop_elapsed_ms / animation_duration_ms;
-
-    let total_frames = (animation_duration_seconds * fps).round().max(1.0) as u32;
-    let frame = ((progress * total_frames as f64).floor() as u32) % total_frames;
+    let elapsed_seconds = elapsed_ms / 1000.0;
 
     // Build per-frame KaleidoSettings by modulating the base
     let base = &state.base_settings;
     let vs   = &state.video_settings;
 
-    let rotation = modulate_rotation(vs, frame, base.triangle_rotation_rad);
-    let hue      = modulate_hue(vs, frame, base.hue_rotation as f32);
-    let zoom     = modulate_zoom(vs, frame);
+    use modulation::*;
+    let elapsed_seconds_f32 = (elapsed_ms / 1000.0) as f32;
+    let frame = ((elapsed_seconds_f32 as f64 * fps).floor() as u32); // still needed for hue if you keep it frame-based
+    let rotation = modulate_rotation_time(vs, elapsed_seconds_f32, base.triangle_rotation_rad);
+    let hue      = modulate_hue(vs, frame, base.hue_rotation as f32); // hue_range=0 so this is a no-op anyway
+    let zoom     = modulate_zoom_time(vs, elapsed_seconds_f32);
+    let orientation = if vs.orientation_duration <= 0.0 {
+        0.0
+    } else {
+        modulate_by_time(
+            elapsed_seconds_f32,
+            vs.orientation_range,
+            0.0,
+            1.0 / vs.orientation_duration,
+            vs.orientation_start_offset,
+            &vs.orientation_fn,
+        )
+    };
+    let (orientation_x, orientation_y, orientation_rotation) =
+        orientation_to_hero_params(orientation);
 
     let frame_settings = KaleidoSettings {
-        triangle_rotation_rad: rotation,
+        triangle_center_x: orientation_x,
+        triangle_center_y: orientation_y,
+        triangle_rotation_rad: orientation_rotation + (rotation - base.triangle_rotation_rad),
         hue_rotation: hue,
         zoom,
         output_size_w: state.canvas_width,
