@@ -23,7 +23,8 @@ pub mod sse2;
             not(any(target_arch = "aarch64", target_arch = "wasm32")), 
             all(not(target_arch = "wasm32"), test)
         ),
-        feature = "soft_backend"
+        feature = "soft_backend",
+        any(target_arch = "x86_64", target_arch = "x86")
     )
 )]
 mod scalar;
