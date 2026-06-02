@@ -2,6 +2,7 @@ use kaleidomo_core::software_licensor_static_rust_lib::tamper_detection::verify_
 /// Crashes the program when the cert is invalid or identity does not match.
 /// 
 /// Returns 1 if success.
+#[cfg(feature = "cert_check")]
 pub fn verify_cert() -> u8 {
     //#[cfg(all(target_os = "windows", not(debug_assertions)))]
     {
@@ -21,4 +22,9 @@ pub fn verify_cert() -> u8 {
         }
     }
     return 1;
+}
+
+#[cfg(not(feature = "cert_check"))]
+pub fn verify_cert() -> u8 {
+    1
 }

@@ -18,7 +18,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [features]
+#default = ["cert_check"]
 #default = ["logging"]
+cert_check = []
 logging = ["log", "tauri/devtools"]
 
 [dependencies]
