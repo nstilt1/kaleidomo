@@ -1,0 +1,297 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'   # triggers on v0.10.0, v1.2.3, etc.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 0.10.0)'
+        required: true
+        type: string
+      slug:
+        description: 'downloads.json slug to update'
+        required: true
+        default: 'kaleidomo'
+        type: string
+
+# Required for OIDC token issuance (AWS role assumption — no long-lived secrets)
+permissions:
+  id-token: write   # OIDC JWT
+  contents: read    # checkout
+
+# Derive version from tag (v0.10.0 → 0.10.0) or from manual input
+env:
+  APP_NAME: Kaleidomo
+  SLUG: ${{ github.event.inputs.slug || 'kaleidomo' }}
+  RELEASE_API: ${{ secrets.RELEASE_API_URL }}   # e.g. https://api.example.com/v1/api/release-upload
+  AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}      # from CDK output GitHubActionsRoleArn
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  # ── Windows build ─────────────────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "push") {
+            $v = "${{ github.ref_name }}" -replace '^v',''
+          } else {
+            $v = "${{ github.event.inputs.version }}"
+          }
+          echo "VERSION=$v" >> $env:GITHUB_ENV
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          # Session name helps identify which run/job made the call in CloudTrail
+          role-session-name: release-windows-${{ github.run_id }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Node deps
+        working-directory: src-tauri/../  # adjust to your frontend root
+        run: bun install
+
+      # Azure Trusted Signing – sets AZURE_* env vars used by tauri's signtool hook
+      - name: Set Azure Trusted Signing env
+        shell: pwsh
+        run: |
+          echo "AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" >> $env:GITHUB_ENV
+          echo "AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}" >> $env:GITHUB_ENV
+          echo "AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> $env:GITHUB_ENV
+          echo "AZURE_CODE_SIGNING_ACCOUNT=${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}" >> $env:GITHUB_ENV
+          echo "AZURE_CODE_SIGNING_PROFILE=${{ secrets.AZURE_CODE_SIGNING_PROFILE }}" >> $env:GITHUB_ENV
+          echo "AZURE_CODE_SIGNING_ENDPOINT=${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}" >> $env:GITHUB_ENV
+
+      # Install the Azure Code Signing dlib (trusted signing) and signtool
+      - name: Install Azure Code Signing tool
+        shell: pwsh
+        run: |
+          # Install the Microsoft.Trusted.Signing.Client NuGet package which
+          # provides the dlib used as a signtool /dlib argument
+          nuget install Microsoft.Trusted.Signing.Client `
+            -Version 1.0.60 -OutputDirectory "$env:TEMP\tsc"
+          $dlib = Get-ChildItem "$env:TEMP\tsc" -Recurse -Filter "Azure.CodeSigning.Dlib.dll" |
+            Select-Object -First 1 -ExpandProperty FullName
+          echo "AZURE_SIGNING_DLIB=$dlib" >> $env:GITHUB_ENV
+
+      - name: Build Tauri (Windows)
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bun run tauri:build
+
+      - name: Locate NSIS installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Recurse `
+            "src-tauri/target/release/bundle/nsis" `
+            -Filter "*-setup.exe" | Select-Object -First 1
+          echo "INSTALLER_PATH=$($installer.FullName)" >> $env:GITHUB_ENV
+          echo "INSTALLER_NAME=$($installer.Name)" >> $env:GITHUB_ENV
+
+      - name: Compute SHA-256
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash "$env:INSTALLER_PATH" -Algorithm SHA256).Hash.ToLower()
+          echo "FILE_SHA256=$hash" >> $env:GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: ${{ env.INSTALLER_PATH }}
+          retention-days: 1
+
+      - name: Upload to S3 via release API (SigV4)
+        shell: pwsh
+        run: |
+          # AWS credentials are already in the environment from the OIDC step above.
+          # We use the AWS CLI to sign requests (aws apigateway / awscurl pattern).
+          # The simplest approach on Windows: use Python's aws-requests-auth or
+          # the AWS CLI's built-in --cli-binary-format and pipe via Invoke-RestMethod
+          # with a pre-signed body. Instead we use 'awscurl' installed via pip.
+          pip install awscurl --quiet
+
+          # Step 1 – presign (SigV4 signed POST)
+          $presignJson = awscurl --service execute-api --region $env:AWS_REGION `
+            -X POST "$env:RELEASE_API/presign" `
+            -H "Content-Type: application/json" `
+            -d "{"slug":"$env:SLUG","version":"$env:VERSION","platform":"windows","filename":"$env:INSTALLER_NAME","contentType":"application/octet-stream"}"
+
+          $presign = $presignJson | ConvertFrom-Json
+
+          # Step 2 – PUT binary directly to S3 (plain PUT, no signing needed — it's a presigned URL)
+          $bytes = [System.IO.File]::ReadAllBytes("$env:INSTALLER_PATH")
+          Invoke-RestMethod -Method PUT -Uri $presign.uploadUrl `
+            -Headers @{ "Content-Type" = "application/octet-stream" } -Body $bytes
+
+          # Step 3 – confirm (SigV4 signed POST)
+          awscurl --service execute-api --region $env:AWS_REGION `
+            -X POST "$env:RELEASE_API/confirm" `
+            -H "Content-Type: application/json" `
+            -d "{"slug":"$env:SLUG","version":"$env:VERSION","platform":"windows","new_key":"$($presign.key)","new_url":"$($presign.publicUrl)","sha256":"$env:FILE_SHA256"}"
+
+          echo "Windows upload complete: $($presign.publicUrl)"
+
+  # ── macOS build ───────────────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    needs: []   # run in parallel with windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: release-macos-${{ github.run_id }}
+
+      - name: Install Rust stable (universal targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Node deps
+        run: bun install
+
+      # Import Apple Developer certificate from GitHub secrets
+      # Secret APPLE_CERTIFICATE is a base64-encoded .p12 export
+      - name: Import Apple signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/cert.p12
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+
+      - name: Build Tauri (universal macOS)
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bun run tauri:build -- --target universal-apple-darwin
+
+      - name: Locate DMG
+        run: |
+          DMG=$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg \
+            -name "*.dmg" | head -1)
+          echo "DMG_PATH=$DMG" >> $GITHUB_ENV
+          echo "DMG_NAME=$(basename $DMG)" >> $GITHUB_ENV
+
+      - name: Compute SHA-256
+        run: |
+          echo "FILE_SHA256=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')" >> $GITHUB_ENV
+
+      - name: Upload to S3 via release API (SigV4)
+        run: |
+          # AWS credentials are already in the environment from the OIDC step.
+          pip3 install awscurl --quiet
+
+          # Step 1 – presign (SigV4 signed POST)
+          PRESIGN=$(awscurl --service execute-api --region "$AWS_REGION" \
+            -X POST "$RELEASE_API/presign" \
+            -H "Content-Type: application/json" \
+            -d "{\"slug\":\"$SLUG\",\"version\":\"$VERSION\",\"platform\":\"macos\",\"filename\":\"$DMG_NAME\",\"contentType\":\"application/x-apple-diskimage\"}")
+
+          UPLOAD_URL=$(echo "$PRESIGN" | python3 -c "import sys,json; print(json.load(sys.stdin)['uploadUrl'])")
+          S3_KEY=$(echo "$PRESIGN"     | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])")
+          PUBLIC_URL=$(echo "$PRESIGN" | python3 -c "import sys,json; print(json.load(sys.stdin)['publicUrl'])")
+
+          # Step 2 – PUT binary directly to S3 (presigned URL — no signing needed)
+          echo "Uploading $(du -sh "$DMG_PATH" | cut -f1)..."
+          curl -sf -X PUT "$UPLOAD_URL" \
+            -H "Content-Type: application/x-apple-diskimage" \
+            --data-binary "@$DMG_PATH"
+
+          # Step 3 – confirm (SigV4 signed POST)
+          awscurl --service execute-api --region "$AWS_REGION" \
+            -X POST "$RELEASE_API/confirm" \
+            -H "Content-Type: application/json" \
+            -d "{\"slug\":\"$SLUG\",\"version\":\"$VERSION\",\"platform\":\"macos\",\"new_key\":\"$S3_KEY\",\"new_url\":\"$PUBLIC_URL\",\"sha256\":\"$FILE_SHA256\"}"
+
+          echo "macOS upload complete: $PUBLIC_URL"
+
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain "$KEYCHAIN_PATH" || true
+
+  # ── Trigger Amplify rebuild after both platforms upload ──────────────────
+  # Runs only after build-windows AND build-macos both succeed.
+  # Uses the AWS CLI directly against the Amplify REST API — no lambda needed.
+  # The OIDC role already has amplify:StartJob granted by the CDK stack.
+  rebuild-site:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: release-rebuild-${{ github.run_id }}
+
+      - name: Trigger Amplify rebuild
+        run: |
+          # Fetch the Amplify app ID from SSM — same parameter the lambda uses,
+          # so there is one source of truth and no hardcoded secret needed.
+          APP_ID=$(aws ssm get-parameter             --name "/${{ secrets.APP_NAME }}/amplify-app-id"             --query "Parameter.Value"             --output text)
+
+          BRANCH="${{ env.SLUG == 'kaleidomo' && 'master' || 'main' }}"
+
+          JOB=$(aws amplify start-job             --app-id "$APP_ID"             --branch-name "$BRANCH"             --job-type RELEASE             --output json)
+
+          echo "Amplify job started: $(echo $JOB | python3 -c "import sys,json; j=json.load(sys.stdin); print(j['jobSummary']['jobId'])")"
+          echo "Console: https://${{ env.AWS_REGION }}.console.aws.amazon.com/amplify/home#/$APP_ID/$BRANCH"
