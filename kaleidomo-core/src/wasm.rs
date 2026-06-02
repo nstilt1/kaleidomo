@@ -429,37 +429,26 @@ impl LiveKaleidoscopeEngine {
             .map_err(|e| JsValue::from_str(&format!("No suitable adapter: {e}")))?;
 
         let info = adapter.get_info();
-
-        let is_webgl = info.backend == wgpu::Backend::Gl;
-
-        if is_webgl {
-            return Err(format!(
-                "GPU kaleidoscope requires WebGPU. Detected backend: {:?}, adapter: {}. \
-                 Try enabling WebGPU in your browser/webview settings.",
-                info.backend, info.name
-            ).into());
-        }
-
-        // Check adapter-level limits (before any device-level clamping) to see
-        // if storage textures are available. downlevel_webgl2_defaults() caps
-        // this at 0, so we must check the adapter directly.
         let adapter_limits = adapter.limits();
-        let supports_compute_storage_texture =
-            adapter_limits.max_storage_textures_per_shader_stage > 0;
 
-        if !supports_compute_storage_texture {
+        // Don't check backend variant by name — wgpu 29 renamed variants
+        // (e.g. Gl → Gi) and the Display strings are unreliable across versions.
+        // Instead check the one capability we actually need: storage textures.
+        // Real WebGL/WebGL2 adapters report 0 here; WebGPU (Metal/Vulkan/DX12/Gi)
+        // report ≥ 4. This is the only gate that matters.
+        if adapter_limits.max_storage_textures_per_shader_stage == 0 {
             return Err(format!(
-                "GPU kaleidoscope requires WebGPU with compute storage textures. \
+                "GPU kaleidoscope requires WebGPU with storage texture support. \
                  Detected backend: {:?}, adapter: {}. \
-                 max_storage_textures_per_shader_stage = {}",
+                 max_storage_textures_per_shader_stage = 0. \
+                 WebGPU may not be enabled in this webview.",
                 info.backend, info.name,
-                adapter_limits.max_storage_textures_per_shader_stage,
             ).into());
         }
 
-        // Request a WebGPU device using the adapter's own limits (not the
-        // WebGL2 downlevel defaults which zero out storage texture slots).
-        // Clamp to what the adapter actually supports to avoid validation errors.
+        // Build device limits: start from conservative WebGL2 defaults to avoid
+        // requesting limits the adapter can't satisfy, but restore storage textures
+        // since that's the one WebGPU-only capability the compute shader requires.
         let device_limits = wgpu::Limits {
             max_storage_textures_per_shader_stage:
                 adapter_limits.max_storage_textures_per_shader_stage,
