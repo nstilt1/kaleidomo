@@ -429,28 +429,49 @@ impl LiveKaleidoscopeEngine {
             .map_err(|e| JsValue::from_str(&format!("No suitable adapter: {e}")))?;
 
         let info = adapter.get_info();
-        let limits = adapter.limits();
 
         let is_webgl = info.backend == wgpu::Backend::Gl;
-        let supports_compute_storage_texture =
-            limits.max_storage_textures_per_shader_stage > 0;
 
-        if is_webgl || !supports_compute_storage_texture {
+        if is_webgl {
             return Err(format!(
-                "GPU kaleidoscope requires WebGPU with compute storage textures. Detected backend: {:?}, adapter: {}",
+                "GPU kaleidoscope requires WebGPU. Detected backend: {:?}, adapter: {}. \
+                 Try enabling WebGPU in your browser/webview settings.",
                 info.backend, info.name
             ).into());
         }
-        
-        // downlevel_webgl2_defaults() keeps limits within WebGL2 constraints.
-        // `None::<&std::path::Path>` is the trace-output-path arg; annotating the
-        // None resolves E0282 ("cannot infer type") in async contexts.
+
+        // Check adapter-level limits (before any device-level clamping) to see
+        // if storage textures are available. downlevel_webgl2_defaults() caps
+        // this at 0, so we must check the adapter directly.
+        let adapter_limits = adapter.limits();
+        let supports_compute_storage_texture =
+            adapter_limits.max_storage_textures_per_shader_stage > 0;
+
+        if !supports_compute_storage_texture {
+            return Err(format!(
+                "GPU kaleidoscope requires WebGPU with compute storage textures. \
+                 Detected backend: {:?}, adapter: {}. \
+                 max_storage_textures_per_shader_stage = {}",
+                info.backend, info.name,
+                adapter_limits.max_storage_textures_per_shader_stage,
+            ).into());
+        }
+
+        // Request a WebGPU device using the adapter's own limits (not the
+        // WebGL2 downlevel defaults which zero out storage texture slots).
+        // Clamp to what the adapter actually supports to avoid validation errors.
+        let device_limits = wgpu::Limits {
+            max_storage_textures_per_shader_stage:
+                adapter_limits.max_storage_textures_per_shader_stage,
+            ..wgpu::Limits::downlevel_webgl2_defaults()
+        };
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label:                 Some("kaleidomo.wasm.device"),
                     required_features:     wgpu::Features::empty(),
-                    required_limits:       wgpu::Limits::downlevel_webgl2_defaults(),
+                    required_limits:       device_limits,
                     memory_hints:          wgpu::MemoryHints::Performance,
                     experimental_features: wgpu::ExperimentalFeatures::disabled(),
                     trace:                 wgpu::Trace::Off,
