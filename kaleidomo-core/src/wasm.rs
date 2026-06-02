@@ -62,6 +62,11 @@ pub struct WasmVideoSettings {
     pub audio_orientation_amount: f32,
     pub audio_reorientation_amount: f32,
     pub audio_peak_smoothing: f32,
+    // Hero circle parameters — define the orbit the triangle center follows
+    pub hero_circle_left_x: f32,
+    pub hero_circle_right_x: f32,
+    pub hero_circle_y: f32,
+    pub hero_desired_left_rotation: f32,
 }
 
 #[wasm_bindgen]
@@ -93,6 +98,10 @@ impl WasmVideoSettings {
             audio_orientation_amount: 0.0,
             audio_reorientation_amount: 0.0,
             audio_peak_smoothing: 0.65,
+            hero_circle_left_x: 515.1039592844847,
+            hero_circle_right_x: 1547.0,
+            hero_circle_y: 755.3734001945962,
+            hero_desired_left_rotation: 6.22,
         }
     }
 
@@ -208,6 +217,26 @@ mod modulation {
         let triangle_center_y = center_y + circle_angle.sin() * radius;
 
         let desired_left_rotation = 6.22_f32;
+        let triangle_rotation_rad = desired_left_rotation + (circle_angle - PI);
+
+        (triangle_center_x, triangle_center_y, triangle_rotation_rad)
+    }
+
+    pub fn orientation_to_hero_params_with_circle(
+        value: f32,
+        left_x: f32,
+        right_x: f32,
+        center_y: f32,
+        desired_left_rotation: f32,
+    ) -> (f32, f32, f32) {
+        let center_x = (left_x + right_x) * 0.5;
+        let radius = (right_x - left_x) * 0.5;
+
+        let circle_angle = PI + value * PI * 2.0;
+
+        let triangle_center_x = center_x + circle_angle.cos() * radius;
+        let triangle_center_y = center_y + circle_angle.sin() * radius;
+
         let triangle_rotation_rad = desired_left_rotation + (circle_angle - PI);
 
         (triangle_center_x, triangle_center_y, triangle_rotation_rad)
@@ -829,7 +858,13 @@ fn render_one_frame(
     let audio_rotation_offset = audio_peak * vs.audio_reorientation_amount;
 
     let (orientation_x, orientation_y, orientation_rotation) =
-        orientation_to_hero_params(final_orientation);
+        modulation::orientation_to_hero_params_with_circle(
+            final_orientation,
+            vs.hero_circle_left_x,
+            vs.hero_circle_right_x,
+            vs.hero_circle_y,
+            vs.hero_desired_left_rotation,
+        );
 
     let frame_settings = KaleidoSettings {
         triangle_center_x: orientation_x,

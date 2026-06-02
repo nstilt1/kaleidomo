@@ -68,6 +68,10 @@ export class WasmVideoSettings {
     audio_reactive_enabled: boolean;
     audio_reorientation_amount: number;
     fps: number;
+    hero_circle_left_x: number;
+    hero_circle_right_x: number;
+    hero_circle_y: number;
+    hero_desired_left_rotation: number;
     hue_cycles: number;
     /**
      * Hue sweep range in degrees (e.g. 60)
@@ -100,6 +104,10 @@ export interface InitOutput {
     readonly __wbg_get_wasmvideosettings_audio_reactive_enabled: (a: number) => number;
     readonly __wbg_get_wasmvideosettings_audio_reorientation_amount: (a: number) => number;
     readonly __wbg_get_wasmvideosettings_fps: (a: number) => number;
+    readonly __wbg_get_wasmvideosettings_hero_circle_left_x: (a: number) => number;
+    readonly __wbg_get_wasmvideosettings_hero_circle_right_x: (a: number) => number;
+    readonly __wbg_get_wasmvideosettings_hero_circle_y: (a: number) => number;
+    readonly __wbg_get_wasmvideosettings_hero_desired_left_rotation: (a: number) => number;
     readonly __wbg_get_wasmvideosettings_hue_cycles: (a: number) => number;
     readonly __wbg_get_wasmvideosettings_hue_range: (a: number) => number;
     readonly __wbg_get_wasmvideosettings_hue_start_offset: (a: number) => number;
@@ -121,6 +129,10 @@ export interface InitOutput {
     readonly __wbg_set_wasmvideosettings_audio_reactive_enabled: (a: number, b: number) => void;
     readonly __wbg_set_wasmvideosettings_audio_reorientation_amount: (a: number, b: number) => void;
     readonly __wbg_set_wasmvideosettings_fps: (a: number, b: number) => void;
+    readonly __wbg_set_wasmvideosettings_hero_circle_left_x: (a: number, b: number) => void;
+    readonly __wbg_set_wasmvideosettings_hero_circle_right_x: (a: number, b: number) => void;
+    readonly __wbg_set_wasmvideosettings_hero_circle_y: (a: number, b: number) => void;
+    readonly __wbg_set_wasmvideosettings_hero_desired_left_rotation: (a: number, b: number) => void;
     readonly __wbg_set_wasmvideosettings_hue_cycles: (a: number, b: number) => void;
     readonly __wbg_set_wasmvideosettings_hue_range: (a: number, b: number) => void;
     readonly __wbg_set_wasmvideosettings_hue_start_offset: (a: number, b: number) => void;
@@ -154,10 +166,10 @@ export interface InitOutput {
     readonly wasmvideosettings_set_rotation_fn: (a: number, b: number, c: number) => void;
     readonly wasmvideosettings_set_zoom_fn: (a: number, b: number, c: number) => void;
     readonly __wasm_bindgen_func_elem_717: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_2275: (a: number, b: number) => void;
+    readonly __wasm_bindgen_func_elem_2283: (a: number, b: number) => void;
     readonly __wasm_bindgen_func_elem_720: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_10345: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_2277: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_10353: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_2285: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;
