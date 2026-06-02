@@ -366,6 +366,10 @@ struct EngineState {
     last_render_ms: f64,
     audio_peaks: Vec<f32>,
     smoothed_audio_peak: f32,
+    /// Permanently accumulated orientation offset — only increases, never decreases.
+    /// Each frame adds (peak_rise * multiplier), so beats ratchet the orientation forward.
+    accumulated_orientation_offset: f32,
+    prev_smoothed_peak: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +521,8 @@ impl LiveKaleidoscopeEngine {
             last_render_ms: 0.0,
             audio_peaks: Vec::new(),
             smoothed_audio_peak: 0.0,
+            accumulated_orientation_offset: 0.0,
+            prev_smoothed_peak: 0.0,
         };
 
         Ok(Self {
@@ -652,6 +658,8 @@ impl LiveKaleidoscopeEngine {
         if let Some(state) = self.state.borrow_mut().as_mut() {
             state.audio_peaks.clear();
             state.smoothed_audio_peak = 0.0;
+            state.accumulated_orientation_offset = 0.0;
+            state.prev_smoothed_peak = 0.0;
         }
     }
 
@@ -824,7 +832,9 @@ fn render_one_frame(
     let frame = ((elapsed_seconds_f32 as f64 * fps).floor() as u32); // still needed for hue if you keep it frame-based
 
     // --- Audio-reactive peak modulation ---
-    // Extract audio settings before taking other borrows to avoid borrow conflict.
+    // We accumulate orientation permanently: only the *rising edge* of the peak
+    // advances the offset. When the peak falls, the offset stays where it is.
+    // This means each beat irreversibly advances orientation/rotation forward.
     let audio_peak = {
         let vs = &state.video_settings;
         if vs.audio_reactive_enabled && !state.audio_peaks.is_empty() {
@@ -839,9 +849,19 @@ fn render_one_frame(
             state.smoothed_audio_peak = smoothed;
             smoothed.clamp(0.0, 1.0)
         } else {
+            // When disabled, drain the smoothed peak but keep accumulated offset
+            state.smoothed_audio_peak = 0.0;
             0.0
         }
     };
+
+    // Ratchet: only add to the accumulator when peak is rising
+    {
+        let rise = (audio_peak - state.prev_smoothed_peak).max(0.0);
+        let multiplier = state.video_settings.orientation_peak_multiplier;
+        state.accumulated_orientation_offset += rise * multiplier;
+        state.prev_smoothed_peak = audio_peak;
+    }
 
     let vs = &state.video_settings;
     let rotation = modulate_rotation_time(vs, elapsed_seconds_f32, base.triangle_rotation_rad);
@@ -860,12 +880,15 @@ fn render_one_frame(
         )
     };
 
+    let accumulated = state.accumulated_orientation_offset;
+
     let final_orientation = orientation
-        + elapsed_seconds_f32 * vs.orientation_base_speed  // continuous base drift
-        + audio_peak * vs.audio_orientation_amount
-        + audio_peak * vs.orientation_peak_multiplier;
-    let audio_rotation_offset = audio_peak * vs.audio_reorientation_amount
-        + audio_peak * vs.orientation_peak_multiplier;
+        + elapsed_seconds_f32 * vs.orientation_base_speed   // continuous base drift
+        + audio_peak * vs.audio_orientation_amount           // transient per-frame wobble
+        + accumulated;                                        // permanent beat ratchet
+    let audio_rotation_offset =
+        audio_peak * vs.audio_reorientation_amount           // transient rotation wobble
+        + accumulated;                                        // same ratchet on rotation
 
     let (orientation_x, orientation_y, orientation_rotation) =
         modulation::orientation_to_hero_params_with_circle(

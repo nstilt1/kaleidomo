@@ -1265,7 +1265,7 @@ function Kaleidomo() {
       </div>
 
       <div className="flex h-screen w-full bg-background text-foreground overflow-hidden">
-        <aside className="w-72 border-r flex flex-col bg-card overflow-hidden">
+        <aside className="w-72 border-r flex flex-col bg-card" style={{ height: '100vh', overflow: 'hidden' }}>
           {/* Top actions — always visible */}
           <div className="shrink-0 p-4 border-b space-y-2">
             <div className="space-y-1">
