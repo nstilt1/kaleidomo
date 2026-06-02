@@ -17,12 +17,14 @@ import {
 } from "@/components/ui/select";
 import { NumberSliderInput } from "@/components/NumberSliderInput";
 import { AspectRatioPicker } from "@/components/AspectRatioPicker";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { initGpuSetting } from "@/lib/utils";
 import { Toaster } from "@/components/ui/sonner";
 import { useLicense } from "@/lib/license-context";
 import { Card, CardDescription, CardFooter } from "./ui/card";
+import { useKaleidomoSession } from "@/lib/kaleidomo-session-context";
+import { type Settings, DEFAULT_SETTINGS } from "@/lib/kaleidomo-session-context";
 import { useSettings } from "@/lib/settings-context";
-import { useKaleidomoSession, type Settings, DEFAULT_SETTINGS } from "@/lib/kaleidomo-session-context";
 
 const promptForImageRelocation = async (
   originalPath: string
@@ -225,16 +227,10 @@ function mergeSettingsWithBase(base: Settings, incoming: unknown): Settings {
   if (!isRecord(incoming)) {
     return base;
   }
+
   return {
     ...base,
     ...incoming,
-    // Ensure audio fields always have defaults even in old saved files
-    audioReactiveEnabled: (incoming.audioReactiveEnabled as boolean) ?? base.audioReactiveEnabled,
-    audioOrientationAmount: (incoming.audioOrientationAmount as number) ?? base.audioOrientationAmount,
-    audioReorientationAmount: (incoming.audioReorientationAmount as number) ?? base.audioReorientationAmount,
-    audioPeakSmoothing: (incoming.audioPeakSmoothing as number) ?? base.audioPeakSmoothing,
-    audioPeakFloor: (incoming.audioPeakFloor as number) ?? base.audioPeakFloor,
-    audioPeakCeiling: (incoming.audioPeakCeiling as number) ?? base.audioPeakCeiling,
   } as Settings;
 }
 
@@ -330,8 +326,10 @@ function Kaleidomo() {
   const liveCanvasRef = useRef<HTMLCanvasElement>(null);
   const rawAudioPeaksRef = useRef<Float32Array | null>(null);
   const normalizedAudioPeaksRef = useRef<Float32Array | null>(null);
+  const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const [audioFileName, setAudioFileName] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
+  const [audioPlaying, setAudioPlaying] = useState(false);
 
   // Rebuild normalized peaks and send them to WASM engine
   const rebuildAndSendPeaks = useCallback((floor: number, ceiling: number) => {
@@ -374,11 +372,17 @@ function Kaleidomo() {
       vs.set_zoom_fn(settings.zoom_fn);
       vs.zoom_start_offset = settings.zoom_start_offset;
       vs.num_zoom_loops = settings.num_zoom_loops;
-      // Orientation defaults (WASM defaults are fine for now)
+      vs.orientation_start_offset = settings.orientationPhase;
       vs.audio_reactive_enabled = settings.audioReactiveEnabled;
       vs.audio_orientation_amount = settings.audioOrientationAmount;
       vs.audio_reorientation_amount = settings.audioReorientationAmount;
       vs.audio_peak_smoothing = settings.audioPeakSmoothing;
+      vs.hero_circle_left_x = settings.heroCircleLeftX;
+      vs.hero_circle_right_x = settings.heroCircleRightX;
+      vs.hero_circle_y = settings.heroCircleY;
+      vs.hero_desired_left_rotation = settings.rotation;
+      vs.orientation_base_speed = settings.orientationBaseSpeed;
+      vs.orientation_peak_multiplier = settings.orientationPeakMultiplier;
 
       const { effectiveZoom } = getEffectiveZoomAndSourceRadius(
         settings.zoom,
@@ -426,8 +430,16 @@ function Kaleidomo() {
       engine.__vsModule = wasmModule;
       engineRef.current = engine;
 
-      // Load the source image
-      await engine.load_image_from_url(imageSrc);
+      // Fetch the image as bytes in JS (asset.localhost is allowed in connect-src)
+      // then push raw RGBA into WASM — avoids a second fetch inside WASM.
+      const imgResp = await fetch(imageSrc);
+      const imgBlob = await imgResp.blob();
+      const imgBitmap = await createImageBitmap(imgBlob);
+      const offscreen = new OffscreenCanvas(imgBitmap.width, imgBitmap.height);
+      const offCtx = offscreen.getContext("2d")!;
+      offCtx.drawImage(imgBitmap, 0, 0);
+      const imageData = offCtx.getImageData(0, 0, imgBitmap.width, imgBitmap.height);
+      engine.load_source_image(imageData.data, imgBitmap.width, imgBitmap.height);
 
       const vs = new wasmModule.WasmVideoSettings();
       vs.animation_duration = settings.animation_duration;
@@ -445,10 +457,17 @@ function Kaleidomo() {
       vs.set_zoom_fn(settings.zoom_fn);
       vs.zoom_start_offset = settings.zoom_start_offset;
       vs.num_zoom_loops = settings.num_zoom_loops;
+      vs.orientation_start_offset = settings.orientationPhase;
       vs.audio_reactive_enabled = settings.audioReactiveEnabled;
       vs.audio_orientation_amount = settings.audioOrientationAmount;
       vs.audio_reorientation_amount = settings.audioReorientationAmount;
       vs.audio_peak_smoothing = settings.audioPeakSmoothing;
+      vs.hero_circle_left_x = settings.heroCircleLeftX;
+      vs.hero_circle_right_x = settings.heroCircleRightX;
+      vs.hero_circle_y = settings.heroCircleY;
+      vs.hero_desired_left_rotation = settings.rotation;
+      vs.orientation_base_speed = settings.orientationBaseSpeed;
+      vs.orientation_peak_multiplier = settings.orientationPeakMultiplier;
 
       const { effectiveZoom } = getEffectiveZoomAndSourceRadius(
         settings.zoom,
@@ -494,30 +513,88 @@ function Kaleidomo() {
     rebuildAndSendPeaks(settings.audioPeakFloor, settings.audioPeakCeiling);
   }, [settings.audioPeakFloor, settings.audioPeakCeiling, rebuildAndSendPeaks]);
 
+  // Keep the audio File object so we can get its path for export
+  const audioFileRef = useRef<File | null>(null);
+
   const handleAudioFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setAudioError(null);
+
+    // Stop any existing playback
+    if (audioElementRef.current) {
+      audioElementRef.current.pause();
+      audioElementRef.current.src = "";
+    }
+
     try {
       const audioBuffer = await decodeAudioFile(file);
       const rawPeaks = buildFramePeaks(audioBuffer, Math.max(1, settings.fps));
       rawAudioPeaksRef.current = rawPeaks;
       const normalized = normalizePeaks(rawPeaks, settings.audioPeakFloor, settings.audioPeakCeiling);
       normalizedAudioPeaksRef.current = normalized;
+      audioFileRef.current = file;
       setAudioFileName(file.name);
+      setAudioPlaying(false);
+
+      // Create an Audio element backed by an object URL for playback
+      const objectUrl = URL.createObjectURL(file);
+      const audio = new Audio(objectUrl);
+      audio.loop = true;
+      audio.onended = () => setAudioPlaying(false);
+      audioElementRef.current = audio;
+
       if (engineRef.current) {
-        try { engineRef.current.set_audio_peaks(normalized); } catch (e) { console.error(e); }
+        try { engineRef.current.set_audio_peaks(normalized); } catch (err) { console.error(err); }
       }
-    } catch (e) {
-      console.error("Audio decode failed", e);
+    } catch (err) {
+      console.error("Audio decode failed", err);
       setAudioError("Failed to decode audio file.");
+    }
+  };
+
+  const handleRestartLivePreview = useCallback(() => {
+    // Reset audio to beginning
+    const audio = audioElementRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+    }
+    setAudioPlaying(false);
+
+    // Restart WASM engine (resets the animation clock)
+    void startLiveEngine().then(() => {
+      // Start audio playback in sync once engine is running
+      if (audio && audioFileName) {
+        void audio.play();
+        setAudioPlaying(true);
+      }
+    });
+  }, [startLiveEngine, audioFileName]);
+
+  const handleToggleAudioPlayback = () => {
+    const audio = audioElementRef.current;
+    if (!audio) return;
+    if (audio.paused) {
+      void audio.play();
+      setAudioPlaying(true);
+    } else {
+      audio.pause();
+      setAudioPlaying(false);
     }
   };
 
   const handleClearAudio = () => {
     rawAudioPeaksRef.current = null;
     normalizedAudioPeaksRef.current = null;
+    audioFileRef.current = null;
+    if (audioElementRef.current) {
+      audioElementRef.current.pause();
+      audioElementRef.current.src = "";
+      audioElementRef.current = null;
+    }
     setAudioFileName(null);
+    setAudioPlaying(false);
     if (engineRef.current) {
       try { engineRef.current.clear_audio_peaks(); } catch (_) { /* ignored */ }
     }
@@ -1131,6 +1208,10 @@ function Kaleidomo() {
     try {
       console.log("settings.still_frame_ending frames = " + settings.still_frame_ending);
 
+      const audioFilePath = audioFileRef.current
+        ? (audioFileRef.current as File & { path?: string }).path ?? null
+        : null;
+
       const message = await invoke("generate_video", {
         path: imagePath,
         x: settings.x,
@@ -1164,6 +1245,7 @@ function Kaleidomo() {
         hueCycles: settings.hue_cycles,
         hueStartOffset: settings.hue_start_offset,
         hueFn: settings.hue_fn,
+        audioFilePath,
       });
 
       alert(String(message));
@@ -1183,613 +1265,217 @@ function Kaleidomo() {
       </div>
 
       <div className="flex h-screen w-full bg-background text-foreground overflow-hidden">
-        <aside className="w-64 border-r p-6 flex flex-col gap-6 bg-card overflow-y-auto">
-          <div className="space-y-1">
-            <h2 className="text-xl font-bold tracking-tight">Kaleidomo</h2>
-            <p className="text-xs text-muted-foreground">Native Rust Engine</p>
-          </div>
-
-          <Button onClick={handlePickFile} className="w-full">
-            Select Image
-          </Button>
-          <Button onClick={resetImageSettings} className="w-full">
-            Reset Controls
-          </Button>
-          <Button variant="ghost" size="sm" onClick={loadImagePreset}>
-            Load Image Preset
-          </Button>
-          <Button variant="ghost" size="sm" onClick={saveImagePreset}>
-            Save Image Preset
-          </Button>
-          <Button variant="ghost" size="sm" onClick={loadProject}>
-            Load Project
-          </Button>
-          <Button variant="ghost" size="sm" onClick={saveProject}>
-            Save Project
-          </Button>
-
-          <hr className="opacity-20" />
-
-          <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <label>Type</label>
+        <aside className="w-72 border-r flex flex-col bg-card overflow-hidden">
+          {/* Top actions — always visible */}
+          <div className="shrink-0 p-4 border-b space-y-2">
+            <div className="space-y-1">
+              <h2 className="text-lg font-bold tracking-tight">Kaleidomo</h2>
+              <p className="text-xs text-muted-foreground">Native Rust Engine</p>
             </div>
-            <Select onValueChange={(v) => setKaleidoType(v)} value={kaleidoType}>
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="Select type" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectLabel>Geometry</SelectLabel>
-                  <SelectItem value="radial">Radial</SelectItem>
-                  <SelectItem value="square">Square Tiling</SelectItem>
-                  <SelectItem value="diamond">Diamond Tiling</SelectItem>
-                  <SelectItem value="hexagonal">Hexagon Tiling</SelectItem>
-                  <SelectItem value="hexagonal_flat_top">
-                    Hexagon Tiling (Flat Top)
-                  </SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-
-          <div className="space-y-4">
-            <NumberSliderInput
-              label="Tile Count"
-              value={settings.tile_count}
-              shouldLimit={!isUnlocked}
-              limitedCap={3.5}
-              min={0.1}
-              max={64.0}
-              step={0.1}
-              onChange={(v) => setSettings((s) => ({ ...s, tile_count: v }))}
-              unit="tiles"
-              roundToInteger={false}
-            />
-          </div>
-
-            <NumberSliderInput
-              label="Slices"
-              value={count}
-              shouldLimit={!isUnlocked}
-              limitedCap={12}
-              min={3}
-              max={64}
-              step={1}
-              onChange={(v) => setCount(v)}
-              roundToInteger={true}
-            />
-
-            <NumberSliderInput
-              label="Zoom"
-              value={settings.zoom}
-              shouldLimit={!isUnlocked}
-              limitedMin={0.8}
-              limitedCap={3.0}
-              min={0.001}
-              max={32.0}
-              step={0.0001}
-              unit="x"
-              onChange={(v) => setSettings((s) => ({ ...s, zoom: v }))}
-              roundToInteger={false}
-              sliderScale="splitLog"
-              sliderMidpointValue={1.0}
-              sliderMidpointPercent={zoomSliderMidpointPercent}
-              setExternalValue={(v) =>
-                setSettings((s) => ({
-                  ...s,
-                  zoom_min: v,
-                }))
-              }
-              setExternalValue2={(v) =>
-                setSettings((s) => ({
-                  ...s,
-                  zoom_max: v,
-                }))
-              }
-              externalValueName="Min Zoom"
-              externalValue2Name="Max Zoom"
-            />
-
-            <NumberSliderInput
-              label="Rotation"
-              value={settings.rotation}
-              min={0.0}
-              max={2 * Math.PI}
-              step={0.01}
-              onChange={(v) => setSettings((s) => ({ ...s, rotation: v }))}
-              unit="radians"
-              roundToInteger={false}
-            />
-
-            <Card className="p-4">
-              <CardDescription>
-                <NumberSliderInput
-                  label="Offset X"
-                  value={settings.offset_x}
-                  min={-2000}
-                  max={2000}
-                  step={1}
-                  onChange={(v) => setSettings((s) => ({ ...s, offset_x: v }))}
-                  unit="px"
-                  roundToInteger={true}
-                />
-
-                <NumberSliderInput
-                  label="Offset Y"
-                  value={settings.offset_y}
-                  min={-2000}
-                  max={2000}
-                  step={1}
-                  onChange={(v) => setSettings((s) => ({ ...s, offset_y: v }))}
-                  unit="px"
-                  roundToInteger={true}
-                />
-              </CardDescription>
-              <CardFooter>
-                {(!isUnlocked) && (
-                  <p className="text-xs text-muted-foreground">
-                    Offsets are only applied to previews within this app. Upgrade to
-                    the perpetual license to unlock offsets in exported media.
-                  </p>
-                )}
-              </CardFooter>
-            </Card>
-          </div>
-
-          <div className="space-y-4">
-            <NumberSliderInput
-              label="Output Resolution (length of smaller side)"
-              value={settings.resolution}
-              min={8}
-              shouldLimit={!isUnlocked}
-              limitedCap={720}
-              max={8192}
-              step={8}
-              onChange={(v) => setSettings((s) => ({ ...s, resolution: v }))}
-              unit="px"
-              roundToInteger={false}
-              roundToMultipleOf={8}
-              presetValues={[480, 540, 720, 1080, 1440, 2160, 4320, 5550, 8192]}
-            />
-          </div>
-
-          <div className="space-y-4">
-            <AspectRatioPicker
-              numerator={settings.ratio_num}
-              denominator={settings.ratio_den}
-              mode={settings.aspect_ratio_mode}
-              onModeChange={(mode) =>
-                setSettings((s) => ({
-                  ...s,
-                  aspect_ratio_mode: mode,
-                }))
-              }
-              onChange={(numerator, denominator) => {
-                setSettings((s) => ({
-                  ...s,
-                  ratio_num: numerator,
-                  ratio_den: denominator,
-                }));
-              }}
-            />
-          </div>
-
-          <div className="space-y-4">
-            <NumberSliderInput
-              label="Color Shift"
-              value={settings.hue_rotate}
-              min={0}
-              max={360}
-              step={1}
-              onChange={(v) => setSettings((s) => ({ ...s, hue_rotate: v }))}
-              unit="degrees"
-              roundToInteger={true}
-            />
-          </div>
-
-          <div className="flex flex-col gap-2 pt-4">
-            <Button onClick={() => void renderPreview()} variant="outline" disabled={isRendering}>
-              {isRendering ? "Rendering..." : "Refresh Preview"}
-            </Button>
-            <Button onClick={handleExport} className="bg-primary">
-              Export PNG
-            </Button>
-          </div>
-
-          <div className="mt-auto grid grid-cols-2 gap-2">
-            <Button variant="ghost" size="sm" onClick={loadProject}>
-              Load Project
-            </Button>
-            <Button variant="ghost" size="sm" onClick={saveProject}>
-              Save Project
-            </Button>
-          </div>
-
-          <hr className="opacity-20" />
-
-          <Button variant="ghost" size="sm" onClick={loadVideoPreset}>
-            Load Video Preset
-          </Button>
-          <Button variant="ghost" size="sm" onClick={saveVideoPreset}>
-            Save Video Preset
-          </Button>
-
-          <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <label>Video Settings</label>
+            <div className="grid grid-cols-2 gap-2">
+              <Button onClick={handlePickFile} className="w-full" size="sm">Select Image</Button>
+              <Button variant="outline" size="sm" onClick={() => void renderPreview()} disabled={isRendering}>
+                {isRendering ? "Rendering…" : "Preview"}
+              </Button>
             </div>
-
-            <NumberSliderInput
-              label="Animation Duration"
-              value={settings.animation_duration}
-              min={0.1}
-              shouldLimit={!isUnlocked}
-              limitedCap={12}
-              max={600}
-              step={0.1}
-              onChange={(v) => setSettings((s) => ({ ...s, animation_duration: v }))}
-              unit="seconds"
-              roundToInteger={true}
-            />
-            <NumberSliderInput
-              label="# Still Frames at End"
-              value={settings.still_frame_ending}
-              min={0}
-              max={360}
-              step={1}
-              onChange={(v) =>
-                setSettings((s) => ({ ...s, still_frame_ending: v }))
-              }
-              unit="frames"
-              roundToInteger={true}
-            />
-            <NumberSliderInput
-              label="Frames Per Second (FPS)"
-              value={settings.fps}
-              min={1}
-              max={144}
-              step={1}
-              onChange={(v) => setSettings((s) => ({ ...s, fps: v }))}
-              unit="frames per second"
-              roundToInteger={true}
-            />
-            <NumberSliderInput
-              label="Quality (bits per pixel per frame)"
-              value={settings.quality}
-              min={0.1}
-              max={0.3}
-              step={0.01}
-              onChange={(v) => setSettings((s) => ({ ...s, quality: v }))}
-              unit="bpp/frame"
-              roundToInteger={false}
-            />
-            <NumberSliderInput
-              label="Triangle Rotation Range"
-              value={settings.rotation_range}
-              min={-720.0}
-              max={720.0}
-              step={0.01}
-              onChange={(v) =>
-                setSettings((s) => ({
-                  ...s,
-                  rotation_range: v,
-                }))
-              }
-              unit="degrees"
-              roundToInteger={false}
-            />
-            <NumberSliderInput
-              label="# Rotation Cycles"
-              value={settings.rotation_cycles}
-              min={0.1}
-              max={16}
-              step={0.1}
-              onChange={(v) => 
-                setSettings((s) => ({
-                  ...s,
-                  rotation_cycles: v,
-                }))
-              }
-              unit="cycles"
-              roundToInteger={false}
-            />
-            <NumberSliderInput
-              label="Rotation phase offset"
-              value={settings.rotation_start_offset}
-              min={-360}
-              max={360}
-              step={0.1}
-              onChange={(v) => 
-                setSettings((s) => ({
-                  ...s,
-                  rotation_start_offset: v,
-                }))
-              }
-              unit="cycles"
-              roundToInteger={false}
-              presetValues={[0, 90, 180]}
-            />
-
-            <Select
-              onValueChange={(v) => setSettings((s) => ({ ...s, rotation_fn: v }))}
-              value={settings.rotation_fn}
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="Select rotation function" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectLabel>Rotation Function</SelectLabel>
-                  <SelectItem value="triangle">Triangle Wave</SelectItem>
-                  <SelectItem value="sawtooth">Sawtooth Wave</SelectItem>
-                  <SelectItem value="sin">Sine Wave</SelectItem>
-                  <SelectItem value="sin2">sin<sup>2</sup></SelectItem>
-                  <SelectItem value="cos">cos</SelectItem>
-                  <SelectItem value="-cos">-cos</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            
-            <NumberSliderInput
-              label="Color changing range"
-              value={settings.hue_range}
-              min={-720.0}
-              max={720.0}
-              step={0.01}
-              onChange={(v) =>
-                setSettings((s) => ({
-                  ...s,
-                  hue_range: v,
-                }))
-              }
-              unit="degrees"
-              roundToInteger={false}
-              presetValues={[-360, 0, 360]}
-            />
-
-            <NumberSliderInput
-              label="# Color changing cycles"
-              value={settings.hue_cycles}
-              min={0}
-              max={16.0}
-              step={0.01}
-              onChange={(v) =>
-                setSettings((s) => ({
-                  ...s,
-                  hue_cycles: v,
-                }))
-              }
-              unit="degrees"
-              roundToInteger={false}
-              presetValues={[0, 1, 2, 3, 4, 5]}
-            />
-
-
-            <NumberSliderInput
-              label="Color changing phase offset"
-              value={settings.hue_start_offset}
-              min={-360}
-              max={360}
-              step={0.1}
-              onChange={(v) => 
-                setSettings((s) => ({
-                  ...s,
-                  hue_start_offset: v,
-                }))
-              }
-              unit="cycles"
-              roundToInteger={false}
-              presetValues={[0, 90, 180]}
-            />
-
-            <Select
-              onValueChange={(v) => setSettings((s) => ({ ...s, hue_fn: v }))}
-              value={settings.hue_fn}
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="Select color changing function" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectLabel>Color changing function Function</SelectLabel>
-                  <SelectItem value="triangle">Triangle Wave</SelectItem>
-                  <SelectItem value="sawtooth">Sawtooth Wave</SelectItem>
-                  <SelectItem value="sin">sin</SelectItem>
-                  <SelectItem value="sin2">sin<sup>2</sup></SelectItem>
-                  <SelectItem value="cos">cos</SelectItem>
-                  <SelectItem value="-cos">-cos</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <NumberSliderInput
-              label="Max Zoom"
-              value={settings.zoom_max}
-              shouldLimit={!isUnlocked}
-              limitedCap={3.0}
-              limitedMin={0.8}
-              min={0.001}
-              max={32.0}
-              step={0.0001}
-              onChange={(v) => setSettings((s) => ({ ...s, zoom_max: v }))}
-              unit="x"
-              roundToInteger={false}
-              sliderScale="splitLog"
-              sliderMidpointValue={1.0}
-              sliderMidpointPercent={zoomSliderMidpointPercent}
-            />
-            <NumberSliderInput
-              label="Min Zoom"
-              value={settings.zoom_min}
-              shouldLimit={!isUnlocked}
-              limitedCap={3.0}
-              limitedMin={0.8}
-              min={0.001}
-              max={32.0}
-              step={0.0001}
-              onChange={(v) => setSettings((s) => ({ ...s, zoom_min: v }))}
-              unit="x"
-              roundToInteger={false}
-              sliderScale="splitLog"
-              sliderMidpointValue={1.0}
-              sliderMidpointPercent={zoomSliderMidpointPercent}
-            />
-            <Select
-              onValueChange={(v) => setSettings((s) => ({ ...s, zoom_fn: v }))}
-              value={settings.zoom_fn}
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue placeholder="Select zoom function" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectLabel>Zoom Function</SelectLabel>
-                  <SelectItem value="triangle">Triangle Wave</SelectItem>
-                  <SelectItem value="sawtooth">Sawtooth Wave</SelectItem>
-                  <SelectItem value="sin">Sine Wave</SelectItem>
-                  <SelectItem value="sin2">sin<sup>2</sup></SelectItem>
-                  <SelectItem value="cos">cos</SelectItem>
-                  <SelectItem value="-cos">-cos</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <NumberSliderInput
-              label="Zoom Offset"
-              value={settings.zoom_start_offset}
-              min={0.0}
-              max={1.0}
-              step={0.01}
-              onChange={(v) =>
-                setSettings((s) => ({ ...s, zoom_start_offset: v }))
-              }
-              unit="cycles"
-              roundToInteger={false}
-            />
-            <NumberSliderInput
-              label="# of Zoom Cycles"
-              value={settings.num_zoom_loops}
-              min={1}
-              max={10}
-              step={1}
-              onChange={(v) => setSettings((s) => ({ ...s, num_zoom_loops: v }))}
-              unit="cycles"
-              roundToInteger={true}
-            />
+            <div className="grid grid-cols-2 gap-1">
+              <Button variant="ghost" size="sm" onClick={loadProject}>Load Project</Button>
+              <Button variant="ghost" size="sm" onClick={saveProject}>Save Project</Button>
+            </div>
           </div>
 
-          {/* ----------------------------------------------------------------
-              Audio-Reactive Live Preview Controls
-          ---------------------------------------------------------------- */}
-          <div className="space-y-3">
-            <div className="flex justify-between items-center">
-              <label className="text-sm font-medium">Audio-Reactive Preview</label>
-            </div>
+          {/* Tabbed settings */}
+          <Tabs defaultValue="image" className="flex-1 min-h-0 flex flex-col">
+            <TabsList className="shrink-0">
+              <TabsTrigger value="image">Image</TabsTrigger>
+              <TabsTrigger value="video">Video</TabsTrigger>
+              <TabsTrigger value="audio">Audio</TabsTrigger>
+            </TabsList>
 
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="audioReactiveEnabled"
-                checked={settings.audioReactiveEnabled}
-                onChange={(e) =>
-                  setSettings((s) => ({ ...s, audioReactiveEnabled: e.target.checked }))
-                }
-              />
-              <label htmlFor="audioReactiveEnabled" className="text-sm">Enable audio reactive</label>
-            </div>
+            {/* ── IMAGE TAB ── */}
+            <TabsContent value="image" className="p-4 space-y-4">
+              <div className="space-y-4">
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1 block">Type</label>
+                  <Select onValueChange={(v) => setKaleidoType(v)} value={kaleidoType}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="Select type" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectLabel>Geometry</SelectLabel>
+                        <SelectItem value="radial">Radial</SelectItem>
+                        <SelectItem value="square">Square Tiling</SelectItem>
+                        <SelectItem value="diamond">Diamond Tiling</SelectItem>
+                        <SelectItem value="hexagonal">Hexagon Tiling</SelectItem>
+                        <SelectItem value="hexagonal_flat_top">Hexagon (Flat Top)</SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </div>
 
-            <div className="flex flex-col gap-1">
-              <label className="text-xs text-muted-foreground">
-                {audioFileName ? `Loaded: ${audioFileName}` : "No audio loaded"}
-              </label>
-              {audioError && (
-                <span className="text-xs text-red-500">{audioError}</span>
-              )}
-              <div className="flex gap-2">
-                <label className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent cursor-pointer">
-                  Import Audio
-                  <input
-                    type="file"
-                    accept="audio/*"
-                    className="hidden"
-                    onChange={(e) => void handleAudioFileChange(e)}
-                  />
-                </label>
-                {audioFileName && (
-                  <button
-                    type="button"
-                    className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent"
-                    onClick={handleClearAudio}
-                  >
-                    Clear
-                  </button>
-                )}
+                <NumberSliderInput label="Tile Count" value={settings.tile_count} shouldLimit={!isUnlocked} limitedCap={3.5} min={0.1} max={64.0} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, tile_count: v }))} unit="tiles" roundToInteger={false} />
+                <NumberSliderInput label="Slices" value={count} shouldLimit={!isUnlocked} limitedCap={12} min={3} max={64} step={1} onChange={(v) => setCount(v)} roundToInteger={true} />
+                <NumberSliderInput label="Zoom" value={settings.zoom} shouldLimit={!isUnlocked} limitedMin={0.8} limitedCap={3.0} min={0.001} max={32.0} step={0.0001} unit="x" onChange={(v) => setSettings((s) => ({ ...s, zoom: v }))} roundToInteger={false} sliderScale="splitLog" sliderMidpointValue={1.0} sliderMidpointPercent={zoomSliderMidpointPercent} setExternalValue={(v) => setSettings((s) => ({ ...s, zoom_min: v }))} setExternalValue2={(v) => setSettings((s) => ({ ...s, zoom_max: v }))} externalValueName="Min Zoom" externalValue2Name="Max Zoom" />
+                <NumberSliderInput label="Rotation" value={settings.rotation} min={0.0} max={2 * Math.PI} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, rotation: v }))} unit="radians" roundToInteger={false} />
+
+                <Card className="p-4">
+                  <CardDescription>
+                    <NumberSliderInput label="Offset X" value={settings.offset_x} min={-2000} max={2000} step={1} onChange={(v) => setSettings((s) => ({ ...s, offset_x: v }))} unit="px" roundToInteger={true} />
+                    <NumberSliderInput label="Offset Y" value={settings.offset_y} min={-2000} max={2000} step={1} onChange={(v) => setSettings((s) => ({ ...s, offset_y: v }))} unit="px" roundToInteger={true} />
+                  </CardDescription>
+                  {!isUnlocked && (
+                    <CardFooter>
+                      <p className="text-xs text-muted-foreground">Offsets locked — upgrade for export.</p>
+                    </CardFooter>
+                  )}
+                </Card>
+
+                <NumberSliderInput label="Output Resolution" value={settings.resolution} min={8} shouldLimit={!isUnlocked} limitedCap={720} max={8192} step={8} onChange={(v) => setSettings((s) => ({ ...s, resolution: v }))} unit="px" roundToInteger={false} roundToMultipleOf={8} presetValues={[480, 540, 720, 1080, 1440, 2160, 4320]} />
+                <AspectRatioPicker numerator={settings.ratio_num} denominator={settings.ratio_den} mode={settings.aspect_ratio_mode} onModeChange={(mode) => setSettings((s) => ({ ...s, aspect_ratio_mode: mode }))} onChange={(num, den) => setSettings((s) => ({ ...s, ratio_num: num, ratio_den: den }))} />
+                <NumberSliderInput label="Color Shift" value={settings.hue_rotate} min={0} max={360} step={1} onChange={(v) => setSettings((s) => ({ ...s, hue_rotate: v }))} unit="°" roundToInteger={true} />
               </div>
-            </div>
 
-            <NumberSliderInput
-              label="Orientation Amount"
-              value={settings.audioOrientationAmount ?? 0}
-              min={0}
-              max={1}
-              step={0.001}
-              onChange={(v) => setSettings((s) => ({ ...s, audioOrientationAmount: v }))}
-              roundToInteger={false}
-            />
-            <NumberSliderInput
-              label="Reorientation Amount"
-              value={settings.audioReorientationAmount ?? 0}
-              min={0}
-              max={1}
-              step={0.001}
-              onChange={(v) => setSettings((s) => ({ ...s, audioReorientationAmount: v }))}
-              roundToInteger={false}
-            />
-            <NumberSliderInput
-              label="Peak Smoothing"
-              value={settings.audioPeakSmoothing ?? 0}
-              min={0}
-              max={0.98}
-              step={0.01}
-              onChange={(v) => setSettings((s) => ({ ...s, audioPeakSmoothing: v }))}
-              roundToInteger={false}
-            />
-            <NumberSliderInput
-              label="Peak Floor"
-              value={settings.audioPeakFloor ?? 0}
-              min={0}
-              max={0.5}
-              step={0.001}
-              onChange={(v) => setSettings((s) => ({ ...s, audioPeakFloor: v }))}
-              roundToInteger={false}
-            />
-            <NumberSliderInput
-              label="Peak Ceiling"
-              value={settings.audioPeakCeiling ?? 0}
-              min={0.05}
-              max={1.0}
-              step={0.001}
-              onChange={(v) => setSettings((s) => ({ ...s, audioPeakCeiling: v }))}
-              roundToInteger={false}
-            />
-          </div>
+              <div className="grid grid-cols-2 gap-2 pt-2">
+                <Button onClick={handleExport} className="bg-primary">Export PNG</Button>
+                <Button variant="outline" size="sm" onClick={resetImageSettings}>Reset</Button>
+              </div>
+              <div className="grid grid-cols-2 gap-1">
+                <Button variant="ghost" size="sm" onClick={loadImagePreset}>Load Preset</Button>
+                <Button variant="ghost" size="sm" onClick={saveImagePreset}>Save Preset</Button>
+              </div>
+            </TabsContent>
 
-          <div className="flex flex-col gap-2 pt-4">
-            <Button onClick={handleVideo} className="bg-primary">
-              Export MP4
-            </Button>
-          </div>
+            {/* ── VIDEO TAB ── */}
+            <TabsContent value="video" className="p-4 space-y-4">
+              <NumberSliderInput label="Animation Duration" value={settings.animation_duration} min={0.1} shouldLimit={!isUnlocked} limitedCap={12} max={600} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, animation_duration: v }))} unit="s" roundToInteger={true} />
+              <NumberSliderInput label="Still Frames at End" value={settings.still_frame_ending} min={0} max={360} step={1} onChange={(v) => setSettings((s) => ({ ...s, still_frame_ending: v }))} unit="frames" roundToInteger={true} />
+              <NumberSliderInput label="FPS" value={settings.fps} min={1} max={144} step={1} onChange={(v) => setSettings((s) => ({ ...s, fps: v }))} unit="fps" roundToInteger={true} />
+              <NumberSliderInput label="Quality" value={settings.quality} min={0.1} max={0.3} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, quality: v }))} unit="bpp/f" roundToInteger={false} />
 
-          <div className="mt-auto grid grid-cols-2 gap-2">
-            <Button variant="ghost" size="sm" onClick={loadProject}>
-              Load Project
-            </Button>
-            <Button variant="ghost" size="sm" onClick={saveProject}>
-              Save Project
-            </Button>
-          </div>
+              <hr className="opacity-20" />
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Rotation</p>
+              <NumberSliderInput label="Rotation Range" value={settings.rotation_range} min={-720.0} max={720.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, rotation_range: v }))} unit="°" roundToInteger={false} />
+              <NumberSliderInput label="Rotation Cycles" value={settings.rotation_cycles} min={0.1} max={16} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, rotation_cycles: v }))} unit="cycles" roundToInteger={false} />
+              <NumberSliderInput label="Rotation Phase Offset" value={settings.rotation_start_offset} min={-360} max={360} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, rotation_start_offset: v }))} unit="cycles" roundToInteger={false} presetValues={[0, 90, 180]} />
+              <Select onValueChange={(v) => setSettings((s) => ({ ...s, rotation_fn: v }))} value={settings.rotation_fn}>
+                <SelectTrigger className="w-full"><SelectValue placeholder="Rotation function" /></SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectLabel>Rotation Function</SelectLabel>
+                    <SelectItem value="triangle">Triangle</SelectItem>
+                    <SelectItem value="sawtooth">Sawtooth</SelectItem>
+                    <SelectItem value="sin">Sin</SelectItem>
+                    <SelectItem value="sin2">Sin²</SelectItem>
+                    <SelectItem value="cos">Cos</SelectItem>
+                    <SelectItem value="-cos">-Cos</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
 
-          <Button onClick={resetVideoSettings} className="w-full">
-            Reset Video Settings
-          </Button>
+              <hr className="opacity-20" />
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Color</p>
+              <NumberSliderInput label="Color Range" value={settings.hue_range} min={-720.0} max={720.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, hue_range: v }))} unit="°" roundToInteger={false} presetValues={[-360, 0, 360]} />
+              <NumberSliderInput label="Color Cycles" value={settings.hue_cycles} min={0} max={16.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, hue_cycles: v }))} roundToInteger={false} presetValues={[0, 1, 2, 3, 4, 5]} />
+              <NumberSliderInput label="Color Phase Offset" value={settings.hue_start_offset} min={-360} max={360} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, hue_start_offset: v }))} roundToInteger={false} presetValues={[0, 90, 180]} />
+              <Select onValueChange={(v) => setSettings((s) => ({ ...s, hue_fn: v }))} value={settings.hue_fn}>
+                <SelectTrigger className="w-full"><SelectValue placeholder="Color function" /></SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectLabel>Color Function</SelectLabel>
+                    <SelectItem value="triangle">Triangle</SelectItem>
+                    <SelectItem value="sawtooth">Sawtooth</SelectItem>
+                    <SelectItem value="sin">Sin</SelectItem>
+                    <SelectItem value="sin2">Sin²</SelectItem>
+                    <SelectItem value="cos">Cos</SelectItem>
+                    <SelectItem value="-cos">-Cos</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+
+              <hr className="opacity-20" />
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Zoom</p>
+              <NumberSliderInput label="Max Zoom" value={settings.zoom_max} shouldLimit={!isUnlocked} limitedCap={3.0} limitedMin={0.8} min={0.001} max={32.0} step={0.0001} onChange={(v) => setSettings((s) => ({ ...s, zoom_max: v }))} unit="x" roundToInteger={false} sliderScale="splitLog" sliderMidpointValue={1.0} sliderMidpointPercent={zoomSliderMidpointPercent} />
+              <NumberSliderInput label="Min Zoom" value={settings.zoom_min} shouldLimit={!isUnlocked} limitedCap={3.0} limitedMin={0.8} min={0.001} max={32.0} step={0.0001} onChange={(v) => setSettings((s) => ({ ...s, zoom_min: v }))} unit="x" roundToInteger={false} sliderScale="splitLog" sliderMidpointValue={1.0} sliderMidpointPercent={zoomSliderMidpointPercent} />
+              <Select onValueChange={(v) => setSettings((s) => ({ ...s, zoom_fn: v }))} value={settings.zoom_fn}>
+                <SelectTrigger className="w-full"><SelectValue placeholder="Zoom function" /></SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectLabel>Zoom Function</SelectLabel>
+                    <SelectItem value="triangle">Triangle</SelectItem>
+                    <SelectItem value="sawtooth">Sawtooth</SelectItem>
+                    <SelectItem value="sin">Sin</SelectItem>
+                    <SelectItem value="sin2">Sin²</SelectItem>
+                    <SelectItem value="cos">Cos</SelectItem>
+                    <SelectItem value="-cos">-Cos</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <NumberSliderInput label="Zoom Offset" value={settings.zoom_start_offset} min={0.0} max={1.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, zoom_start_offset: v }))} unit="cycles" roundToInteger={false} />
+              <NumberSliderInput label="Zoom Cycles" value={settings.num_zoom_loops} min={1} max={10} step={1} onChange={(v) => setSettings((s) => ({ ...s, num_zoom_loops: v }))} unit="cycles" roundToInteger={true} />
+
+              <div className="grid grid-cols-2 gap-2 pt-2">
+                <Button onClick={handleVideo} className="bg-primary">Export MP4</Button>
+                <Button variant="outline" size="sm" onClick={resetVideoSettings}>Reset</Button>
+              </div>
+              <div className="grid grid-cols-2 gap-1">
+                <Button variant="ghost" size="sm" onClick={loadVideoPreset}>Load Preset</Button>
+                <Button variant="ghost" size="sm" onClick={saveVideoPreset}>Save Preset</Button>
+              </div>
+            </TabsContent>
+
+            {/* ── AUDIO TAB ── */}
+            <TabsContent value="audio" className="p-4 space-y-4">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Live Preview</p>
+
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">{audioFileName ? `Loaded: ${audioFileName}` : "No audio loaded"}</p>
+                {audioError && <p className="text-xs text-red-500">{audioError}</p>}
+                <div className="flex gap-2 flex-wrap">
+                  <label className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent cursor-pointer">
+                    Import Audio
+                    <input type="file" accept="audio/*" className="hidden" onChange={(e) => void handleAudioFileChange(e)} />
+                  </label>
+                  {audioFileName && (
+                    <>
+                      <button type="button" className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent" onClick={handleToggleAudioPlayback}>
+                        {audioPlaying ? "⏸ Pause" : "▶ Play"}
+                      </button>
+                      <button type="button" className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent" onClick={handleClearAudio}>
+                        Clear
+                      </button>
+                    </>
+                  )}
+                </div>
+                <Button variant="outline" size="sm" className="w-full" onClick={handleRestartLivePreview}>
+                  ↺ Restart (sync audio + video)
+                </Button>
+              </div>
+
+              <hr className="opacity-20" />
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reactive Settings</p>
+
+              <div className="flex items-center gap-2">
+                <input type="checkbox" id="audioReactiveEnabled" checked={settings.audioReactiveEnabled} onChange={(e) => setSettings((s) => ({ ...s, audioReactiveEnabled: e.target.checked }))} />
+                <label htmlFor="audioReactiveEnabled" className="text-sm">Enable audio reactive</label>
+              </div>
+
+              <hr className="opacity-20" />
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Orientation</p>
+
+              <NumberSliderInput label="Base Reorientation Speed" value={settings.orientationBaseSpeed} min={0} max={2} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, orientationBaseSpeed: v }))} unit="cycles/s" roundToInteger={false} />
+              <NumberSliderInput label="Peak Multiplier" value={settings.orientationPeakMultiplier} min={0} max={1} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, orientationPeakMultiplier: v }))} roundToInteger={false} />
+              <NumberSliderInput label="Orientation Amount" value={settings.audioOrientationAmount} min={0} max={1} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioOrientationAmount: v }))} roundToInteger={false} />
+              <NumberSliderInput label="Reorientation Amount" value={settings.audioReorientationAmount} min={0} max={1} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioReorientationAmount: v }))} roundToInteger={false} />
+
+              <hr className="opacity-20" />
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Peak Detection</p>
+
+              <NumberSliderInput label="Smoothing" value={settings.audioPeakSmoothing} min={0} max={0.98} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, audioPeakSmoothing: v }))} roundToInteger={false} />
+              <NumberSliderInput label="Floor" value={settings.audioPeakFloor} min={0} max={0.5} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioPeakFloor: v }))} roundToInteger={false} />
+              <NumberSliderInput label="Ceiling" value={settings.audioPeakCeiling} min={0.05} max={1.0} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioPeakCeiling: v }))} roundToInteger={false} />
+            </TabsContent>
+          </Tabs>
         </aside>
 
         <main className="flex-1 min-h-0 flex flex-col p-4 gap-4 overflow-y-auto bg-muted/20">
@@ -1847,6 +1533,13 @@ function Kaleidomo() {
                   onClick={() => void startLiveEngine()}
                 >
                   Start Live Preview
+                </button>
+                <button
+                  type="button"
+                  className="text-xs px-3 py-1 rounded border border-border bg-background hover:bg-accent"
+                  onClick={handleRestartLivePreview}
+                >
+                  ↺ Restart
                 </button>
                 <button
                   type="button"

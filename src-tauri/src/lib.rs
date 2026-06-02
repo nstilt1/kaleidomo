@@ -601,6 +601,7 @@ async fn generate_video(
     hue_cycles: f32,
     hue_start_offset: f32,
     hue_fn: String,
+    audio_file_path: Option<String>,
 ) -> Result<String, String> {
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count);
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_max, tile_count);
@@ -697,6 +698,46 @@ async fn generate_video(
             Err(e) => return Err(format!("Video generation failed: {}", e)),
         };
     };
+
+    // If an audio file was provided, mux it into the output video using ffmpeg.
+    if let Some(audio_path) = audio_file_path {
+        if !audio_path.is_empty() {
+            let video_path_str = file_path.to_string();
+
+            // Write to a temp file alongside the output, then replace it.
+            let tmp_path = format!("{}.audiomux.mp4", video_path_str);
+
+            let status = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-i", &video_path_str,
+                    "-i", &audio_path,
+                    "-c:v", "copy",          // copy video stream — no re-encode
+                    "-c:a", "aac",           // encode audio to AAC for MP4
+                    "-b:a", "192k",
+                    "-shortest",             // trim to the shorter of video/audio
+                    "-movflags", "+faststart",
+                    &tmp_path,
+                ])
+                .status();
+
+            match status {
+                Ok(s) if s.success() => {
+                    // Replace original with muxed version
+                    std::fs::rename(&tmp_path, &video_path_str)
+                        .map_err(|e| format!("Failed to replace video with muxed version: {e}"))?;
+                }
+                Ok(s) => {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(format!("ffmpeg exited with status {s} — audio muxing failed. Is ffmpeg installed?"));
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(format!("Failed to run ffmpeg: {e}. Is ffmpeg installed and on PATH?"));
+                }
+            }
+        }
+    }
 
     Ok(format!("data:video/mp4"))
 }

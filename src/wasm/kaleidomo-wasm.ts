@@ -1,33 +1,20 @@
-/**
- * Thin loader for the kaleidomo-core WASM module.
- *
- * The wasm-bindgen `--target web` output lives in `public/wasm/` and is NOT
- * bundled by Vite — it is served as a static asset and imported at runtime via
- * a dynamic `import()`.  We initialise the WASM binary once (via `init()`)
- * then cache the module so callers always get the same reference.
- *
- * Usage:
- *   const { LiveKaleidoscopeEngine, WasmVideoSettings } = await loadWasm();
- *   const engine = await new LiveKaleidoscopeEngine(canvas);
- */
+// kaleidomo-wasm.ts
+let wasmPromise: Promise<any> | null = null;
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type WasmModule = any;
-
-let wasmPromise: Promise<WasmModule> | null = null;
-
-export async function loadWasm(): Promise<WasmModule> {
+export async function loadWasm(): Promise<any> {
   if (wasmPromise) return wasmPromise;
 
   wasmPromise = (async () => {
-    // Dynamic import of the wasm-bindgen JS glue. Vite will NOT try to bundle
-    // it because it lives in /public — the leading slash makes it a URL import.
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-    // @ts-ignore — no generated .d.ts at dev time; types come from the stub below
-    const mod = await import(/* @vite-ignore */ "/wasm/kaleidomo_core.js");
+    // Use window.location.origin to build an absolute URL —
+    // Vite's import analyzer only intercepts bare/relative paths,
+    // not runtime string expressions or absolute URLs.
+    const jsUrl = window.location.origin + "/wasm/kaleidomo_core.js";
+    const wasmBinUrl = new URL("/wasm/kaleidomo_core_bg.wasm", window.location.origin);
 
-    // `init()` fetches and compiles the .wasm binary.
-    await mod.default();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mod: any = await import(/* @vite-ignore */ jsUrl);
+
+    await (mod.default as (input?: URL) => Promise<void>)(wasmBinUrl);
 
     return mod;
   })();

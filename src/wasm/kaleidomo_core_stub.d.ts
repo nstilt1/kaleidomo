@@ -30,6 +30,10 @@ export declare class WasmVideoSettings {
   audio_orientation_amount: number;
   audio_reorientation_amount: number;
   audio_peak_smoothing: number;
+  hero_circle_left_x: number;
+  hero_circle_right_x: number;
+  hero_circle_y: number;
+  hero_desired_left_rotation: number;
   set_rotation_fn(f: string): void;
   get_rotation_fn(): string;
   set_hue_fn(f: string): void;

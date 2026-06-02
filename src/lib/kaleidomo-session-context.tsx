@@ -30,18 +30,27 @@ export type Settings = {
   hue_cycles: number;
   hue_start_offset: number;
   hue_fn: string;
-  // Audio-reactive settings (optional for backward compatibility)
+  // Audio-reactive settings
   audioReactiveEnabled: boolean;
   audioOrientationAmount: number;
   audioReorientationAmount: number;
   audioPeakSmoothing: number;
   audioPeakFloor: number;
   audioPeakCeiling: number;
+  // Base reorientation speed (orientation cycles per second, independent of audio)
+  orientationBaseSpeed: number;
+  // How much the normalized audio peak multiplies onto orientation + rotation
+  orientationPeakMultiplier: number;
+  // Hero circle / orientation settings
+  heroCircleLeftX: number;
+  heroCircleRightX: number;
+  heroCircleY: number;
+  orientationPhase: number;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
-  x: 0,
-  y: 0,
+  x: 100,
+  y: 100,
   rotation: 0,
   resolution: 512,
   zoom: 2,
@@ -70,11 +79,18 @@ export const DEFAULT_SETTINGS: Settings = {
   hue_start_offset: 0,
   hue_fn: "sawtooth",
   audioReactiveEnabled: false,
-  audioOrientationAmount: 0.15,    // moderate kick when enabled
-  audioReorientationAmount: 0.05,  // subtle rotation nudge
-  audioPeakSmoothing: 0.75,        // smooths out transients well
-  audioPeakFloor: 0.02,            // ignore near-silence
-  audioPeakCeiling: 0.7,           // peaks above 70% amplitude = full effect
+  audioOrientationAmount: 0.15,
+  audioReorientationAmount: 0.05,
+  audioPeakSmoothing: 0.75,
+  audioPeakFloor: 0.02,
+  audioPeakCeiling: 0.7,
+  orientationBaseSpeed: 0.0,
+  orientationPeakMultiplier: 0.0,
+  // Hero circle defaults match the hardcoded values in wasm.rs / page.tsx
+  heroCircleLeftX: 515.1039592844847,
+  heroCircleRightX: 1547.0,
+  heroCircleY: 755.3734001945962,
+  orientationPhase: 0.0,
 };
 
 type KaleidomoSessionContextValue = {
