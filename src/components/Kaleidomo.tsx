@@ -1257,35 +1257,30 @@ function Kaleidomo() {
   };
 
   return (
-    <div className="max-h-full bg-background flex flex-col items-center justify-center p-8">
+    <div className="flex h-full w-full overflow-hidden bg-background text-foreground">
       <Toaster richColors position="top-right" />
 
-      <div className="max-w-2xl w-full space-y-8">
-        <div className="text-center space-y-4" />
-      </div>
-
-      <div className="flex h-screen w-full bg-background text-foreground overflow-hidden">
-        <aside className="w-72 border-r flex flex-col bg-card" style={{ height: '100vh', overflow: 'hidden' }}>
-          {/* Top actions — always visible */}
-          <div className="shrink-0 p-4 border-b space-y-2">
-            <div className="space-y-1">
-              <h2 className="text-lg font-bold tracking-tight">Kaleidomo</h2>
-              <p className="text-xs text-muted-foreground">Native Rust Engine</p>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <Button onClick={handlePickFile} className="w-full" size="sm">Select Image</Button>
-              <Button variant="outline" size="sm" onClick={() => void renderPreview()} disabled={isRendering}>
-                {isRendering ? "Rendering…" : "Preview"}
-              </Button>
-            </div>
-            <div className="grid grid-cols-2 gap-1">
-              <Button variant="ghost" size="sm" onClick={loadProject}>Load Project</Button>
-              <Button variant="ghost" size="sm" onClick={saveProject}>Save Project</Button>
-            </div>
+      <aside className="w-72 border-r flex flex-col bg-card h-full overflow-hidden">
+        {/* Top actions — always visible */}
+        <div className="shrink-0 p-4 border-b space-y-2">
+          <div className="space-y-1">
+            <h2 className="text-lg font-bold tracking-tight">Kaleidomo</h2>
+            <p className="text-xs text-muted-foreground">Native Rust Engine</p>
           </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Button onClick={handlePickFile} className="w-full" size="sm">Select Image</Button>
+            <Button variant="outline" size="sm" onClick={() => void renderPreview()} disabled={isRendering}>
+              {isRendering ? "Rendering…" : "Preview"}
+            </Button>
+          </div>
+          <div className="grid grid-cols-2 gap-1">
+            <Button variant="ghost" size="sm" onClick={loadProject}>Load Project</Button>
+            <Button variant="ghost" size="sm" onClick={saveProject}>Save Project</Button>
+          </div>
+        </div>
 
-          {/* Tabbed settings */}
-          <Tabs defaultValue="image" className="flex-1 min-h-0 flex flex-col">
+        {/* Tabbed settings — fills remaining height, tabs bar sticks, content scrolls */}
+        <Tabs defaultValue="image" className="flex-1 min-h-0">
             <TabsList className="shrink-0">
               <TabsTrigger value="image">Image</TabsTrigger>
               <TabsTrigger value="video">Video</TabsTrigger>
@@ -1560,7 +1555,6 @@ function Kaleidomo() {
             <p>Brought to you by Altered Brain Chemistry</p>
           </div>
         </main>
-      </div>
     </div>
   );
 }
