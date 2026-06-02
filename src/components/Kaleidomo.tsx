@@ -1,4 +1,5 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type React from "react";
 import { Button } from "@/components/ui/button";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -20,8 +21,8 @@ import { initGpuSetting } from "@/lib/utils";
 import { Toaster } from "@/components/ui/sonner";
 import { useLicense } from "@/lib/license-context";
 import { Card, CardDescription, CardFooter } from "./ui/card";
-import { useKaleidomoSession } from "@/lib/kaleidomo-session-context";
 import { useSettings } from "@/lib/settings-context";
+import { useKaleidomoSession, type Settings, DEFAULT_SETTINGS } from "@/lib/kaleidomo-session-context";
 
 const promptForImageRelocation = async (
   originalPath: string
@@ -60,37 +61,70 @@ export function roundToNearestMultiple(value: number, multiple: number): number 
   return Math.round(value / multiple) * multiple;
 }
 
-type Settings = {
-  x: number;
-  y: number;
-  rotation: number;
-  resolution: number;
-  zoom: number;
-  tile_count: number;
-  hue_rotate: number;
-  ratio_num: number;
-  ratio_den: number;
-  offset_x: number;
-  offset_y: number;
-  aspect_ratio_mode: string;
-  still_frame_ending: number;
-  fps: number;
-  quality: number;
-  zoom_max: number;
-  zoom_min: number;
-  zoom_fn: string;
-  zoom_start_offset: number;
-  num_zoom_loops: number;
-  animation_duration: number;
-  rotation_range: number;
-  rotation_cycles: number;
-  rotation_start_offset: number;
-  rotation_fn: string;
-  hue_range: number;
-  hue_cycles: number;
-  hue_start_offset: number;
-  hue_fn: string;
-};
+// ---------------------------------------------------------------------------
+// KaleidoType index (matches kaleido_type_from_idx in wasm.rs)
+// ---------------------------------------------------------------------------
+
+function kaleidoTypeToIndex(t: string): number {
+  switch (t) {
+    case "radial":             return 0;
+    case "square":             return 1;
+    case "diamond":            return 2;
+    case "hexagonal":          return 3;
+    case "hexagonal_flat_top": return 4;
+    default:                   return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Audio helpers
+// ---------------------------------------------------------------------------
+
+async function decodeAudioFile(file: File): Promise<AudioBuffer> {
+  const arrayBuffer = await file.arrayBuffer();
+  const audioContext = new AudioContext();
+  return await audioContext.decodeAudioData(arrayBuffer);
+}
+
+function buildFramePeaks(audioBuffer: AudioBuffer, fps: number): Float32Array {
+  const sampleRate = audioBuffer.sampleRate;
+  const samplesPerFrame = Math.max(1, Math.floor(sampleRate / fps));
+  const frameCount = Math.ceil(audioBuffer.length / samplesPerFrame);
+  const peaks = new Float32Array(frameCount);
+
+  for (let frame = 0; frame < frameCount; frame++) {
+    const start = frame * samplesPerFrame;
+    const end = Math.min(audioBuffer.length, start + samplesPerFrame);
+    let peak = 0;
+
+    for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
+      const data = audioBuffer.getChannelData(channel);
+      for (let i = start; i < end; i++) {
+        const value = Math.abs(data[i] ?? 0);
+        if (value > peak) peak = value;
+      }
+    }
+
+    peaks[frame] = peak;
+  }
+
+  return peaks;
+}
+
+function normalizePeaks(
+  rawPeaks: Float32Array,
+  floor: number,
+  ceiling: number
+): Float32Array {
+  const safeCeiling = Math.max(ceiling, floor + 0.0001);
+  const out = new Float32Array(rawPeaks.length);
+  for (let i = 0; i < rawPeaks.length; i++) {
+    const raw = rawPeaks[i] ?? 0;
+    const normalized = (raw - floor) / (safeCeiling - floor);
+    out[i] = Math.min(1, Math.max(0, normalized));
+  }
+  return out;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -130,38 +164,6 @@ const VIDEO_SETTING_KEYS = [
   "hue_start_offset",
   "hue_fn",
 ] as const satisfies readonly (keyof Settings)[];
-
-const DEFAULT_SETTINGS: Settings = {
-  x: 0,
-  y: 0,
-  rotation: 0,
-  resolution: 512,
-  zoom: 2,
-  tile_count: 1.0,
-  hue_rotate: 0,
-  ratio_num: 9,
-  ratio_den: 16,
-  offset_x: 0,
-  offset_y: 0,
-  aspect_ratio_mode: "preset",
-  still_frame_ending: 0,
-  fps: 30,
-  quality: 0.1,
-  zoom_max: 1.0,
-  zoom_min: 1.0,
-  zoom_fn: "sin",
-  zoom_start_offset: 0.0,
-  num_zoom_loops: 1,
-  animation_duration: 12,
-  rotation_range: 360,
-  rotation_cycles: 1,
-  rotation_start_offset: 0,
-  rotation_fn: "sin",
-  hue_range: 360,
-  hue_cycles: 1,
-  hue_start_offset: 0,
-  hue_fn: "sawtooth"
-};
 
 function clampMin(value: number, min: number) {
   return Math.max(min, value);
@@ -223,10 +225,16 @@ function mergeSettingsWithBase(base: Settings, incoming: unknown): Settings {
   if (!isRecord(incoming)) {
     return base;
   }
-
   return {
     ...base,
     ...incoming,
+    // Ensure audio fields always have defaults even in old saved files
+    audioReactiveEnabled: (incoming.audioReactiveEnabled as boolean) ?? base.audioReactiveEnabled,
+    audioOrientationAmount: (incoming.audioOrientationAmount as number) ?? base.audioOrientationAmount,
+    audioReorientationAmount: (incoming.audioReorientationAmount as number) ?? base.audioReorientationAmount,
+    audioPeakSmoothing: (incoming.audioPeakSmoothing as number) ?? base.audioPeakSmoothing,
+    audioPeakFloor: (incoming.audioPeakFloor as number) ?? base.audioPeakFloor,
+    audioPeakCeiling: (incoming.audioPeakCeiling as number) ?? base.audioPeakCeiling,
   } as Settings;
 }
 
@@ -313,6 +321,208 @@ function Kaleidomo() {
     isRendering,
     setIsRendering,
   } = useKaleidomoSession();
+
+  // ---------------------------------------------------------------------------
+  // WASM live preview engine refs and audio state
+  // ---------------------------------------------------------------------------
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const engineRef = useRef<any>(null);
+  const liveCanvasRef = useRef<HTMLCanvasElement>(null);
+  const rawAudioPeaksRef = useRef<Float32Array | null>(null);
+  const normalizedAudioPeaksRef = useRef<Float32Array | null>(null);
+  const [audioFileName, setAudioFileName] = useState<string | null>(null);
+  const [audioError, setAudioError] = useState<string | null>(null);
+
+  // Rebuild normalized peaks and send them to WASM engine
+  const rebuildAndSendPeaks = useCallback((floor: number, ceiling: number) => {
+    const raw = rawAudioPeaksRef.current;
+    if (!raw || !engineRef.current) return;
+    const normalized = normalizePeaks(raw, floor, ceiling);
+    normalizedAudioPeaksRef.current = normalized;
+    try {
+      engineRef.current.set_audio_peaks(normalized);
+    } catch (e) {
+      console.error("set_audio_peaks failed", e);
+    }
+  }, []);
+
+  // Build WasmVideoSettings from current settings and pass to WASM engine
+  const syncVideoSettingsToEngine = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    try {
+      // engine.update_animation_settings expects the same args as start_animation
+      // but without resetting the clock. We call update_animation_settings.
+      // WasmVideoSettings is set via update_animation_settings.
+      // We need to construct a WasmVideoSettings — accessed via the wasm module.
+      // Since we can't import the WASM class synchronously here (it's loaded async),
+      // we'll store a reference to it on the engine instance's module.
+      if (!engine.__vsModule) return;
+      const vs = new engine.__vsModule.WasmVideoSettings();
+      vs.animation_duration = settings.animation_duration;
+      vs.rotation_range = settings.rotation_range;
+      vs.rotation_cycles = settings.rotation_cycles;
+      vs.rotation_start_offset = settings.rotation_start_offset;
+      vs.set_rotation_fn(settings.rotation_fn);
+      vs.hue_range = settings.hue_range;
+      vs.hue_cycles = settings.hue_cycles;
+      vs.hue_start_offset = settings.hue_start_offset;
+      vs.set_hue_fn(settings.hue_fn);
+      vs.fps = settings.fps;
+      vs.zoom_max = settings.zoom_max;
+      vs.zoom_min = settings.zoom_min;
+      vs.set_zoom_fn(settings.zoom_fn);
+      vs.zoom_start_offset = settings.zoom_start_offset;
+      vs.num_zoom_loops = settings.num_zoom_loops;
+      // Orientation defaults (WASM defaults are fine for now)
+      vs.audio_reactive_enabled = settings.audioReactiveEnabled;
+      vs.audio_orientation_amount = settings.audioOrientationAmount;
+      vs.audio_reorientation_amount = settings.audioReorientationAmount;
+      vs.audio_peak_smoothing = settings.audioPeakSmoothing;
+
+      const { effectiveZoom } = getEffectiveZoomAndSourceRadius(
+        settings.zoom,
+        settings.resolution,
+        imgWidth,
+        imgHeight,
+        settings.tile_count,
+        wedgePickerMode
+      );
+
+      const kaleidoTypeIdx = kaleidoTypeToIndex(kaleidoType);
+
+      engine.update_animation_settings(
+        count,
+        settings.offset_x,
+        settings.offset_y,
+        effectiveZoom,
+        settings.tile_count,
+        settings.x,
+        settings.y,
+        settings.rotation,
+        kaleidoTypeIdx,
+        settings.hue_rotate,
+        vs,
+      );
+    } catch (e) {
+      console.error("syncVideoSettingsToEngine failed", e);
+    }
+  }, [settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode]);
+
+  // Start the WASM live preview engine
+  const startLiveEngine = useCallback(async () => {
+    const canvas = liveCanvasRef.current;
+    if (!canvas || !imageSrc) return;
+    try {
+      const { loadWasm } = await import("@/wasm/kaleidomo-wasm");
+      const wasmModule = await loadWasm();
+
+      // Stop existing engine if any
+      if (engineRef.current) {
+        try { engineRef.current.stop_animation(); } catch (_) { /* ignored */ }
+      }
+
+      const engine = await new wasmModule.LiveKaleidoscopeEngine(canvas);
+      engine.__vsModule = wasmModule;
+      engineRef.current = engine;
+
+      // Load the source image
+      await engine.load_image_from_url(imageSrc);
+
+      const vs = new wasmModule.WasmVideoSettings();
+      vs.animation_duration = settings.animation_duration;
+      vs.rotation_range = settings.rotation_range;
+      vs.rotation_cycles = settings.rotation_cycles;
+      vs.rotation_start_offset = settings.rotation_start_offset;
+      vs.set_rotation_fn(settings.rotation_fn);
+      vs.hue_range = settings.hue_range;
+      vs.hue_cycles = settings.hue_cycles;
+      vs.hue_start_offset = settings.hue_start_offset;
+      vs.set_hue_fn(settings.hue_fn);
+      vs.fps = settings.fps;
+      vs.zoom_max = settings.zoom_max;
+      vs.zoom_min = settings.zoom_min;
+      vs.set_zoom_fn(settings.zoom_fn);
+      vs.zoom_start_offset = settings.zoom_start_offset;
+      vs.num_zoom_loops = settings.num_zoom_loops;
+      vs.audio_reactive_enabled = settings.audioReactiveEnabled;
+      vs.audio_orientation_amount = settings.audioOrientationAmount;
+      vs.audio_reorientation_amount = settings.audioReorientationAmount;
+      vs.audio_peak_smoothing = settings.audioPeakSmoothing;
+
+      const { effectiveZoom } = getEffectiveZoomAndSourceRadius(
+        settings.zoom,
+        settings.resolution,
+        imgWidth,
+        imgHeight,
+        settings.tile_count,
+        wedgePickerMode
+      );
+
+      const kaleidoTypeIdx = kaleidoTypeToIndex(kaleidoType);
+
+      engine.start_animation(
+        count,
+        settings.offset_x,
+        settings.offset_y,
+        effectiveZoom,
+        settings.tile_count,
+        settings.x,
+        settings.y,
+        settings.rotation,
+        kaleidoTypeIdx,
+        settings.hue_rotate,
+        vs,
+      );
+
+      // Re-send audio peaks if loaded
+      if (normalizedAudioPeaksRef.current) {
+        engine.set_audio_peaks(normalizedAudioPeaksRef.current);
+      }
+    } catch (e) {
+      console.error("startLiveEngine failed", e);
+    }
+  }, [imageSrc, settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode]);
+
+  // Sync settings changes to engine (no restart)
+  useEffect(() => {
+    syncVideoSettingsToEngine();
+  }, [syncVideoSettingsToEngine]);
+
+  // Resend peaks when floor/ceiling changes
+  useEffect(() => {
+    rebuildAndSendPeaks(settings.audioPeakFloor, settings.audioPeakCeiling);
+  }, [settings.audioPeakFloor, settings.audioPeakCeiling, rebuildAndSendPeaks]);
+
+  const handleAudioFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setAudioError(null);
+    try {
+      const audioBuffer = await decodeAudioFile(file);
+      const rawPeaks = buildFramePeaks(audioBuffer, Math.max(1, settings.fps));
+      rawAudioPeaksRef.current = rawPeaks;
+      const normalized = normalizePeaks(rawPeaks, settings.audioPeakFloor, settings.audioPeakCeiling);
+      normalizedAudioPeaksRef.current = normalized;
+      setAudioFileName(file.name);
+      if (engineRef.current) {
+        try { engineRef.current.set_audio_peaks(normalized); } catch (e) { console.error(e); }
+      }
+    } catch (e) {
+      console.error("Audio decode failed", e);
+      setAudioError("Failed to decode audio file.");
+    }
+  };
+
+  const handleClearAudio = () => {
+    rawAudioPeaksRef.current = null;
+    normalizedAudioPeaksRef.current = null;
+    setAudioFileName(null);
+    if (engineRef.current) {
+      try { engineRef.current.clear_audio_peaks(); } catch (_) { /* ignored */ }
+    }
+  };
+
 
   useEffect(() => {
     console.log("location.href", window.location.href);
@@ -1466,6 +1676,102 @@ function Kaleidomo() {
             />
           </div>
 
+          {/* ----------------------------------------------------------------
+              Audio-Reactive Live Preview Controls
+          ---------------------------------------------------------------- */}
+          <div className="space-y-3">
+            <div className="flex justify-between items-center">
+              <label className="text-sm font-medium">Audio-Reactive Preview</label>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="audioReactiveEnabled"
+                checked={settings.audioReactiveEnabled}
+                onChange={(e) =>
+                  setSettings((s) => ({ ...s, audioReactiveEnabled: e.target.checked }))
+                }
+              />
+              <label htmlFor="audioReactiveEnabled" className="text-sm">Enable audio reactive</label>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-xs text-muted-foreground">
+                {audioFileName ? `Loaded: ${audioFileName}` : "No audio loaded"}
+              </label>
+              {audioError && (
+                <span className="text-xs text-red-500">{audioError}</span>
+              )}
+              <div className="flex gap-2">
+                <label className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent cursor-pointer">
+                  Import Audio
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    className="hidden"
+                    onChange={(e) => void handleAudioFileChange(e)}
+                  />
+                </label>
+                {audioFileName && (
+                  <button
+                    type="button"
+                    className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent"
+                    onClick={handleClearAudio}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <NumberSliderInput
+              label="Orientation Amount"
+              value={settings.audioOrientationAmount ?? 0}
+              min={0}
+              max={1}
+              step={0.001}
+              onChange={(v) => setSettings((s) => ({ ...s, audioOrientationAmount: v }))}
+              roundToInteger={false}
+            />
+            <NumberSliderInput
+              label="Reorientation Amount"
+              value={settings.audioReorientationAmount ?? 0}
+              min={0}
+              max={1}
+              step={0.001}
+              onChange={(v) => setSettings((s) => ({ ...s, audioReorientationAmount: v }))}
+              roundToInteger={false}
+            />
+            <NumberSliderInput
+              label="Peak Smoothing"
+              value={settings.audioPeakSmoothing ?? 0}
+              min={0}
+              max={0.98}
+              step={0.01}
+              onChange={(v) => setSettings((s) => ({ ...s, audioPeakSmoothing: v }))}
+              roundToInteger={false}
+            />
+            <NumberSliderInput
+              label="Peak Floor"
+              value={settings.audioPeakFloor ?? 0}
+              min={0}
+              max={0.5}
+              step={0.001}
+              onChange={(v) => setSettings((s) => ({ ...s, audioPeakFloor: v }))}
+              roundToInteger={false}
+            />
+            <NumberSliderInput
+              label="Peak Ceiling"
+              value={settings.audioPeakCeiling ?? 0}
+              min={0.05}
+              max={1.0}
+              step={0.001}
+              onChange={(v) => setSettings((s) => ({ ...s, audioPeakCeiling: v }))}
+              roundToInteger={false}
+            />
+          </div>
+
           <div className="flex flex-col gap-2 pt-4">
             <Button onClick={handleVideo} className="bg-primary">
               Export MP4
@@ -1520,6 +1826,41 @@ function Kaleidomo() {
                 Select an image or load a preset to begin.
               </p>
             )}
+          </div>
+
+          <div className="h-[70vh] min-h-0 shrink-0 flex flex-col items-center justify-center border rounded-xl bg-background p-8 relative shadow-sm overflow-hidden">
+            <h3 className="absolute top-4 left-4 text-xs font-bold uppercase opacity-30">
+              3. Live Preview (WebGPU)
+            </h3>
+            <div className="flex flex-col items-center gap-4 w-full h-full justify-center">
+              <canvas
+                ref={liveCanvasRef}
+                width={1920}
+                height={1080}
+                className="block max-w-full max-h-full object-contain shadow-2xl rounded-lg"
+                style={{ background: "#000" }}
+              />
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="text-xs px-3 py-1 rounded border border-border bg-background hover:bg-accent"
+                  onClick={() => void startLiveEngine()}
+                >
+                  Start Live Preview
+                </button>
+                <button
+                  type="button"
+                  className="text-xs px-3 py-1 rounded border border-border bg-background hover:bg-accent"
+                  onClick={() => {
+                    if (engineRef.current) {
+                      try { engineRef.current.stop_animation(); } catch (_) { /* ignored */ }
+                    }
+                  }}
+                >
+                  Stop
+                </button>
+              </div>
+            </div>
           </div>
 
           <div className="text-center text-sm text-muted-foreground">

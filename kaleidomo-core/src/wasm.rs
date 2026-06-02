@@ -6,7 +6,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{HtmlCanvasElement, window};
-//use wgpu::rwh::DisplayHandle;
 
 use crate::backends::gpu::{GpuBackend, GpuKaleidoSettings};
 use crate::{KaleidoSettings, KaleidoType};
@@ -58,6 +57,11 @@ pub struct WasmVideoSettings {
     pub orientation_start_offset: f32,
     orientation_fn: String,
     pub orientation_duration: f32,
+    // Audio-reactive fields
+    pub audio_reactive_enabled: bool,
+    pub audio_orientation_amount: f32,
+    pub audio_reorientation_amount: f32,
+    pub audio_peak_smoothing: f32,
 }
 
 #[wasm_bindgen]
@@ -85,6 +89,10 @@ impl WasmVideoSettings {
             orientation_start_offset: 0.0,
             orientation_fn: "none".to_string(),
             orientation_duration: 201.0,
+            audio_reactive_enabled: false,
+            audio_orientation_amount: 0.0,
+            audio_reorientation_amount: 0.0,
+            audio_peak_smoothing: 0.65,
         }
     }
 
@@ -321,6 +329,8 @@ struct EngineState {
     canvas_height: u32,
     started_at_ms: f64,
     last_render_ms: f64,
+    audio_peaks: Vec<f32>,
+    smoothed_audio_peak: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +480,8 @@ impl LiveKaleidoscopeEngine {
             canvas_height: height,
             started_at_ms: 0.0,
             last_render_ms: 0.0,
+            audio_peaks: Vec::new(),
+            smoothed_audio_peak: 0.0,
         };
 
         Ok(Self {
@@ -589,6 +601,23 @@ impl LiveKaleidoscopeEngine {
         // Schedule the rAF loop
         self.schedule_next_frame()?;
         Ok(())
+    }
+
+    /// Set normalized audio peaks (one f32 per video frame, values 0.0–1.0).
+    /// Call this after decoding and normalizing audio in TypeScript.
+    pub fn set_audio_peaks(&self, peaks: js_sys::Float32Array) {
+        if let Some(state) = self.state.borrow_mut().as_mut() {
+            state.audio_peaks = peaks.to_vec();
+            state.smoothed_audio_peak = 0.0;
+        }
+    }
+
+    /// Clear the audio peak buffer and reset smoothing state.
+    pub fn clear_audio_peaks(&self) {
+        if let Some(state) = self.state.borrow_mut().as_mut() {
+            state.audio_peaks.clear();
+            state.smoothed_audio_peak = 0.0;
+        }
     }
 
     /// Cancel the animation loop (idempotent).
@@ -751,17 +780,37 @@ fn render_one_frame(
     state.last_render_ms = now_ms;
 
     let elapsed_ms = (now_ms - state.started_at_ms).max(0.0);
-    let elapsed_seconds = elapsed_ms / 1000.0;
 
     // Build per-frame KaleidoSettings by modulating the base
     let base = &state.base_settings;
-    let vs   = &state.video_settings;
 
     use modulation::*;
     let elapsed_seconds_f32 = (elapsed_ms / 1000.0) as f32;
     let frame = ((elapsed_seconds_f32 as f64 * fps).floor() as u32); // still needed for hue if you keep it frame-based
+
+    // --- Audio-reactive peak modulation ---
+    // Extract audio settings before taking other borrows to avoid borrow conflict.
+    let audio_peak = {
+        let vs = &state.video_settings;
+        if vs.audio_reactive_enabled && !state.audio_peaks.is_empty() {
+            let peak_fps = vs.fps.max(1) as f32;
+            let frame_index = (elapsed_seconds_f32 * peak_fps).floor() as usize;
+            let raw_peak = state.audio_peaks
+                .get(frame_index % state.audio_peaks.len())
+                .copied()
+                .unwrap_or(0.0);
+            let smoothing = vs.audio_peak_smoothing.clamp(0.0, 0.999);
+            let smoothed = state.smoothed_audio_peak * smoothing + raw_peak * (1.0 - smoothing);
+            state.smoothed_audio_peak = smoothed;
+            smoothed.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+
+    let vs = &state.video_settings;
     let rotation = modulate_rotation_time(vs, elapsed_seconds_f32, base.triangle_rotation_rad);
-    let hue      = modulate_hue(vs, frame, base.hue_rotation as f32); // hue_range=0 so this is a no-op anyway
+    let hue      = modulate_hue(vs, frame, base.hue_rotation as f32);
     let zoom     = modulate_zoom_time(vs, elapsed_seconds_f32);
     let orientation = if vs.orientation_duration <= 0.0 {
         0.0
@@ -775,13 +824,17 @@ fn render_one_frame(
             &vs.orientation_fn,
         )
     };
+
+    let final_orientation = orientation + audio_peak * vs.audio_orientation_amount;
+    let audio_rotation_offset = audio_peak * vs.audio_reorientation_amount;
+
     let (orientation_x, orientation_y, orientation_rotation) =
-        orientation_to_hero_params(orientation);
+        orientation_to_hero_params(final_orientation);
 
     let frame_settings = KaleidoSettings {
         triangle_center_x: orientation_x,
         triangle_center_y: orientation_y,
-        triangle_rotation_rad: orientation_rotation + (rotation - base.triangle_rotation_rad),
+        triangle_rotation_rad: orientation_rotation + (rotation - base.triangle_rotation_rad) + audio_rotation_offset,
         hue_rotation: hue,
         zoom,
         output_size_w: state.canvas_width,

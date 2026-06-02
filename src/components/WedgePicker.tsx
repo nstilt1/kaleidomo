@@ -1,37 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-
-type Settings = {
-  x: number;
-  y: number;
-  rotation: number;
-  resolution: number;
-  zoom: number;
-  tile_count: number;
-  hue_rotate: number;
-  ratio_num: number;
-  ratio_den: number;
-  offset_x: number;
-  offset_y: number;
-  aspect_ratio_mode: string;
-  still_frame_ending: number;
-  fps: number;
-  quality: number;
-  zoom_max: number;
-  zoom_min: number;
-  zoom_fn: string;
-  zoom_start_offset: number;
-  num_zoom_loops: number;
-  animation_duration: number;
-  rotation_range: number;
-  rotation_cycles: number;
-  rotation_start_offset: number;
-  rotation_fn: string;
-  hue_range: number;
-  hue_cycles: number;
-  hue_start_offset: number;
-  hue_fn: string;
-};
+import { useKaleidomoSession, type Settings, DEFAULT_SETTINGS } from "@/lib/kaleidomo-session-context";
 
 interface PickerProps {
   imagePath: string;

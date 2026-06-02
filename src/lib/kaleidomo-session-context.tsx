@@ -30,11 +30,18 @@ export type Settings = {
   hue_cycles: number;
   hue_start_offset: number;
   hue_fn: string;
+  // Audio-reactive settings (optional for backward compatibility)
+  audioReactiveEnabled: boolean;
+  audioOrientationAmount: number;
+  audioReorientationAmount: number;
+  audioPeakSmoothing: number;
+  audioPeakFloor: number;
+  audioPeakCeiling: number;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
-  x: 100,
-  y: 100,
+  x: 0,
+  y: 0,
   rotation: 0,
   resolution: 512,
   zoom: 2,
@@ -61,7 +68,13 @@ export const DEFAULT_SETTINGS: Settings = {
   hue_range: 360,
   hue_cycles: 1,
   hue_start_offset: 0,
-  hue_fn: "sawtooth"
+  hue_fn: "sawtooth",
+  audioReactiveEnabled: false,
+  audioOrientationAmount: 0.15,    // moderate kick when enabled
+  audioReorientationAmount: 0.05,  // subtle rotation nudge
+  audioPeakSmoothing: 0.75,        // smooths out transients well
+  audioPeakFloor: 0.02,            // ignore near-silence
+  audioPeakCeiling: 0.7,           // peaks above 70% amplitude = full effect
 };
 
 type KaleidomoSessionContextValue = {
