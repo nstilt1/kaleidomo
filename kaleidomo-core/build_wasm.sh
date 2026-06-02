@@ -31,3 +31,11 @@ cp ../pkg/src/wasm/kaleidomo_core_bg.wasm.gz /home/coding/.openclaw/workspace/ab
 
 cp ../pkg/src/wasm/kaleidomo_core.d.ts /home/coding/.openclaw/workspace/abc/frontend/src/wasm/kaleidomo_core.d.ts
 cp ../pkg/src/wasm/kaleidomo_core_bg.wasm.d.ts /home/coding/.openclaw/workspace/abc/frontend/src/wasm/kaleidomo_core_bg.wasm.d.ts
+
+mkdir -p ../public/wasm
+cp ../pkg/src/wasm/kaleidomo_core_bg.wasm ../public/wasm/kaleidomo_core_bg.wasm
+cp ../pkg/src/wasm/kaleidomo_core.js      ../public/wasm/kaleidomo_core.js
+echo "Copied wasm to public/wasm"
+
+mkdir -p ../src/wasm
+cp ../pkg/src/wasm/kaleidomo_core.d.ts    ../src/wasm/kaleidomo_core.d.ts
