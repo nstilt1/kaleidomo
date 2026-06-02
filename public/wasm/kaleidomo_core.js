@@ -259,6 +259,14 @@ export class WasmVideoSettings {
         return ret >>> 0;
     }
     /**
+     * Independent orientation cycles per second (base reorientation speed, no audio)
+     * @returns {number}
+     */
+    get orientation_base_speed() {
+        const ret = wasm.__wbg_get_wasmvideosettings_orientation_base_speed(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * @returns {number}
      */
     get orientation_cycles() {
@@ -270,6 +278,14 @@ export class WasmVideoSettings {
      */
     get orientation_duration() {
         const ret = wasm.__wbg_get_wasmvideosettings_orientation_duration(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Multiplier applied to the smoothed audio peak for orientation + rotation kick
+     * @returns {number}
+     */
+    get orientation_peak_multiplier() {
+        const ret = wasm.__wbg_get_wasmvideosettings_orientation_peak_multiplier(this.__wbg_ptr);
         return ret;
     }
     /**
@@ -416,6 +432,13 @@ export class WasmVideoSettings {
         wasm.__wbg_set_wasmvideosettings_num_zoom_loops(this.__wbg_ptr, arg0);
     }
     /**
+     * Independent orientation cycles per second (base reorientation speed, no audio)
+     * @param {number} arg0
+     */
+    set orientation_base_speed(arg0) {
+        wasm.__wbg_set_wasmvideosettings_orientation_base_speed(this.__wbg_ptr, arg0);
+    }
+    /**
      * @param {number} arg0
      */
     set orientation_cycles(arg0) {
@@ -426,6 +449,13 @@ export class WasmVideoSettings {
      */
     set orientation_duration(arg0) {
         wasm.__wbg_set_wasmvideosettings_orientation_duration(this.__wbg_ptr, arg0);
+    }
+    /**
+     * Multiplier applied to the smoothed audio peak for orientation + rotation kick
+     * @param {number} arg0
+     */
+    set orientation_peak_multiplier(arg0) {
+        wasm.__wbg_set_wasmvideosettings_orientation_peak_multiplier(this.__wbg_ptr, arg0);
     }
     /**
      * @param {number} arg0
@@ -1575,7 +1605,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_10353(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_10357(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -2536,7 +2566,7 @@ function __wbg_get_imports() {
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { dtor_idx: 421, function: Function { arguments: [Externref], shim_idx: 422, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2283, __wasm_bindgen_func_elem_2285);
+            const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_2287, __wasm_bindgen_func_elem_2289);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0) {
@@ -2598,12 +2628,12 @@ function __wbg_get_imports() {
     };
 }
 
-function __wasm_bindgen_func_elem_2285(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_2285(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_2289(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_2289(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_10353(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_10353(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_10357(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_10357(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 function __wasm_bindgen_func_elem_720(arg0, arg1, arg2) {

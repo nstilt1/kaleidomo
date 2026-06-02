@@ -67,6 +67,10 @@ pub struct WasmVideoSettings {
     pub hero_circle_right_x: f32,
     pub hero_circle_y: f32,
     pub hero_desired_left_rotation: f32,
+    /// Independent orientation cycles per second (base reorientation speed, no audio)
+    pub orientation_base_speed: f32,
+    /// Multiplier applied to the smoothed audio peak for orientation + rotation kick
+    pub orientation_peak_multiplier: f32,
 }
 
 #[wasm_bindgen]
@@ -102,6 +106,8 @@ impl WasmVideoSettings {
             hero_circle_right_x: 1547.0,
             hero_circle_y: 755.3734001945962,
             hero_desired_left_rotation: 6.22,
+            orientation_base_speed: 0.0,
+            orientation_peak_multiplier: 0.0,
         }
     }
 
@@ -854,8 +860,12 @@ fn render_one_frame(
         )
     };
 
-    let final_orientation = orientation + audio_peak * vs.audio_orientation_amount;
-    let audio_rotation_offset = audio_peak * vs.audio_reorientation_amount;
+    let final_orientation = orientation
+        + elapsed_seconds_f32 * vs.orientation_base_speed  // continuous base drift
+        + audio_peak * vs.audio_orientation_amount
+        + audio_peak * vs.orientation_peak_multiplier;
+    let audio_rotation_offset = audio_peak * vs.audio_reorientation_amount
+        + audio_peak * vs.orientation_peak_multiplier;
 
     let (orientation_x, orientation_y, orientation_rotation) =
         modulation::orientation_to_hero_params_with_circle(
