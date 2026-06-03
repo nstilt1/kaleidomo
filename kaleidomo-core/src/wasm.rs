@@ -395,17 +395,36 @@ impl LiveKaleidoscopeEngine {
         let width  = canvas.width();
         let height = canvas.height();
 
-        // wgpu 29: canvas surfaces use SurfaceTarget::Canvas, not create_surface_from_canvas.
-        // Backends must include GL for WebGL2 fallback; WebGPU needs BROWSER_WEBGPU.
-        // On Wasm with the webgl feature, a surface must also exist before request_adapter
-        // is called so the GL backend can find an adapter (wgpu quirk, see wgpu#5190).
-        // InstanceDescriptor does not implement Default in wgpu 29;
-        // every field must be spelled out.
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            #[cfg(target_arch = "wasm32")]
-            backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+        // wgpu 29: canvas surfaces use SurfaceTarget::Canvas.
+        //
+        // IMPORTANT:
+        // Kaleidomo's live GPU renderer uses compute + storage textures.
+        // WebGL/GL cannot support that path, so GL fallback only produces a later
+        // max_storage_textures_per_shader_stage = 0 failure.
+        //
+        // Default Wasm builds are WebGPU-only. If you intentionally need WebGL2/GLES
+        // compiled for some other website path, build kaleidomo-core with:
+        //     --features wasm_webgl_fallback
+        // The storage-texture gate below will still reject GL for this renderer.
+        let wasm_backends = {
+            #[cfg(all(target_arch = "wasm32", feature = "wasm_webgl_fallback"))]
+            {
+                wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL
+            }
+
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm_webgl_fallback")))]
+            {
+                wgpu::Backends::BROWSER_WEBGPU
+            }
+
             #[cfg(not(target_arch = "wasm32"))]
-            backends: wgpu::Backends::all(),
+            {
+                wgpu::Backends::all()
+            }
+        };
+
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wasm_backends,
             flags: wgpu::InstanceFlags::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             backend_options: wgpu::BackendOptions::default(),
@@ -441,7 +460,9 @@ impl LiveKaleidoscopeEngine {
                 "GPU kaleidoscope requires WebGPU with storage texture support. \
                  Detected backend: {:?}, adapter: {}. \
                  max_storage_textures_per_shader_stage = 0. \
-                 WebGPU may not be enabled in this webview.",
+                 WebGPU is unavailable or this build/runtime fell back to GL. \
+                 On macOS Tauri, use the native Metal/Tauri GPU path or require \
+                 a WebGPU-capable WKWebView.",
                 info.backend, info.name,
             ).into());
         }

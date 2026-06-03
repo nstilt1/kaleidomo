@@ -54,10 +54,10 @@ features = ["png", "jpeg", "webp"]
 [target.'cfg(target_arch = "wasm32")'.dependencies.wgpu]
 version = "29"
 default-features = false
-# webgpu  = native WebGPU API path
-# webgl   = gates the GLES backend on wasm32 only (no native bleed-through)
-# gles    = the actual GLES/WebGL2 backend implementation code
-features = ["std", "wgsl", "webgpu", "webgl", "gles"]
+# Default Wasm build is WebGPU-only. This prevents macOS Tauri/WKWebView from
+# silently falling back to WebGL/GL, which cannot support Kaleidomo's compute
+# pipeline/storage textures.
+features = ["std", "wgsl", "webgpu"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"
@@ -77,8 +77,13 @@ features = [
 ]
 
 [features]
+default = []
 soft_backend = []
 dev = []
+# Enable this only for a website build that intentionally wants WebGL2/GLES
+# compiled into wgpu. The live compute renderer still requires WebGPU storage
+# textures and will reject a GL adapter at runtime.
+wasm_webgl_fallback = ["wgpu/webgl", "wgpu/gles"]
 
 # Required by wasm-pack / Trunk to emit both a .wasm and a native rlib
 [lib]
