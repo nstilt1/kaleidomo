@@ -80,6 +80,12 @@ impl GpuBackend {
             .await
             .context("failed to create GPU device")?;
 
+        // Replace wgpu's default panic-on-error handler with a log statement so
+        // GPU device-lost / OOM events don't silently kill the process.
+        device.on_uncaptured_error(std::sync::Arc::new(|error: wgpu::Error| {
+            log::error!("[kaleidomo gpu] uncaptured wgpu error: {error}");
+        }));
+
         let shader = device.create_shader_module(wgpu::include_wgsl!("kaleidomo.wgsl"));
 
         let settings_min_binding_size = non_zero_u64(std::mem::size_of::<GpuKaleidoSettings>() as u64)
@@ -459,20 +465,28 @@ impl GpuBackend {
 
                 self.queue.submit(Some(encoder.finish()));
 
-                let mut tile_cpu = vec![0u8; expected_rgba_len(tile_width, tile_height)?];
-                self.readback_into_output(&mut tile_cpu)?;
-
                 let tile_row_bytes = tile_width as usize * 4;
 
-                for row in 0..tile_height as usize {
-                    let src_start = row * tile_row_bytes;
-                    let src_end = src_start + tile_row_bytes;
+                if tile_origin_x == 0
+                    && tile_origin_y == 0
+                    && tile_width == settings.output_size_w
+                    && tile_height == settings.output_size_h
+                {
+                    self.readback_into_output(output)?;
+                } else {
+                    let mut tile_cpu = vec![0u8; expected_rgba_len(tile_width, tile_height)?];
+                    self.readback_into_output(&mut tile_cpu)?;
 
-                    let dst_start = ((tile_origin_y as usize + row) * full_output_row_bytes)
-                        + (tile_origin_x as usize * 4);
-                    let dst_end = dst_start + tile_row_bytes;
+                    for row in 0..tile_height as usize {
+                        let src_start = row * tile_row_bytes;
+                        let src_end = src_start + tile_row_bytes;
 
-                    output[dst_start..dst_end].copy_from_slice(&tile_cpu[src_start..src_end]);
+                        let dst_start = ((tile_origin_y as usize + row) * full_output_row_bytes)
+                            + (tile_origin_x as usize * 4);
+                        let dst_end = dst_start + tile_row_bytes;
+
+                        output[dst_start..dst_end].copy_from_slice(&tile_cpu[src_start..src_end]);
+                    }
                 }
             }
         }

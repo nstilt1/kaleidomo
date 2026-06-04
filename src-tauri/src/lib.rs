@@ -4,8 +4,9 @@ const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/shop/kaleidomo-k
 const VERSION_URL: &str = "https://0-plugin-versioning.s3.us-east-1.amazonaws.com/kaleidomo-version.txt";
 
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_shell::ShellExt;
 
-use std::{collections::HashMap, sync::Mutex};
+use std::{collections::HashMap, sync::{Arc, Mutex}};
 use kaleidomo_core::{KaleidoSettings, pollster};
 use tauri::{Manager, State};
 
@@ -17,6 +18,11 @@ use kaleidomo_core::backends::gpu::GpuBackend;
 
 mod licensing;
 use licensing::*;
+
+mod live_preview;
+pub use live_preview::render_live_preview_frame;
+
+mod preview_server;
 
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -120,7 +126,13 @@ fn install_panic_hook() {
             "non-string panic payload".to_string()
         };
 
+        // Always print to stderr so panics are visible in `bun run tauri:dev`
+        // regardless of whether the `logging` feature is enabled.
+        eprintln!("PANIC at {location}: {payload}");
+
         let backtrace = Backtrace::force_capture();
+        eprintln!("Backtrace:\n{backtrace}");
+
         #[cfg(feature = "logging")]
         error!(
             "PANIC at {}: {}\nBacktrace:\n{}",
@@ -132,7 +144,10 @@ fn install_panic_hook() {
 }
 
 pub struct AppState {
-    pub gpu: Mutex<Option<GpuBackend>>,
+    pub gpu: Arc<Mutex<Option<GpuBackend>>>,
+    pub gpu_arc: Arc<Mutex<Option<GpuBackend>>>,
+    /// Port the local WebSocket preview server is listening on.
+    pub preview_ws_port: u16,
     pub use_gpu_acceleration: Mutex<bool>,
     pub gpu_available: bool,
     pub license_status: kaleidomo_core::LicenseStatus,
@@ -149,7 +164,7 @@ fn round_to_nearest_multiple(value: u32, multiple: u32) -> u32 {
     ((value + multiple - 1) / multiple) * multiple
 }
 
-fn clamp(value: &mut f32, min: f32, max: f32) {
+pub(crate) fn clamp(value: &mut f32, min: f32, max: f32) {
     *value = value.max(min);
     *value = value.min(max);
 }
@@ -416,37 +431,25 @@ async fn export_kaleidoscope(
     adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
 
     if use_gpu {
-        let mut gpu = state
-            .gpu
-            .lock()
-            .map_err(|_| "failed to lock GPU backend".to_string())?;
-
-        let gpu = match gpu.as_mut() {
-            Some(gpu) => gpu,
-            None => {
-                return Err("GPU backend is unavailable".into());
-            }
-        };
-
-        //gpu.set_source_image(&img).map_err(|e| e.to_string())?;
-
-        let mut pixels = vec![
-            0u8;
-            (output_size_w as usize)
+        let gpu_arc = Arc::clone(&state.gpu_arc);
+        let path_str = path_to_save.to_string();
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let mut gpu_guard = gpu_arc
+                .lock()
+                .map_err(|_| "failed to lock GPU backend".to_string())?;
+            let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
+            let pixel_count = (output_size_w as usize)
                 .checked_mul(output_size_h as usize)
                 .and_then(|v| v.checked_mul(4))
-                .ok_or_else(|| "output dimensions overflowed".to_string())?
-        ];
-
-        gpu.render_into_buffer(&settings, &mut pixels)
-            .map_err(|e| e.to_string())?;
-
-        let result_buffer = image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
-            .ok_or_else(|| "failed to create image from GPU output".to_string())?;
-
-        result_buffer
-            .save(path_to_save.to_string())
-            .map_err(|e| format!("Failed to save image: {}", e))?;
+                .ok_or_else(|| "output dimensions overflowed".to_string())?;
+            let mut pixels = vec![0u8; pixel_count];
+            gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+            let result_buffer = image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
+                .ok_or_else(|| "failed to create image from GPU output".to_string())?;
+            result_buffer.save(&path_str).map_err(|e| format!("Failed to save image: {}", e))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking error: {e}"))??;
     } else {
         let result_buffer =
             kaleidomo_core::render_kaleidoscope_with_auto_backend(
@@ -522,25 +525,19 @@ async fn generate_kaleidoscope(
     adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
 
     let output = if use_gpu {
-        let mut gpu_guard = state
-            .gpu
-            .lock()
-            .map_err(|_| "Failed to lock GPU backend".to_string())?;
-
-        let gpu = match gpu_guard.as_mut() {
-            Some(gpu) => gpu,
-            None => {
-                return Err("GPU backend is unavailable".into());
-            }
-        };
-
-        let mut pixels = vec![0u8; (output_size_w * output_size_h * 4) as usize];
-
-        gpu.render_into_buffer(&settings, &mut pixels)
-            .map_err(|e| e.to_string())?;
-
-        image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
-            .ok_or_else(|| "Failed to construct image".to_string())?
+        let gpu_arc = Arc::clone(&state.gpu_arc);
+        tauri::async_runtime::spawn_blocking(move || -> Result<image::RgbaImage, String> {
+            let mut gpu_guard = gpu_arc
+                .lock()
+                .map_err(|_| "Failed to lock GPU backend".to_string())?;
+            let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
+            let mut pixels = vec![0u8; (output_size_w * output_size_h * 4) as usize];
+            gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+            image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
+                .ok_or_else(|| "Failed to construct image".to_string())
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking error: {e}"))??
     } else {
         let img = match load_source_image(&path)
             .map_err(|e| format!("Failed to open image at path '{}': {}", path, e)) {
@@ -602,6 +599,14 @@ async fn generate_video(
     hue_start_offset: f32,
     hue_fn: String,
     audio_file_path: Option<String>,
+    audio_reactive_enabled: bool,
+    audio_peak_smoothing: f32,
+    orientation_base_speed: f32,
+    orientation_peak_multiplier: f32,
+    audio_peaks: Vec<f32>,
+    hero_circle_left_x: f32,
+    hero_circle_right_x: f32,
+    hero_circle_y: f32,
 ) -> Result<String, String> {
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count);
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_max, tile_count);
@@ -665,6 +670,17 @@ async fn generate_video(
         zoom_fn,
         zoom_start_offset,
         num_zoom_loops,
+
+        audio_reactive_enabled,
+        audio_peak_smoothing,
+        orientation_base_speed,
+        orientation_peak_multiplier,
+        audio_peaks,
+
+        hero_circle_left_x,
+        hero_circle_right_x,
+        hero_circle_y,
+        hero_desired_left_rotation: rotation,
     };
 
     let use_gpu = {
@@ -678,20 +694,18 @@ async fn generate_video(
     adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
 
     let _output = if use_gpu {
-        let mut gpu_guard = state
-            .gpu
-            .lock()
-            .map_err(|_| "Failed to lock GPU backend".to_string())?;
-
-        let gpu = match gpu_guard.as_mut() {
-            Some(gpu) => gpu,
-            None => {
-                return Err("GPU backend is unavailable".into());
-            }
-        };
-
-        kaleidomo_core::render_video_gpu(settings, video_settings, &file_path.to_string(), gpu)
-            .map_err(|e| format!("Video generation failed: {}", e))?
+        let gpu_arc = Arc::clone(&state.gpu_arc);
+        let file_path_str = file_path.to_string();
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let mut gpu_guard = gpu_arc
+                .lock()
+                .map_err(|_| "Failed to lock GPU backend".to_string())?;
+            let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
+            kaleidomo_core::render_video_gpu(settings, video_settings, &file_path_str, gpu)
+                .map_err(|e| format!("Video generation failed: {}", e))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking error: {e}"))??;
     } else {
         match kaleidomo_core::render_video_with_auto_backend(&img, settings, video_settings, &file_path.to_string()) {
             Ok(_) => (),
@@ -704,10 +718,20 @@ async fn generate_video(
         if !audio_path.is_empty() {
             let video_path_str = file_path.to_string();
 
+            log::info!("[generate_video] audio_file_path={audio_path}");
+            log::info!("[generate_video] video_path={video_path_str}");
+
+            if !std::path::Path::new(&audio_path).exists() {
+                return Err(format!("Audio file does not exist: {audio_path}"));
+            }
+
             // Write to a temp file alongside the output, then replace it.
             let tmp_path = format!("{}.audiomux.mp4", video_path_str);
 
-            let status = std::process::Command::new("ffmpeg")
+            let output = app
+                .shell()
+                .sidecar("ffmpeg")
+                .map_err(|e| format!("Failed to load bundled FFmpeg sidecar: {e}"))?
                 .args([
                     "-y",
                     "-i", &video_path_str,
@@ -715,26 +739,32 @@ async fn generate_video(
                     "-c:v", "copy",          // copy video stream — no re-encode
                     "-c:a", "aac",           // encode audio to AAC for MP4
                     "-b:a", "192k",
+                    "-ar", "48000",          // normalize to video-friendly sample rate
+                    "-ac", "2",              // normalize to stereo
                     "-shortest",             // trim to the shorter of video/audio
                     "-movflags", "+faststart",
                     &tmp_path,
                 ])
-                .status();
+                .output()
+                .await
+                .map_err(|e| format!("Failed to run bundled FFmpeg sidecar: {e}"))?;
 
-            match status {
-                Ok(s) if s.success() => {
-                    // Replace original with muxed version
-                    std::fs::rename(&tmp_path, &video_path_str)
-                        .map_err(|e| format!("Failed to replace video with muxed version: {e}"))?;
-                }
-                Ok(s) => {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    return Err(format!("ffmpeg exited with status {s} — audio muxing failed. Is ffmpeg installed?"));
-                }
-                Err(e) => {
-                    let _ = std::fs::remove_file(&tmp_path);
-                    return Err(format!("Failed to run ffmpeg: {e}. Is ffmpeg installed and on PATH?"));
-                }
+            if output.status.success() {
+                // Replace original with muxed version
+                std::fs::rename(&tmp_path, &video_path_str)
+                    .map_err(|e| format!("Failed to replace video with muxed version: {e}"))?;
+            } else {
+                let _ = std::fs::remove_file(&tmp_path);
+
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+
+                return Err(format!(
+                    "FFmpeg audio muxing failed.\n\nstatus: {:?}\n\nstderr:\n{}\n\nstdout:\n{}",
+                    output.status,
+                    stderr,
+                    stdout
+                ));
             }
         }
     }
@@ -778,6 +808,11 @@ fn gpu_available(state: tauri::State<'_, AppState>) -> bool {
     state.gpu_available
 }
 
+#[tauri::command]
+fn get_preview_ws_port(state: tauri::State<'_, AppState>) -> u16 {
+    state.preview_ws_port
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_hook();
@@ -794,6 +829,16 @@ pub fn run() {
     };
 
     let gpu_available_b = gpu_backend.is_some();
+
+    // Create the Arc before the Builder so it can be cloned into both the
+    // kframe:// scheme handler and AppState.
+    let gpu_arc_init = Arc::new(Mutex::new(gpu_backend));
+
+    // Start the WebSocket preview server. It binds on a random localhost port
+    // and serves JPEG frames outside the JSC heap (blob delivery).
+    let preview_ws_port = tauri::async_runtime::block_on(
+        preview_server::start(Arc::clone(&gpu_arc_init))
+    );
 
     let mut product_id_hashmap = HashMap::with_capacity(1);
     product_id_hashmap.insert(
@@ -818,8 +863,11 @@ pub fn run() {
             let cooldown_state = licensing::cooldown::load_state(&app.handle())
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
+            let gpu_arc = Arc::clone(&gpu_arc_init);
             app.manage(AppState {
-                gpu: Mutex::new(gpu_backend),
+                gpu: Arc::clone(&gpu_arc),
+                gpu_arc,
+                preview_ws_port,
                 use_gpu_acceleration: Mutex::new(gpu_available_b),
                 gpu_available: gpu_available_b,
                 license_status,
@@ -865,6 +913,8 @@ pub fn run() {
             get_use_gpu_acceleration,
             select_image,
             gpu_available,
+            render_live_preview_frame,
+            get_preview_ws_port,
             license_data,
             is_unlocked,
             read_reply_from_webserver,

@@ -37,6 +37,11 @@ export type Settings = {
   audioPeakSmoothing: number;
   audioPeakFloor: number;
   audioPeakCeiling: number;
+  // Low-pass filter cutoff for beat detection (Hz). Filters audio before peak extraction.
+  audioLowpassFreq: number;
+  // Low-pass filter slope in dB/octave. Higher = steeper, more bass-only isolation.
+  // 6 = 1-pole RC, 12 = 2-pole, 24 = 4-pole (Butterworth), 48 = 8-pole (ladder-like)
+  audioLowpassSlope: 6 | 12 | 24 | 48;
   // Base reorientation speed (orientation cycles per second, independent of audio)
   orientationBaseSpeed: number;
   // How much the normalized audio peak multiplies onto orientation + rotation
@@ -84,6 +89,8 @@ export const DEFAULT_SETTINGS: Settings = {
   audioPeakSmoothing: 0.75,
   audioPeakFloor: 0.02,
   audioPeakCeiling: 0.7,
+  audioLowpassFreq: 169,
+  audioLowpassSlope: 24,
   orientationBaseSpeed: 0.0,
   orientationPeakMultiplier: 0.0,
   // Hero circle defaults match the hardcoded values in wasm.rs / page.tsx

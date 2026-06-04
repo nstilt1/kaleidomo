@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type React from "react";
 import { Button } from "@/components/ui/button";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { WedgePicker } from "@/components/WedgePicker";
-import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import { readFile, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   Select,
@@ -25,6 +24,8 @@ import { Card, CardDescription, CardFooter } from "./ui/card";
 import { useKaleidomoSession } from "@/lib/kaleidomo-session-context";
 import { type Settings, DEFAULT_SETTINGS } from "@/lib/kaleidomo-session-context";
 import { useSettings } from "@/lib/settings-context";
+import { checkLivePreviewWebGpuSupport } from "@/lib/webgpu-live-engine-guard";
+import { isTauriMacOS, NativeLivePreviewEngine, type NativeLivePreviewParams } from "@/lib/native-live-preview";
 
 const promptForImageRelocation = async (
   originalPath: string
@@ -82,32 +83,61 @@ function kaleidoTypeToIndex(t: string): number {
 // Audio helpers
 // ---------------------------------------------------------------------------
 
-async function decodeAudioFile(file: File): Promise<AudioBuffer> {
-  const arrayBuffer = await file.arrayBuffer();
-  const audioContext = new AudioContext();
-  return await audioContext.decodeAudioData(arrayBuffer);
+/**
+ * Apply a cascaded first-order IIR low-pass filter to a mono sample array.
+ * Each pole gives -6 dB/oct additional rolloff:
+ *   poles=1 → -6 dB/oct,  poles=2 → -12,  poles=4 → -24,  poles=8 → -48
+ * alpha = dt/(RC+dt) where RC=1/(2π·fc), dt=1/sampleRate.
+ * Returns a new Float32Array of the same length.
+ */
+function applyLowpassFilter(
+  data: Float32Array,
+  sampleRate: number,
+  cutoffHz: number,
+  poles: number,
+): Float32Array {
+  if (cutoffHz <= 0 || cutoffHz >= sampleRate / 2) return data;
+  const rc    = 1 / (2 * Math.PI * cutoffHz);
+  const dt    = 1 / sampleRate;
+  const alpha = dt / (rc + dt);
+
+  // Run `poles` sequential passes over the data (each pass = one RC stage)
+  let buf = new Float32Array(data);
+  for (let p = 0; p < poles; p++) {
+    let prev = 0;
+    for (let i = 0; i < buf.length; i++) {
+      prev = prev + alpha * ((buf[i]!) - prev);
+      buf[i] = prev;
+    }
+  }
+  return buf;
 }
 
-function buildFramePeaks(audioBuffer: AudioBuffer, fps: number): Float32Array {
+function slopeToPoles(slope: number): number {
+  // slope is dB/octave; each first-order stage = 6 dB/oct
+  return Math.max(1, Math.round(slope / 6));
+}
+
+function buildFramePeaks(audioBuffer: AudioBuffer, fps: number, lowpassHz = 0, lowpassSlope = 24): Float32Array {
   const sampleRate = audioBuffer.sampleRate;
   const samplesPerFrame = Math.max(1, Math.floor(sampleRate / fps));
   const frameCount = Math.ceil(audioBuffer.length / samplesPerFrame);
   const peaks = new Float32Array(frameCount);
+  const poles = slopeToPoles(lowpassSlope);
 
-  for (let frame = 0; frame < frameCount; frame++) {
-    const start = frame * samplesPerFrame;
-    const end = Math.min(audioBuffer.length, start + samplesPerFrame);
-    let peak = 0;
-
-    for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
-      const data = audioBuffer.getChannelData(channel);
+  for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
+    let data: Float32Array = audioBuffer.getChannelData(channel);
+    if (lowpassHz > 0 && lowpassHz < sampleRate / 2) {
+      data = applyLowpassFilter(data, sampleRate, lowpassHz, poles);
+    }
+    for (let frame = 0; frame < frameCount; frame++) {
+      const start = frame * samplesPerFrame;
+      const end = Math.min(audioBuffer.length, start + samplesPerFrame);
       for (let i = start; i < end; i++) {
         const value = Math.abs(data[i] ?? 0);
-        if (value > peak) peak = value;
+        if (value > peaks[frame]!) peaks[frame] = value;
       }
     }
-
-    peaks[frame] = peak;
   }
 
   return peaks;
@@ -324,25 +354,40 @@ function Kaleidomo() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const engineRef = useRef<any>(null);
   const liveCanvasRef = useRef<HTMLCanvasElement>(null);
+  // Native macOS live preview engine (used instead of WASM on macOS Tauri)
+  const nativeEngineRef = useRef<NativeLivePreviewEngine | null>(null);
   const rawAudioPeaksRef = useRef<Float32Array | null>(null);
   const normalizedAudioPeaksRef = useRef<Float32Array | null>(null);
+  const audioBufferRef = useRef<AudioBuffer | null>(null); // kept for lowpass rebuilds
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
   const [audioFileName, setAudioFileName] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
+  const [livePreviewError, setLivePreviewError] = useState<string | null>(null);
+  // macOS native preview resolution cap. Higher = sharper but more IPC memory pressure.
+  // 720 is the safe default (70 MB/s at 20fps with reusable ImageData).
+  const [nativePreviewRes, setNativePreviewRes] = useState<512 | 720 | 1080>(720);
   const [audioPlaying, setAudioPlaying] = useState(false);
 
   // Rebuild normalized peaks and send them to WASM engine
-  const rebuildAndSendPeaks = useCallback((floor: number, ceiling: number) => {
+  const rebuildAndSendPeaks = useCallback((floor: number, ceiling: number, lowpassHz?: number, lowpassSlope?: number) => {
+    // If filter params changed and we have the AudioBuffer, rebuild raw peaks first
+    if ((lowpassHz !== undefined || lowpassSlope !== undefined) && audioBufferRef.current) {
+      const hz = lowpassHz ?? settings.audioLowpassFreq;
+      const slope = lowpassSlope ?? settings.audioLowpassSlope;
+      const raw = buildFramePeaks(audioBufferRef.current, Math.max(1, settings.fps), hz, slope);
+      rawAudioPeaksRef.current = raw;
+    }
     const raw = rawAudioPeaksRef.current;
-    if (!raw || !engineRef.current) return;
+    if (!raw) return;
     const normalized = normalizePeaks(raw, floor, ceiling);
     normalizedAudioPeaksRef.current = normalized;
     try {
-      engineRef.current.set_audio_peaks(normalized);
+      engineRef.current?.set_audio_peaks(normalized);
     } catch (e) {
       console.error("set_audio_peaks failed", e);
     }
-  }, []);
+    nativeEngineRef.current?.setPeaks(normalized);
+  }, [settings.fps]);
 
   // Build WasmVideoSettings from current settings and pass to WASM engine
   const syncVideoSettingsToEngine = useCallback(() => {
@@ -413,17 +458,170 @@ function Kaleidomo() {
     }
   }, [settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode]);
 
+  // ---------------------------------------------------------------------------
+  // Native macOS live preview (wgpu / Metal via Tauri command)
+  // ---------------------------------------------------------------------------
+
+  /** Build the params object the native engine needs from current state. */
+  const buildNativeParams = useCallback((): NativeLivePreviewParams => {
+    const { effectiveZoom } = getEffectiveZoomAndSourceRadius(
+      settings.zoom,
+      settings.resolution,
+      imgWidth,
+      imgHeight,
+      settings.tile_count,
+      wedgePickerMode
+    );
+    // Hard cap on live preview render size. Cap the OUTPUT dimensions directly
+    // after aspect-ratio math so rounding never pushes either dimension over the limit.
+    const NATIVE_PREVIEW_MAX_PX = nativePreviewRes;
+    const dims = (() => {
+      const short = Math.min(Math.max(1, settings.resolution), NATIVE_PREVIEW_MAX_PX);
+      const num = Math.max(1, settings.ratio_num);
+      const den = Math.max(1, settings.ratio_den);
+      let w: number, h: number;
+      if (num >= den) {
+        h = short; w = Math.round(short * num / den / 8) * 8;
+        h = Math.floor(w * den / num);
+      } else {
+        w = short; h = Math.floor(short * den / num);
+        w = Math.round(w / 8) * 8;
+        h = Math.floor(w * den / num);
+      }
+      // Clamp both dimensions so aspect-ratio rounding never exceeds the cap
+      if (w > NATIVE_PREVIEW_MAX_PX) { w = Math.floor(NATIVE_PREVIEW_MAX_PX / 8) * 8; h = Math.floor(w * den / num); }
+      if (h > NATIVE_PREVIEW_MAX_PX) { h = NATIVE_PREVIEW_MAX_PX; w = Math.round(h * num / den / 8) * 8; }
+      return { w: Math.max(8, w), h: Math.max(8, h) };
+    })();
+
+    return {
+      count,
+      outputSizeW: dims.w,
+      outputSizeH: dims.h,
+      offsetX: settings.offset_x,
+      offsetY: settings.offset_y,
+      // Base (unanimated) zoom — engine multiplies by animated zoom factor
+      zoom: effectiveZoom,
+      tileCount: settings.tile_count,
+      x: settings.x,
+      y: settings.y,
+      rotation: settings.rotation,
+      kaleidoType,
+      hueRotation: settings.hue_rotate,
+      imgWidth,
+      imgHeight,
+      // Animation / video settings
+      animationDuration: settings.animation_duration,
+      fps: settings.fps,
+      rotationRange: settings.rotation_range,
+      rotationCycles: settings.rotation_cycles,
+      rotationStartOffset: settings.rotation_start_offset,
+      rotationFn: settings.rotation_fn,
+      hueRange: settings.hue_range,
+      hueCycles: settings.hue_cycles,
+      hueStartOffset: settings.hue_start_offset,
+      hueFn: settings.hue_fn,
+      zoomMax: settings.zoom_max,
+      zoomMin: settings.zoom_min,
+      zoomFn: settings.zoom_fn,
+      zoomStartOffset: settings.zoom_start_offset,
+      numZoomLoops: settings.num_zoom_loops,
+      // Orientation / hero-circle
+      orientationBaseSpeed: settings.orientationBaseSpeed,
+      heroCircleLeftX: settings.heroCircleLeftX,
+      heroCircleRightX: settings.heroCircleRightX,
+      heroCircleY: settings.heroCircleY,
+      // hero_desired_left_rotation is the base rotation at value=0 on the circle
+      heroDesiredLeftRotation: settings.rotation,
+      // Audio-reactive
+      audioReactiveEnabled: settings.audioReactiveEnabled,
+      audioPeakSmoothing: settings.audioPeakSmoothing,
+      audioOrientationAmount: settings.audioOrientationAmount,
+      audioReorientationAmount: settings.audioReorientationAmount,
+      orientationPeakMultiplier: settings.orientationPeakMultiplier,
+    };
+  }, [settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode, nativePreviewRes]);
+
+  /** Start (or restart) the native Metal-backed live preview loop. */
+  const startNativeLiveEngine = useCallback(() => {
+    // Stop any existing native engine.
+    if (nativeEngineRef.current) {
+      nativeEngineRef.current.stop();
+      nativeEngineRef.current = null;
+    }
+    setLivePreviewError(null);
+
+    const engine = new NativeLivePreviewEngine()
+      .onError((msg) => {
+        console.error("native live preview error:", msg);
+        setLivePreviewError(msg);
+      });
+
+    if (liveCanvasRef.current) {
+      engine.setCanvas(liveCanvasRef.current);
+    }
+    engine.setAudioElement(audioElementRef.current);
+    if (normalizedAudioPeaksRef.current) {
+      engine.setPeaks(normalizedAudioPeaksRef.current);
+    }
+
+    engine.start();
+    nativeEngineRef.current = engine;
+
+    // Push the first frame immediately.
+    engine.pushParams(buildNativeParams());
+  }, [buildNativeParams]);
+
+  // Whenever settings change, push new params to the native engine (if running).
+  useEffect(() => {
+    const engine = nativeEngineRef.current;
+    if (!engine) return;
+    engine.pushParams(buildNativeParams());
+  }, [buildNativeParams]);
+
   // Start the WASM live preview engine
   const startLiveEngine = useCallback(async () => {
     const canvas = liveCanvasRef.current;
-    if (!canvas || !imageSrc) return;
+    if (!imageSrc) return;
+
+    // ── macOS Tauri: use native wgpu/Metal path ──────────────────────────────
+    if (isTauriMacOS()) {
+      // Ensure source image is loaded in the Rust GPU backend first.
+      if (imagePath) {
+        try {
+          await invoke("select_image", { path: imagePath });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          setLivePreviewError(`Failed to load image into GPU backend: ${msg}`);
+          return;
+        }
+      }
+      startNativeLiveEngine();
+      return;
+    }
+
+    // ── All other platforms: WASM WebGPU path ────────────────────────────────
+    if (!canvas) return;
+
+    setLivePreviewError(null);
+
     try {
+      const support = await checkLivePreviewWebGpuSupport();
+
+      if (!support.supported) {
+        setLivePreviewError(support.reason);
+        console.warn("Live preview WebGPU unavailable:", support.reason, support.details);
+        return;
+      }
+
       const { loadWasm } = await import("@/wasm/kaleidomo-wasm");
       const wasmModule = await loadWasm();
 
-      // Stop existing engine if any
+      // Stop and release any existing engine before constructing a new one.
       if (engineRef.current) {
         try { engineRef.current.stop_animation(); } catch (_) { /* ignored */ }
+        try { engineRef.current.free?.(); } catch (_) { /* ignored */ }
+        engineRef.current = null;
       }
 
       const engine = await new wasmModule.LiveKaleidoscopeEngine(canvas);
@@ -499,85 +697,222 @@ function Kaleidomo() {
         engine.set_audio_peaks(normalizedAudioPeaksRef.current);
       }
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setLivePreviewError(message);
       console.error("startLiveEngine failed", e);
     }
-  }, [imageSrc, settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode]);
+  }, [imageSrc, imagePath, startNativeLiveEngine, settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode]);
 
   // Sync settings changes to engine (no restart)
   useEffect(() => {
     syncVideoSettingsToEngine();
   }, [syncVideoSettingsToEngine]);
 
-  // Resend peaks when floor/ceiling changes
+  // Resend peaks when floor/ceiling/lowpass changes
   useEffect(() => {
-    rebuildAndSendPeaks(settings.audioPeakFloor, settings.audioPeakCeiling);
-  }, [settings.audioPeakFloor, settings.audioPeakCeiling, rebuildAndSendPeaks]);
+    rebuildAndSendPeaks(settings.audioPeakFloor, settings.audioPeakCeiling, settings.audioLowpassFreq, settings.audioLowpassSlope);
+  }, [settings.audioPeakFloor, settings.audioPeakCeiling, settings.audioLowpassFreq, settings.audioLowpassSlope, rebuildAndSendPeaks]);
 
   // Keep the audio File object so we can get its path for export
   const audioFileRef = useRef<File | null>(null);
+  const audioObjectUrlRef = useRef<string | null>(null);
+  const audioFilePathRef = useRef<string | null>(null);
 
-  const handleAudioFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  function guessAudioMimeTypeFromPath(path: string): string {
+    const lower = path.toLowerCase();
+
+    if (lower.endsWith(".wav") || lower.endsWith(".wave")) return "audio/wav";
+    if (lower.endsWith(".mp3")) return "audio/mpeg";
+    if (lower.endsWith(".m4a")) return "audio/mp4";
+    if (lower.endsWith(".mp4")) return "audio/mp4";
+    if (lower.endsWith(".aac")) return "audio/aac";
+    if (lower.endsWith(".flac")) return "audio/flac";
+    if (lower.endsWith(".ogg")) return "audio/ogg";
+
+    return "application/octet-stream";
+  }
+
+  function getAudioPlayErrorMessage(err: unknown): string {
+    if (err instanceof DOMException) {
+      if (err.name === "NotAllowedError") {
+        return "Audio playback was blocked. Click Play Audio again after interacting with the app.";
+      }
+
+      if (err.name === "NotSupportedError") {
+        return "This audio file decoded for peaks, but the macOS WebView could not play it as media. Try a 16-bit PCM WAV, MP3, M4A, or AAC file.";
+      }
+    }
+
+    return "Audio playback failed.";
+  }
+
+  const revokeAudioObjectUrl = useCallback(() => {
+    if (audioObjectUrlRef.current) {
+      URL.revokeObjectURL(audioObjectUrlRef.current);
+      audioObjectUrlRef.current = null;
+    }
+  }, []);
+
+  const handleAudioFileChange = async () => {
     setAudioError(null);
 
-    // Stop any existing playback
+    const selected = await open({
+      multiple: false,
+      filters: [
+        {
+          name: "Audio",
+          extensions: ["wav", "wave", "mp3", "m4a", "aac", "flac", "ogg"],
+        },
+      ],
+    });
+
+    if (typeof selected !== "string") {
+      return;
+    }
+
     if (audioElementRef.current) {
       audioElementRef.current.pause();
-      audioElementRef.current.src = "";
+      audioElementRef.current.removeAttribute("src");
+      audioElementRef.current.load();
     }
 
     try {
-      const audioBuffer = await decodeAudioFile(file);
-      const rawPeaks = buildFramePeaks(audioBuffer, Math.max(1, settings.fps));
+      const bytes = await readFile(selected);
+      const fileName = selected.split(/[\\/]/).pop() ?? "audio";
+      const mimeType = guessAudioMimeTypeFromPath(selected);
+
+      const decodeBuffer = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      );
+
+      const audioContext = new AudioContext();
+      const audioBuffer = await audioContext.decodeAudioData(decodeBuffer.slice(0));
+      await audioContext.close();
+
+      audioBufferRef.current = audioBuffer;
+
+      const rawPeaks = buildFramePeaks(
+        audioBuffer,
+        Math.max(1, settings.fps),
+        settings.audioLowpassFreq,
+        settings.audioLowpassSlope,
+      );
+
       rawAudioPeaksRef.current = rawPeaks;
-      const normalized = normalizePeaks(rawPeaks, settings.audioPeakFloor, settings.audioPeakCeiling);
+
+      const normalized = normalizePeaks(
+        rawPeaks,
+        settings.audioPeakFloor,
+        settings.audioPeakCeiling,
+      );
+
       normalizedAudioPeaksRef.current = normalized;
-      audioFileRef.current = file;
-      setAudioFileName(file.name);
+      audioFilePathRef.current = selected;
+
+      setAudioFileName(fileName);
       setAudioPlaying(false);
 
-      // Create an Audio element backed by an object URL for playback
-      const objectUrl = URL.createObjectURL(file);
-      const audio = new Audio(objectUrl);
+      const audio = new Audio();
+      audio.preload = "auto";
       audio.loop = true;
+      audio.crossOrigin = "anonymous";
+      audio.src = convertFileSrc(selected);
+
       audio.onended = () => setAudioPlaying(false);
+
+      audio.onerror = () => {
+        console.error("[audio] element error:", {
+          error: audio.error,
+          src: audio.src,
+          canPlayType: audio.canPlayType(mimeType),
+          mimeType,
+        });
+
+        setAudioPlaying(false);
+        setAudioError(
+          `The audio decoded for peaks, but the WebView could not play it as ${mimeType}.`,
+        );
+      };
+
       audioElementRef.current = audio;
+      nativeEngineRef.current?.setAudioElement(audio);
+
+      audio.load();
 
       if (engineRef.current) {
-        try { engineRef.current.set_audio_peaks(normalized); } catch (err) { console.error(err); }
+        try {
+          engineRef.current.set_audio_peaks(normalized);
+        } catch (err) {
+          console.error(err);
+        }
       }
+
+      nativeEngineRef.current?.setPeaks(normalized);
     } catch (err) {
-      console.error("Audio decode failed", err);
-      setAudioError("Failed to decode audio file.");
+      console.error("Audio import failed", err);
+      setAudioError("Failed to import audio file.");
+      audioFilePathRef.current = null;
     }
   };
 
   const handleRestartLivePreview = useCallback(() => {
-    // Reset audio to beginning
     const audio = audioElementRef.current;
+
     if (audio) {
       audio.pause();
       audio.currentTime = 0;
     }
-    setAudioPlaying(false);
 
-    // Restart WASM engine (resets the animation clock)
+    setAudioPlaying(false);
+    setAudioError(null);
+
     void startLiveEngine().then(() => {
-      // Start audio playback in sync once engine is running
-      if (audio && audioFileName) {
-        void audio.play();
-        setAudioPlaying(true);
+      if (!audio || !audioFileName) {
+        return;
       }
+
+      nativeEngineRef.current?.setAudioElement(audio);
+
+      audio
+        .play()
+        .then(() => {
+          setAudioPlaying(true);
+        })
+        .catch((err) => {
+          console.error("[audio] restart playback failed:", err);
+          setAudioPlaying(false);
+          setAudioError(getAudioPlayErrorMessage(err));
+        });
     });
   }, [startLiveEngine, audioFileName]);
 
   const handleToggleAudioPlayback = () => {
     const audio = audioElementRef.current;
     if (!audio) return;
+
+    setAudioError(null);
+
     if (audio.paused) {
-      void audio.play();
-      setAudioPlaying(true);
+      nativeEngineRef.current?.setAudioElement(audio);
+
+      audio
+        .play()
+        .then(() => {
+          setAudioPlaying(true);
+        })
+        .catch((err) => {
+          console.error("[audio] play failed:", {
+            err,
+            src: audio.src,
+            networkState: audio.networkState,
+            readyState: audio.readyState,
+            mediaError: audio.error,
+          });
+
+          setAudioPlaying(false);
+          setAudioError("Audio playback failed in the WebView.");
+        });
     } else {
       audio.pause();
       setAudioPlaying(false);
@@ -587,7 +922,10 @@ function Kaleidomo() {
   const handleClearAudio = () => {
     rawAudioPeaksRef.current = null;
     normalizedAudioPeaksRef.current = null;
+    audioBufferRef.current = null;
     audioFileRef.current = null;
+    revokeAudioObjectUrl();
+    audioFilePathRef.current = null;
     if (audioElementRef.current) {
       audioElementRef.current.pause();
       audioElementRef.current.src = "";
@@ -598,6 +936,8 @@ function Kaleidomo() {
     if (engineRef.current) {
       try { engineRef.current.clear_audio_peaks(); } catch (_) { /* ignored */ }
     }
+    nativeEngineRef.current?.setPeaks(new Float32Array(0));
+    nativeEngineRef.current?.setAudioElement(null);
   };
 
 
@@ -1208,9 +1548,7 @@ function Kaleidomo() {
     try {
       console.log("settings.still_frame_ending frames = " + settings.still_frame_ending);
 
-      const audioFilePath = audioFileRef.current
-        ? (audioFileRef.current as File & { path?: string }).path ?? null
-        : null;
+      const audioFilePath = audioFilePathRef.current;
 
       const message = await invoke("generate_video", {
         path: imagePath,
@@ -1246,6 +1584,15 @@ function Kaleidomo() {
         hueStartOffset: settings.hue_start_offset,
         hueFn: settings.hue_fn,
         audioFilePath,
+
+        audioReactiveEnabled: settings.audioReactiveEnabled,
+        audioPeakSmoothing: settings.audioPeakSmoothing,
+        orientationBaseSpeed: settings.orientationBaseSpeed,
+        orientationPeakMultiplier: settings.orientationPeakMultiplier,
+        audioPeaks: Array.from(normalizedAudioPeaksRef.current ?? new Float32Array(0)),
+        heroCircleLeftX: settings.heroCircleLeftX,
+        heroCircleRightX: settings.heroCircleRightX,
+        heroCircleY: settings.heroCircleY,
       });
 
       alert(String(message));
@@ -1423,14 +1770,38 @@ function Kaleidomo() {
             <TabsContent value="audio" className="p-4 space-y-4">
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Live Preview</p>
 
+              {isTauriMacOS() && (
+                <div className="space-y-1">
+                  <p className="text-xs text-muted-foreground">Preview Resolution</p>
+                  <div className="flex gap-1">
+                    {([512, 720, 1080] as const).map((res) => (
+                      <button
+                        key={res}
+                        type="button"
+                        className={`flex-1 text-xs px-2 py-1 rounded border transition-colors ${nativePreviewRes === res ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background hover:bg-accent"}`}
+                        onClick={() => setNativePreviewRes(res)}
+                      >
+                        {res === 512 ? "Low" : res === 720 ? "Med" : "High"}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground opacity-60">
+                    {nativePreviewRes === 512 ? "512px · 20fps" : nativePreviewRes === 720 ? "720px · 15fps" : "1080px · 10fps"}
+                  </p>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <p className="text-xs text-muted-foreground">{audioFileName ? `Loaded: ${audioFileName}` : "No audio loaded"}</p>
                 {audioError && <p className="text-xs text-red-500">{audioError}</p>}
                 <div className="flex gap-2 flex-wrap">
-                  <label className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent cursor-pointer">
+                  <button
+                    type="button"
+                    className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent cursor-pointer"
+                    onClick={() => void handleAudioFileChange()}
+                  >
                     Import Audio
-                    <input type="file" accept="audio/*" className="hidden" onChange={(e) => void handleAudioFileChange(e)} />
-                  </label>
+                  </button>
                   {audioFileName && (
                     <>
                       <button type="button" className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent" onClick={handleToggleAudioPlayback}>
@@ -1458,17 +1829,32 @@ function Kaleidomo() {
               <hr className="opacity-20" />
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Orientation</p>
 
-              <NumberSliderInput label="Base Reorientation Speed" value={settings.orientationBaseSpeed} min={0} max={2} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, orientationBaseSpeed: v }))} unit="cycles/s" roundToInteger={false} />
-              <NumberSliderInput label="Peak Multiplier" value={settings.orientationPeakMultiplier} min={0} max={1} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, orientationPeakMultiplier: v }))} roundToInteger={false} />
-              <NumberSliderInput label="Orientation Amount" value={settings.audioOrientationAmount} min={0} max={1} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioOrientationAmount: v }))} roundToInteger={false} />
-              <NumberSliderInput label="Reorientation Amount" value={settings.audioReorientationAmount} min={0} max={1} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioReorientationAmount: v }))} roundToInteger={false} />
+              <NumberSliderInput label="Base Speed" value={settings.orientationBaseSpeed} min={0} max={500} step={1} onChange={(v) => setSettings((s) => ({ ...s, orientationBaseSpeed: v }))} unit="px/s" roundToInteger={false} />
+              <NumberSliderInput label="Beat Drive" value={settings.orientationPeakMultiplier} min={0} max={5} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, orientationPeakMultiplier: v }))} unit="circles/s" roundToInteger={false} />
 
               <hr className="opacity-20" />
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Peak Detection</p>
 
+              <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">Filter Slope</p>
+                <div className="flex gap-1">
+                  {([6, 12, 24, 48] as const).map((slope) => (
+                    <button
+                      key={slope}
+                      type="button"
+                      className={`flex-1 text-xs px-1 py-1 rounded border transition-colors ${settings.audioLowpassSlope === slope ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background hover:bg-accent"}`}
+                      onClick={() => setSettings((s) => ({ ...s, audioLowpassSlope: slope }))}
+                    >
+                      {slope}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground opacity-60">dB/octave</p>
+              </div>
+              <NumberSliderInput label="Filter Cutoff" value={settings.audioLowpassFreq} min={40} max={800} step={1} onChange={(v) => setSettings((s) => ({ ...s, audioLowpassFreq: v }))} unit="Hz" roundToInteger={true} />
               <NumberSliderInput label="Smoothing" value={settings.audioPeakSmoothing} min={0} max={0.98} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, audioPeakSmoothing: v }))} roundToInteger={false} />
-              <NumberSliderInput label="Floor" value={settings.audioPeakFloor} min={0} max={0.5} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioPeakFloor: v }))} roundToInteger={false} />
-              <NumberSliderInput label="Ceiling" value={settings.audioPeakCeiling} min={0.05} max={1.0} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioPeakCeiling: v }))} roundToInteger={false} />
+              <NumberSliderInput label="Noise Gate" value={settings.audioPeakFloor} min={0} max={0.5} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioPeakFloor: v }))} roundToInteger={false} />
+              <NumberSliderInput label="Peak Clip" value={settings.audioPeakCeiling} min={0.05} max={1.0} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioPeakCeiling: v }))} roundToInteger={false} />
             </TabsContent>
           </Tabs>
         </aside>
@@ -1511,16 +1897,30 @@ function Kaleidomo() {
 
           <div className="h-[70vh] min-h-0 shrink-0 flex flex-col items-center justify-center border rounded-xl bg-background p-8 relative shadow-sm overflow-hidden">
             <h3 className="absolute top-4 left-4 text-xs font-bold uppercase opacity-30">
-              3. Live Preview (WebGPU)
+              3. Live Preview {isTauriMacOS() ? "(Metal / Native)" : "(WebGPU)"}
             </h3>
             <div className="flex flex-col items-center gap-4 w-full h-full justify-center">
-              <canvas
-                ref={liveCanvasRef}
-                width={1920}
-                height={1080}
-                className="block max-w-full max-h-full object-contain shadow-2xl rounded-lg"
-                style={{ background: "#000" }}
-              />
+              {isTauriMacOS() ? (
+                /* Native Metal path: engine draws RGBA directly into this canvas.
+                   Canvas pixel dimensions are set by drawRgbaToCanvas on first frame.
+                   CSS object-contain scales it to fill the panel. */
+                <canvas
+                  ref={liveCanvasRef}
+                  width={512}
+                  height={288}
+                  className="block max-w-full max-h-full object-contain shadow-2xl rounded-lg"
+                  style={{ background: "#000", width: "100%", height: "100%" }}
+                />
+              ) : (
+                /* WASM WebGPU path: render directly into a <canvas> */
+                <canvas
+                  ref={liveCanvasRef}
+                  width={1920}
+                  height={1080}
+                  className="block max-w-full max-h-full object-contain shadow-2xl rounded-lg"
+                  style={{ background: "#000" }}
+                />
+              )}
               <div className="flex gap-2">
                 <button
                   type="button"
@@ -1542,12 +1942,24 @@ function Kaleidomo() {
                   onClick={() => {
                     if (engineRef.current) {
                       try { engineRef.current.stop_animation(); } catch (_) { /* ignored */ }
+                      try { engineRef.current.free?.(); } catch (_) { /* ignored */ }
+                      engineRef.current = null;
                     }
+                    if (nativeEngineRef.current) {
+                      nativeEngineRef.current.stop();
+                      nativeEngineRef.current = null;
+                    }
+                    setLivePreviewError(null);
                   }}
                 >
                   Stop
                 </button>
               </div>
+              {livePreviewError ? (
+                <p className="max-w-xl rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-center text-xs text-destructive">
+                  {livePreviewError}
+                </p>
+              ) : null}
             </div>
           </div>
 

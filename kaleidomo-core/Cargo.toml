@@ -80,9 +80,9 @@ features = [
 default = []
 soft_backend = []
 dev = []
-# Enable this only for a website build that intentionally wants WebGL2/GLES
-# compiled into wgpu. The live compute renderer still requires WebGPU storage
-# textures and will reject a GL adapter at runtime.
+# Optional compile-only feature for other future Wasm entry points that do not use
+# the live compute/storage-texture renderer. The live engine itself always requests
+# BROWSER_WEBGPU only, so this feature cannot make it silently run on GL.
 wasm_webgl_fallback = ["wgpu/webgl", "wgpu/gles"]
 
 # Required by wasm-pack / Trunk to emit both a .wasm and a native rlib

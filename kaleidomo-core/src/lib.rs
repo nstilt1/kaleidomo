@@ -87,6 +87,19 @@ pub struct VideoSettings {
     pub zoom_start_offset: f32,
     /// The amount of times that zoom will loop in the video.
     pub num_zoom_loops: u32,
+    
+    // Audio-reactive export fields
+    pub audio_reactive_enabled: bool,
+    pub audio_peak_smoothing: f32,
+    pub orientation_base_speed: f32,
+    pub orientation_peak_multiplier: f32,
+    pub audio_peaks: Vec<f32>,
+
+    // Hero circle / orientation export fields
+    pub hero_circle_left_x: f32,
+    pub hero_circle_right_x: f32,
+    pub hero_circle_y: f32,
+    pub hero_desired_left_rotation: f32,
 }
 
 /// Modulates a parameter using the frame number.

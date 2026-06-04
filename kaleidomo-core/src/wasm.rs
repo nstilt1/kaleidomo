@@ -406,22 +406,11 @@ impl LiveKaleidoscopeEngine {
         // compiled for some other website path, build kaleidomo-core with:
         //     --features wasm_webgl_fallback
         // The storage-texture gate below will still reject GL for this renderer.
-        let wasm_backends = {
-            #[cfg(all(target_arch = "wasm32", feature = "wasm_webgl_fallback"))]
-            {
-                wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL
-            }
+        #[cfg(target_arch = "wasm32")]
+        let wasm_backends = wgpu::Backends::BROWSER_WEBGPU;
 
-            #[cfg(all(target_arch = "wasm32", not(feature = "wasm_webgl_fallback")))]
-            {
-                wgpu::Backends::BROWSER_WEBGPU
-            }
-
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                wgpu::Backends::all()
-            }
-        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let wasm_backends = wgpu::Backends::all();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wasm_backends,
@@ -432,9 +421,33 @@ impl LiveKaleidoscopeEngine {
             display: Some(Box::new(WebDisplayHandle)),
         });
 
+        #[cfg(target_arch = "wasm32")]
+        {
+            let webgpu_context = canvas
+                .get_context("webgpu")
+                .map_err(|e| {
+                    JsValue::from_str(&format!(
+                        "WebGPU canvas preflight failed while calling canvas.getContext('webgpu'): {e:?}"
+                    ))
+                })?;
+
+            if webgpu_context.is_none() {
+                return Err(JsValue::from_str(
+                    "WebGPU canvas preflight failed: canvas.getContext('webgpu') returned null. \
+                     WebGPU is unavailable in this webview, or this canvas was already used \
+                     with another context type such as '2d', 'webgl', or 'webgl2'. \
+                     On macOS Tauri/WKWebView, use the native Metal/Tauri GPU path when \
+                     navigator.gpu or canvas WebGPU context creation is unavailable."
+                ));
+            }
+        }
+
         let surface = instance
             .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
-            .map_err(|e| JsValue::from_str(&format!("Surface creation failed: {e}")))?;
+            .map_err(|e| JsValue::from_str(&format!(
+                "Surface creation failed after WebGPU preflight succeeded: {e}. \
+                 Make sure the same canvas is not being reused by multiple live engine instances."
+            )))?;
 
         // wgpu 29 (PR #7330): request_adapter returns Result<Adapter> directly.
         // A single map_err + ? is sufficient; there is no Option to unwrap.
@@ -886,15 +899,23 @@ fn render_one_frame(
         }
     };
 
-    // Ratchet: only add to the accumulator when peak is rising
+    // Cumulative accumulator: frame-rate independent.
+    // orientationPeakMultiplier=1 means 1 full circle per second of peak=1 signal.
+    // Dividing by fps makes it independent of render rate.
+    // Wrap modulo 1.0 to keep the float small and prevent precision loss.
     {
-        let rise = (audio_peak - state.prev_smoothed_peak).max(0.0);
         let multiplier = state.video_settings.orientation_peak_multiplier;
-        state.accumulated_orientation_offset += rise * multiplier;
-        state.prev_smoothed_peak = audio_peak;
+        let fps_norm = (state.video_settings.fps.max(1)) as f32;
+        state.accumulated_orientation_offset =
+            (state.accumulated_orientation_offset + audio_peak * multiplier / fps_norm) % 1.0;
     }
 
     let vs = &state.video_settings;
+
+    // orientationBaseSpeed is in pixels/second of arc along the hero circle.
+    // Convert to cycles/sec: cycles = px/s / (2π * radius)
+    let hero_radius = ((vs.hero_circle_right_x - vs.hero_circle_left_x) * 0.5).max(1.0);
+    let base_speed_cycles = vs.orientation_base_speed / (2.0 * std::f32::consts::PI * hero_radius);
     let rotation = modulate_rotation_time(vs, elapsed_seconds_f32, base.triangle_rotation_rad);
     let hue      = modulate_hue(vs, frame, base.hue_rotation as f32);
     let zoom     = modulate_zoom_time(vs, elapsed_seconds_f32);
@@ -914,12 +935,9 @@ fn render_one_frame(
     let accumulated = state.accumulated_orientation_offset;
 
     let final_orientation = orientation
-        + elapsed_seconds_f32 * vs.orientation_base_speed   // continuous base drift
-        + audio_peak * vs.audio_orientation_amount           // transient per-frame wobble
-        + accumulated;                                        // permanent beat ratchet
-    let audio_rotation_offset =
-        audio_peak * vs.audio_reorientation_amount           // transient rotation wobble
-        + accumulated;                                        // same ratchet on rotation
+        + elapsed_seconds_f32 * base_speed_cycles      // continuous base drift (px/s → cycles/s)
+        + accumulated;                                  // permanent beat accumulator
+    let audio_rotation_offset = accumulated;            // rotation also tracks accumulator
 
     let (orientation_x, orientation_y, orientation_rotation) =
         modulation::orientation_to_hero_params_with_circle(

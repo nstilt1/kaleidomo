@@ -3,7 +3,7 @@ use tauri::Manager;
 use crate::fs;
 use std::path::PathBuf;
 
-const EULA_VERSION: &str = "2026-04-12";
+const EULA_VERSION: &str = "2026-06-03";
 const EULA_TEXT: &str = include_str!("../../resources/EULA.txt");
 
 #[derive(Debug, Clone, Serialize)]

@@ -366,6 +366,25 @@ pub fn radians_to_degrees(radians: f32) -> f32 {
     radians * (180.0 / std::f32::consts::PI)
 }
 
+#[inline]
+fn orientation_to_hero_params(
+    value: f32,
+    left_x: f32,
+    right_x: f32,
+    center_y: f32,
+    desired_left_rotation: f32,
+) -> (f32, f32, f32) {
+    let center_x = (left_x + right_x) * 0.5;
+    let radius = (right_x - left_x) * 0.5;
+    let angle = PI + value * 2.0 * PI;
+
+    (
+        center_x + angle.cos() * radius,
+        center_y + angle.sin() * radius,
+        desired_left_rotation + (angle - PI),
+    )
+}
+
 /// Modulates the zoom parameter.
 fn zoom_modulation(video_settings: &VideoSettings, frame: u32) -> f32 {
     modulate(
@@ -376,6 +395,119 @@ fn zoom_modulation(video_settings: &VideoSettings, frame: u32) -> f32 {
         video_settings.zoom_start_offset, 
         &video_settings.zoom_fn
     )
+}
+
+#[derive(Default)]
+struct VideoFrameModulationState {
+    smoothed_audio_peak: f32,
+    accumulated_orientation_offset: f32,
+}
+
+fn apply_video_frame_modulation(
+    settings: &mut KaleidoSettings,
+    video_settings: &VideoSettings,
+    frame: u32,
+    base_x: f32,
+    base_y: f32,
+    base_rotation: f32,
+    base_hue: f32,
+    base_zoom: f32,
+    state: &mut VideoFrameModulationState,
+) -> u32 {
+    let fps = video_settings.fps.max(1);
+    let elapsed_seconds = frame as f32 / fps as f32;
+
+    let audio_peak = if video_settings.audio_reactive_enabled
+        && !video_settings.audio_peaks.is_empty()
+    {
+        let raw_peak = video_settings
+            .audio_peaks
+            .get(frame as usize % video_settings.audio_peaks.len())
+            .copied()
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+
+        let smoothing = video_settings.audio_peak_smoothing.clamp(0.0, 0.999);
+
+        state.smoothed_audio_peak =
+            state.smoothed_audio_peak * smoothing + raw_peak * (1.0 - smoothing);
+
+        state.smoothed_audio_peak.clamp(0.0, 1.0)
+    } else {
+        state.smoothed_audio_peak = 0.0;
+        0.0
+    };
+
+    state.accumulated_orientation_offset = (
+        state.accumulated_orientation_offset
+            + audio_peak * video_settings.orientation_peak_multiplier / fps as f32
+    )
+        .rem_euclid(1.0);
+
+    let rotation_modulation = modulate(
+        video_settings,
+        frame,
+        base_rotation + degrees_to_radians(video_settings.rotation_range),
+        base_rotation,
+        video_settings.rotation_cycles,
+        video_settings.rotation_start_offset,
+        &video_settings.rotation_fn,
+    );
+
+    let rotation_offset = rotation_modulation - base_rotation;
+
+    let hero_radius = ((video_settings.hero_circle_right_x
+        - video_settings.hero_circle_left_x)
+        * 0.5)
+        .abs()
+        .max(1.0);
+
+    let base_speed_cycles =
+        video_settings.orientation_base_speed / (2.0 * PI * hero_radius);
+
+    let orientation_value = (
+        elapsed_seconds * base_speed_cycles + state.accumulated_orientation_offset
+    )
+        .rem_euclid(1.0);
+
+    let use_orientation = video_settings.orientation_base_speed != 0.0
+        || (video_settings.audio_reactive_enabled
+            && state.accumulated_orientation_offset != 0.0);
+
+    if use_orientation {
+        let (orientation_x, orientation_y, orientation_rotation) =
+            orientation_to_hero_params(
+                orientation_value,
+                video_settings.hero_circle_left_x,
+                video_settings.hero_circle_right_x,
+                video_settings.hero_circle_y,
+                video_settings.hero_desired_left_rotation,
+            );
+
+        settings.triangle_center_x = orientation_x;
+        settings.triangle_center_y = orientation_y;
+        settings.triangle_rotation_rad =
+            (orientation_rotation + rotation_offset).rem_euclid(2.0 * PI);
+    } else {
+        settings.triangle_center_x = base_x;
+        settings.triangle_center_y = base_y;
+        settings.triangle_rotation_rad =
+            rotation_modulation.rem_euclid(2.0 * PI);
+    }
+
+    settings.zoom = base_zoom * zoom_modulation(video_settings, frame);
+
+    modulate(
+        video_settings,
+        frame,
+        base_hue + video_settings.hue_range as f32,
+        base_hue,
+        video_settings.hue_cycles,
+        video_settings.hue_start_offset,
+        &video_settings.hue_fn,
+    )
+    .round()
+    .rem_euclid(360.0) as u32
 }
 
 /// Renders video with a CPU backend.
@@ -403,25 +535,36 @@ fn render_video<B: KaleidoBackend + DaydreamBackend>(
 
     //let triangle_rotation_delta = degrees_to_radians(video_settings.triangle_rotation_degrees_per_frame);
     let mut last_frame = YUVBuffer::new(settings.output_size_w as usize, settings.output_size_h as usize);
+    
+    let base_x = settings.triangle_center_x;
+    let base_y = settings.triangle_center_y;
+    let base_rotation = settings.triangle_rotation_rad;
+    let base_hue = settings.hue_rotation as f32;
+    let base_zoom = settings.zoom;
+
+    let mut modulation_state = VideoFrameModulationState::default();
+    
     for frame in 0..total_frames {
-        let rotation_modulation = modulate(
-            &video_settings, 
-            frame, 
-            degrees_to_radians(video_settings.rotation_range) + settings.triangle_rotation_rad, 
-            settings.triangle_rotation_rad, 
-            video_settings.rotation_cycles, 
-            video_settings.rotation_start_offset, 
-            &video_settings.rotation_fn,
+        let hue_rotation = apply_video_frame_modulation(
+            &mut settings,
+            &video_settings,
+            frame,
+            base_x,
+            base_y,
+            base_rotation,
+            base_hue,
+            base_zoom,
+            &mut modulation_state,
         );
-        settings.triangle_rotation_rad = (rotation_modulation).rem_euclid(2.0 * PI);
+
         rgba
             .par_chunks_exact_mut((settings.output_size_w * 4) as usize)
             .enumerate()
             .for_each(|(y, row)| {
-                inner_loop::<Register>(
+                inner_loop::<B>(
                     y,
                     row,
-                    zoom_modulation(&video_settings, frame),
+                    settings.zoom,
                     source,
                     &settings,
                     width_over_2,
@@ -430,18 +573,10 @@ fn render_video<B: KaleidoBackend + DaydreamBackend>(
                     slice_angle,
                     source.width(),
                     source.height(),
-                    f32::round(modulate(
-                        &video_settings, 
-                        frame, 
-                        video_settings.hue_range as f32 + settings.hue_rotation as f32, 
-                        settings.hue_rotation as f32, 
-                        video_settings.hue_cycles, 
-                        video_settings.hue_start_offset, 
-                        &video_settings.hue_fn)
-                    ) as u32
-                    //(settings.hue_rotation as f32 + frame as f32 * video_settings.hue_rotation_degrees_per_frame).round() as u32,
+                    hue_rotation,
                 );
             });
+
         last_frame = sink.write_rgba_frame(&rgba)?;
     }
 
@@ -564,7 +699,46 @@ pub fn render_video_gpu(
 
     let mut last_frame: Option<YUVBuffer> = None;
 
+    let mut smoothed_audio_peak = 0.0_f32;
+    let mut accumulated_orientation_offset = 0.0_f32;
+    
+    let base_x = settings.triangle_center_x;
+    let base_y = settings.triangle_center_y;
+    let base_rotation = settings.triangle_rotation_rad;
+    let base_hue = settings.hue_rotation as f32;
+    let base_zoom = settings.zoom;
+
+    let mut modulation_state = VideoFrameModulationState::default();
+    
     for frame in 0..total_frames {
+        let elapsed_seconds = frame as f32 / fps.max(1) as f32;
+
+        let audio_peak = if video_settings.audio_reactive_enabled
+            && !video_settings.audio_peaks.is_empty()
+        {
+            let raw_peak = video_settings
+                .audio_peaks
+                .get(frame as usize % video_settings.audio_peaks.len())
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+
+            let smoothing = video_settings.audio_peak_smoothing.clamp(0.0, 0.999);
+            smoothed_audio_peak =
+                smoothed_audio_peak * smoothing + raw_peak * (1.0 - smoothing);
+
+            smoothed_audio_peak.clamp(0.0, 1.0)
+        } else {
+            smoothed_audio_peak = 0.0;
+            0.0
+        };
+
+        accumulated_orientation_offset = (
+            accumulated_orientation_offset
+                + audio_peak * video_settings.orientation_peak_multiplier / fps.max(1) as f32
+        )
+            .rem_euclid(1.0);
+
         let rotation_modulation = modulate(
             &video_settings,
             frame,
@@ -575,21 +749,62 @@ pub fn render_video_gpu(
             &video_settings.rotation_fn,
         );
 
-        settings.triangle_rotation_rad = rotation_modulation.rem_euclid(2.0 * PI);
+        let rotation_offset = rotation_modulation - base_rotation;
 
-        settings.hue_rotation = modulate(
+        let hero_radius = ((video_settings.hero_circle_right_x
+            - video_settings.hero_circle_left_x)
+            * 0.5)
+            .abs()
+            .max(1.0);
+
+        let base_speed_cycles = video_settings.orientation_base_speed
+            / (2.0 * PI * hero_radius);
+
+        let orientation_value = (
+            elapsed_seconds * base_speed_cycles + accumulated_orientation_offset
+        )
+            .rem_euclid(1.0);
+
+        let use_orientation = video_settings.orientation_base_speed != 0.0
+            || (video_settings.audio_reactive_enabled
+                && accumulated_orientation_offset != 0.0);
+
+        if use_orientation {
+            let (orientation_x, orientation_y, orientation_rotation) =
+                orientation_to_hero_params(
+                    orientation_value,
+                    video_settings.hero_circle_left_x,
+                    video_settings.hero_circle_right_x,
+                    video_settings.hero_circle_y,
+                    video_settings.hero_desired_left_rotation,
+                );
+
+            settings.triangle_center_x = orientation_x;
+            settings.triangle_center_y = orientation_y;
+            settings.triangle_rotation_rad =
+                (orientation_rotation + rotation_offset).rem_euclid(2.0 * PI);
+        } else {
+            settings.triangle_center_x = base_x;
+            settings.triangle_center_y = base_y;
+            settings.triangle_rotation_rad =
+                rotation_modulation.rem_euclid(2.0 * PI);
+        }
+
+        let hue_rotation = apply_video_frame_modulation(
+            &mut settings,
             &video_settings,
             frame,
-            base_hue + video_settings.hue_range as f32,
+            base_x,
+            base_y,
+            base_rotation,
             base_hue,
-            video_settings.hue_cycles,
-            video_settings.hue_start_offset,
-            &video_settings.hue_fn,
-        )
-        .round()
-        .rem_euclid(360.0) as u32;
+            base_zoom,
+            &mut modulation_state,
+        );
 
-        settings.zoom = zoom_modulation(&video_settings, frame);
+        settings.hue_rotation = hue_rotation;
+
+        settings.zoom = base_zoom * zoom_modulation(&video_settings, frame);
 
         renderer.submit_frame(frame, &settings)?;
 
