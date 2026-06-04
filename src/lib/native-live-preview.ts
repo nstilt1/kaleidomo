@@ -392,12 +392,7 @@ export class NativeLivePreviewEngine {
     }
     if (this._inFlight) { this._schedule(); return; }
 
-    // Fps cap scaled to resolution to keep IPC memory pressure roughly constant.
-    // At 20fps: 512px≈35MB/s, 720px≈70MB/s, 1080px≈158MB/s.
-    // Cap 1080p at 10fps (≈79MB/s) and 720p at 15fps (≈53MB/s) to stay safe.
-    const maxDim = Math.max(base.outputSizeW, base.outputSizeH);
-    const resCap = maxDim >= 1000 ? 10 : maxDim >= 700 ? 15 : 20;
-    const targetFps = Math.min(Math.max(1, base.fps), resCap);
+    const targetFps = Math.min(Math.max(1, base.fps), 30);
     const minFrameMs = 1000 / targetFps;
     const sinceLastMs = nowMs - this._lastFrameMs;
     if (sinceLastMs < minFrameMs) {
