@@ -3,7 +3,9 @@ name: Release Build
 on:
   push:
     tags:
-      - 'v*.*.*'   # triggers on v0.10.0, v1.2.3, etc.
+      - 'v*.*.*'
+    paths:
+      - 'src-tauri/tauri.conf.json'
   workflow_dispatch:
     inputs:
       version:
