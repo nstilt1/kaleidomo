@@ -84,15 +84,17 @@ jobs:
 
       - name: Debug bundle output
         shell: pwsh
+        if: always()
         run: |
-          Write-Host "=== target/release/bundle ==="
-          if (Test-Path "src-tauri/target/release/bundle") {
-            Get-ChildItem -Recurse "src-tauri/target/release/bundle" | Select-Object FullName
+          Write-Host "=== Searching entire target dir for bundles ==="
+          if (Test-Path "src-tauri/target") {
+            Get-ChildItem -Recurse "src-tauri/target" -Include "*setup*.exe","*.msi","*.nsis" -ErrorAction SilentlyContinue | Select-Object FullName
+            Write-Host "=== Top-level target contents ==="
+            Get-ChildItem "src-tauri/target" | Select-Object Name
           } else {
-            Write-Host "bundle directory does not exist"
-            Write-Host "=== target/release contents ==="
-            Get-ChildItem "src-tauri/target/release" | Select-Object Name
+            Write-Host "src-tauri/target does not exist at all"
           }
+        continue-on-error: true
 
       - name: Locate NSIS installer
         shell: pwsh
@@ -231,6 +233,10 @@ jobs:
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Upload to S3 via release API (SigV4)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
         run: |
           # Step 1 – presign (SigV4 signed POST)
           PRESIGN=$($HOME/.local/bin/awscurl --service execute-api --region "$AWS_REGION" \
@@ -275,20 +281,13 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: release-rebuild-${{ github.run_id }}
 
-      - name: Trigger Amplify rebuild
+      - name: Trigger Amplify rebuild via webhook
         run: |
-          APP_ID=$(aws ssm get-parameter \
-            --name "/${{ secrets.APP_NAME }}/amplify-app-id" \
+          REBUILD_URL=$(aws ssm get-parameter \
+            --name "/abc-dev/rebuild-url" \
+            --with-decryption \
             --query "Parameter.Value" \
             --output text)
 
-          BRANCH="master"
-
-          JOB=$(aws amplify start-job \
-            --app-id "$APP_ID" \
-            --branch-name "$BRANCH" \
-            --job-type RELEASE \
-            --output json)
-
-          echo "Amplify job started: $(echo $JOB | python3 -c "import sys,json; j=json.load(sys.stdin); print(j['jobSummary']['jobId'])")"
-          echo "Console: https://${{ env.AWS_REGION }}.console.aws.amazon.com/amplify/home#/$APP_ID/$BRANCH"
+          curl -sf -X POST "$REBUILD_URL"
+          echo "Amplify rebuild triggered"
