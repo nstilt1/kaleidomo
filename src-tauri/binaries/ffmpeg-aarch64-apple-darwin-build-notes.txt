@@ -1,0 +1,6 @@
+FFmpeg ref: n7.1.1
+Target triple: aarch64-apple-darwin
+Configure flags: --disable-gpl --disable-nonfree --disable-doc --disable-debug
+                 --disable-ffplay --disable-ffprobe --enable-ffmpeg
+                 --enable-static --disable-shared
+                 --arch=arm64 --cc="clang -arch arm64"

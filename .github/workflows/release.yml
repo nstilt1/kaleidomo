@@ -6,6 +6,7 @@ on:
       - 'v*.*.*'
     paths:
       - 'src-tauri/tauri.conf.json'
+      - 'src-tauri/binaries/*'
   workflow_dispatch:
     inputs:
       version:

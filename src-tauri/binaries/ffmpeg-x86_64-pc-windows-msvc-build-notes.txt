@@ -1,0 +1,7 @@
+FFmpeg ref: n7.1.1
+Target triple: x86_64-pc-windows-msvc
+Cross-compiler: x86_64-w64-mingw32
+Configure flags: --disable-gpl --disable-nonfree --disable-doc --disable-debug
+                 --disable-ffplay --disable-ffprobe --enable-ffmpeg
+                 --enable-static --disable-shared
+                 --arch=x86_64 --target-os=mingw32 --cross-prefix=x86_64-w64-mingw32-
