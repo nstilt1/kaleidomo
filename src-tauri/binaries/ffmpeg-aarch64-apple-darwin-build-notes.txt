@@ -1,4 +1,0 @@
-FFmpeg ref: n7.1.1
-Target triple: aarch64-apple-darwin
-Configure line:
-./configure --prefix=/Users/somedooby/Documents/coding/apps/kaleidomo/src-tauri/ffmpeg-build/install-aarch64-apple-darwin --disable-gpl --disable-nonfree --disable-doc --disable-debug --disable-ffplay --disable-ffprobe --enable-ffmpeg --enable-static --disable-shared
