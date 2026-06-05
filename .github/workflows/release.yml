@@ -17,14 +17,17 @@ on:
         required: true
         type: string
 
-# Required for OIDC token issuance (AWS role assumption — no long-lived secrets)
+# Required for OIDC token issuance for the rebuild job. The release API itself
+# is protected by the app/admin bearer-token guard, so upload/update requests use
+# RELEASE_API_BEARER_TOKEN rather than SigV4.
 permissions:
-  id-token: write   # OIDC JWT
-  contents: read    # checkout
+  id-token: write
+  contents: read
 
 env:
   APP_NAME: Kaleidomo
   RELEASE_API: ${{ secrets.RELEASE_API_URL }}
+  RELEASE_API_BEARER_TOKEN: ${{ secrets.RELEASE_API_BEARER_TOKEN }}
   AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
   AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
 
@@ -39,10 +42,10 @@ jobs:
       - name: Derive version and slug from tauri.conf.json
         shell: bash
         run: |
-          VERSION=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json')); print(d['version'])")
-          SLUG=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json')); print(d['productName'].lower())")
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "SLUG=$SLUG" >> $GITHUB_ENV
+          VERSION=$(python -c "import json; d=json.load(open('src-tauri/tauri.conf.json', encoding='utf-8')); print(d['version'])")
+          SLUG=$(python -c "import json; d=json.load(open('src-tauri/tauri.conf.json', encoding='utf-8')); print(d['productName'].lower().replace(' ', '-'))")
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -61,7 +64,6 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install Node deps
-        working-directory: src-tauri/../
         run: bun install
 
       - name: Set Azure Trusted Signing env
@@ -86,24 +88,48 @@ jobs:
         shell: pwsh
         if: always()
         run: |
-          Write-Host "=== Searching entire target dir for bundles ==="
-          if (Test-Path "src-tauri/target") {
-            Get-ChildItem -Recurse "src-tauri/target" -Include "*setup*.exe","*.msi","*.nsis" -ErrorAction SilentlyContinue | Select-Object FullName
-            Write-Host "=== Top-level target contents ==="
-            Get-ChildItem "src-tauri/target" | Select-Object Name
-          } else {
-            Write-Host "src-tauri/target does not exist at all"
+          Write-Host "=== Bundle/search diagnostics ==="
+          foreach ($root in @("src-tauri/target", "target")) {
+            if (Test-Path $root) {
+              Write-Host "=== Searching $root ==="
+              Get-ChildItem -Recurse $root -Include "*.exe","*.msi","*.dmg","*.app.tar.gz" -ErrorAction SilentlyContinue |
+                Select-Object FullName
+            } else {
+              Write-Host "$root does not exist"
+            }
           }
         continue-on-error: true
 
       - name: Locate NSIS installer
         shell: pwsh
         run: |
-          $installer = Get-ChildItem -Recurse `
-            "src-tauri/target/release/bundle/nsis" `
-            -Filter "*-setup.exe" | Select-Object -First 1
+          $searchRoots = @("src-tauri/target", "target") | Where-Object { Test-Path $_ }
+          if ($searchRoots.Count -eq 0) {
+            Write-Error "No target directories found. Expected either src-tauri/target or target."
+            exit 1
+          }
+
+          $installer = $null
+          foreach ($root in $searchRoots) {
+            $installer = Get-ChildItem -Recurse $root -File -ErrorAction SilentlyContinue |
+              Where-Object {
+                $_.Extension -ieq ".exe" -and
+                ($_.FullName -match "[\\/]bundle[\\/]nsis[\\/]" -or $_.Name -match "setup|installer")
+              } |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+
+            if ($installer) { break }
+          }
+
+          if (-not $installer) {
+            Write-Error "No NSIS installer .exe found under src-tauri/target or target. Check the Debug bundle output step above."
+            exit 1
+          }
+
           echo "INSTALLER_PATH=$($installer.FullName)" >> $env:GITHUB_ENV
           echo "INSTALLER_NAME=$($installer.Name)" >> $env:GITHUB_ENV
+          Write-Host "Found NSIS installer: $($installer.FullName)"
 
       - name: Compute SHA-256
         shell: pwsh
@@ -114,41 +140,121 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
+          name: windows-nsis-installer
           path: ${{ env.INSTALLER_PATH }}
           retention-days: 1
 
-      - name: Upload to S3 via release API (SigV4)
-        shell: pwsh
+      - name: Upload NSIS to S3 and update content/downloads
+        shell: bash
+        env:
+          PLATFORM: windows
+          FILE_PATH: ${{ env.INSTALLER_PATH }}
+          FILE_NAME: ${{ env.INSTALLER_NAME }}
+          CONTENT_TYPE: application/octet-stream
         run: |
-          pip install awscurl --quiet
+          if [ -z "$RELEASE_API" ]; then
+            echo "Missing RELEASE_API_URL secret." >&2
+            exit 1
+          fi
+          if [ -z "$RELEASE_API_BEARER_TOKEN" ]; then
+            echo "Missing RELEASE_API_BEARER_TOKEN secret. This endpoint requires Authorization: Bearer <token>." >&2
+            exit 1
+          fi
 
-          # Step 1 – presign (SigV4 signed POST)
-          $presignJson = awscurl --service execute-api --region $env:AWS_REGION `
-            -X POST "$env:RELEASE_API/presign" `
-            -H "Content-Type: application/json" `
-            -d "{`"slug`":`"$env:SLUG`",`"version`":`"$env:VERSION`",`"platform`":`"windows`",`"filename`":`"$env:INSTALLER_NAME`",`"contentType`":`"application/octet-stream`"}"
-
-          Write-Host "Presign response: $presignJson"
-          $presign = $presignJson | ConvertFrom-Json
-
-          # Step 2 – PUT binary directly to S3
-          $bytes = [System.IO.File]::ReadAllBytes("$env:INSTALLER_PATH")
-          Invoke-RestMethod -Method PUT -Uri $presign.uploadUrl `
-            -Headers @{ "Content-Type" = "application/octet-stream" } -Body $bytes
-
-          # Step 3 – confirm (SigV4 signed POST)
-          awscurl --service execute-api --region $env:AWS_REGION `
-            -X POST "$env:RELEASE_API/confirm" `
-            -H "Content-Type: application/json" `
-            -d "{`"slug`":`"$env:SLUG`",`"version`":`"$env:VERSION`",`"platform`":`"windows`",`"new_key`":`"$($presign.key)`",`"new_url`":`"$($presign.publicUrl)`",`"sha256`":`"$env:FILE_SHA256`"}"
-
-          echo "Windows upload complete: $($presign.publicUrl)"
+          python << 'PYEOF'
+          import json
+          import mimetypes
+          import os
+          import urllib.error
+          import urllib.request
+          
+          api_base = os.environ["RELEASE_API"].rstrip("/")
+          token = os.environ["RELEASE_API_BEARER_TOKEN"]
+          slug = os.environ["SLUG"]
+          version = os.environ["VERSION"]
+          platform = os.environ["PLATFORM"]
+          filename = os.environ["FILE_NAME"]
+          filepath = os.environ["FILE_PATH"]
+          content_type = os.environ.get("CONTENT_TYPE") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+          sha256 = os.environ["FILE_SHA256"]
+          
+          
+          def request_json(path, payload):
+              body = json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(
+                  f"{api_base}/{path.lstrip('/')}",
+                  data=body,
+                  method="POST",
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                      "Accept": "application/json",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=120) as resp:
+                      raw = resp.read().decode("utf-8")
+                      try:
+                          return json.loads(raw)
+                      except json.JSONDecodeError as exc:
+                          raise RuntimeError(f"{path} returned non-JSON response: {raw[:1000]}") from exc
+              except urllib.error.HTTPError as exc:
+                  raw = exc.read().decode("utf-8", errors="replace")
+                  raise RuntimeError(f"{path} failed with HTTP {exc.code}: {raw[:2000]}") from exc
+          
+          
+          def put_file(upload_url):
+              size = os.path.getsize(filepath)
+              with open(filepath, "rb") as f:
+                  req = urllib.request.Request(
+                      upload_url,
+                      data=f,
+                      method="PUT",
+                      headers={
+                          "Content-Type": content_type,
+                          "Content-Length": str(size),
+                      },
+                  )
+                  try:
+                      with urllib.request.urlopen(req, timeout=1800) as resp:
+                          resp.read()
+                  except urllib.error.HTTPError as exc:
+                      raw = exc.read().decode("utf-8", errors="replace")
+                      raise RuntimeError(f"S3 PUT failed with HTTP {exc.code}: {raw[:2000]}") from exc
+              return size
+          
+          
+          presign = request_json("presign", {
+              "slug": slug,
+              "version": version,
+              "platform": platform,
+              "filename": filename,
+              "contentType": content_type,
+          })
+          print("Presign complete:", json.dumps({"key": presign.get("key"), "publicUrl": presign.get("publicUrl")}, indent=2))
+          
+          missing = [key for key in ("uploadUrl", "key", "publicUrl") if key not in presign]
+          if missing:
+              raise RuntimeError(f"Presign response missing required field(s): {missing}. Full response: {presign}")
+          
+          size = put_file(presign["uploadUrl"])
+          print(f"S3 upload complete: {size} bytes")
+          
+          confirm = request_json("confirm", {
+              "slug": slug,
+              "version": version,
+              "platform": platform,
+              "new_key": presign["key"],
+              "new_url": presign["publicUrl"],
+              "sha256": sha256,
+          })
+          print("content/downloads update complete:", json.dumps(confirm, indent=2))
+          PYEOF
 
   # ── macOS build ───────────────────────────────────────────────────────────
   build-macos:
     runs-on: macos-latest
-    needs: []   # run in parallel with windows
+    needs: []
 
     steps:
       - uses: actions/checkout@v4
@@ -156,10 +262,10 @@ jobs:
       - name: Derive version and slug from tauri.conf.json
         shell: bash
         run: |
-          VERSION=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json')); print(d['version'])")
-          SLUG=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json')); print(d['productName'].lower())")
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "SLUG=$SLUG" >> $GITHUB_ENV
+          VERSION=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json', encoding='utf-8')); print(d['version'])")
+          SLUG=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json', encoding='utf-8')); print(d['productName'].lower().replace(' ', '-'))")
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "SLUG=$SLUG" >> "$GITHUB_ENV"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -203,7 +309,7 @@ jobs:
             -S apple-tool:,apple: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
       - name: Build Tauri (universal macOS)
         env:
@@ -215,54 +321,168 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: bun run tauri:build -- --target universal-apple-darwin
 
+      - name: Debug bundle output
+        if: always()
+        run: |
+          echo "=== Bundle/search diagnostics ==="
+          for root in src-tauri/target target; do
+            if [ -d "$root" ]; then
+              echo "=== Searching $root ==="
+              find "$root" -type f \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.app" \) -print || true
+            else
+              echo "$root does not exist"
+            fi
+          done
+        continue-on-error: true
+
       - name: Locate DMG
         run: |
-          DMG=$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg \
-            -name "*.dmg" | head -1)
-          echo "DMG_PATH=$DMG" >> $GITHUB_ENV
-          echo "DMG_NAME=$(basename $DMG)" >> $GITHUB_ENV
+          DMG=""
+          for root in src-tauri/target target; do
+            if [ -d "$root" ]; then
+              DMG=$(find "$root" -type f -path "*/bundle/dmg/*.dmg" -print | sort | tail -n 1)
+              if [ -n "$DMG" ]; then
+                break
+              fi
+            fi
+          done
+
+          if [ -z "$DMG" ]; then
+            for root in src-tauri/target target; do
+              if [ -d "$root" ]; then
+                DMG=$(find "$root" -type f -name "*.dmg" -print | sort | tail -n 1)
+                if [ -n "$DMG" ]; then
+                  break
+                fi
+              fi
+            done
+          fi
+
+          if [ -z "$DMG" ]; then
+            echo "No DMG found under src-tauri/target or target. Check the Debug bundle output step above." >&2
+            exit 1
+          fi
+
+          echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"
+          echo "DMG_NAME=$(basename "$DMG")" >> "$GITHUB_ENV"
+          echo "Found DMG: $DMG"
 
       - name: Compute SHA-256
         run: |
-          echo "FILE_SHA256=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')" >> $GITHUB_ENV
+          echo "FILE_SHA256=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
 
-      - name: Install awscurl
-        run: |
-          brew install pipx
-          pipx install awscurl --force
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: ${{ env.DMG_PATH }}
+          retention-days: 1
 
-      - name: Upload to S3 via release API (SigV4)
+      - name: Upload DMG to S3 and update content/downloads
         env:
-          AWS_ACCESS_KEY_ID: ${{ env.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ env.AWS_SECRET_ACCESS_KEY }}
-          AWS_SESSION_TOKEN: ${{ env.AWS_SESSION_TOKEN }}
+          PLATFORM: macos
+          FILE_PATH: ${{ env.DMG_PATH }}
+          FILE_NAME: ${{ env.DMG_NAME }}
+          CONTENT_TYPE: application/x-apple-diskimage
         run: |
-          # Step 1 – presign (SigV4 signed POST)
-          PRESIGN=$($HOME/.local/bin/awscurl --service execute-api --region "$AWS_REGION" \
-            -X POST "$RELEASE_API/presign" \
-            -H "Content-Type: application/json" \
-            -d "{\"slug\":\"$SLUG\",\"version\":\"$VERSION\",\"platform\":\"macos\",\"filename\":\"$DMG_NAME\",\"contentType\":\"application/x-apple-diskimage\"}")
+          if [ -z "$RELEASE_API" ]; then
+            echo "Missing RELEASE_API_URL secret." >&2
+            exit 1
+          fi
+          if [ -z "$RELEASE_API_BEARER_TOKEN" ]; then
+            echo "Missing RELEASE_API_BEARER_TOKEN secret. This endpoint requires Authorization: Bearer <token>." >&2
+            exit 1
+          fi
 
-          echo "Presign response: $PRESIGN"
-
-          UPLOAD_URL=$(echo "$PRESIGN" | python3 -c "import sys,json; print(json.load(sys.stdin)['uploadUrl'])")
-          S3_KEY=$(echo "$PRESIGN"     | python3 -c "import sys,json; print(json.load(sys.stdin)['key'])")
-          PUBLIC_URL=$(echo "$PRESIGN" | python3 -c "import sys,json; print(json.load(sys.stdin)['publicUrl'])")
-
-          # Step 2 – PUT binary directly to S3
-          echo "Uploading $(du -sh "$DMG_PATH" | cut -f1)..."
-          curl -sf -X PUT "$UPLOAD_URL" \
-            -H "Content-Type: application/x-apple-diskimage" \
-            --data-binary "@$DMG_PATH"
-
-          # Step 3 – confirm (SigV4 signed POST)
-          $HOME/.local/bin/awscurl --service execute-api --region "$AWS_REGION" \
-            -X POST "$RELEASE_API/confirm" \
-            -H "Content-Type: application/json" \
-            -d "{\"slug\":\"$SLUG\",\"version\":\"$VERSION\",\"platform\":\"macos\",\"new_key\":\"$S3_KEY\",\"new_url\":\"$PUBLIC_URL\",\"sha256\":\"$FILE_SHA256\"}"
-
-          echo "macOS upload complete: $PUBLIC_URL"
+          python3 << 'PYEOF'
+          import json
+          import mimetypes
+          import os
+          import urllib.error
+          import urllib.request
+          
+          api_base = os.environ["RELEASE_API"].rstrip("/")
+          token = os.environ["RELEASE_API_BEARER_TOKEN"]
+          slug = os.environ["SLUG"]
+          version = os.environ["VERSION"]
+          platform = os.environ["PLATFORM"]
+          filename = os.environ["FILE_NAME"]
+          filepath = os.environ["FILE_PATH"]
+          content_type = os.environ.get("CONTENT_TYPE") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+          sha256 = os.environ["FILE_SHA256"]
+          
+          
+          def request_json(path, payload):
+              body = json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(
+                  f"{api_base}/{path.lstrip('/')}",
+                  data=body,
+                  method="POST",
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                      "Accept": "application/json",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=120) as resp:
+                      raw = resp.read().decode("utf-8")
+                      try:
+                          return json.loads(raw)
+                      except json.JSONDecodeError as exc:
+                          raise RuntimeError(f"{path} returned non-JSON response: {raw[:1000]}") from exc
+              except urllib.error.HTTPError as exc:
+                  raw = exc.read().decode("utf-8", errors="replace")
+                  raise RuntimeError(f"{path} failed with HTTP {exc.code}: {raw[:2000]}") from exc
+          
+          
+          def put_file(upload_url):
+              size = os.path.getsize(filepath)
+              with open(filepath, "rb") as f:
+                  req = urllib.request.Request(
+                      upload_url,
+                      data=f,
+                      method="PUT",
+                      headers={
+                          "Content-Type": content_type,
+                          "Content-Length": str(size),
+                      },
+                  )
+                  try:
+                      with urllib.request.urlopen(req, timeout=1800) as resp:
+                          resp.read()
+                  except urllib.error.HTTPError as exc:
+                      raw = exc.read().decode("utf-8", errors="replace")
+                      raise RuntimeError(f"S3 PUT failed with HTTP {exc.code}: {raw[:2000]}") from exc
+              return size
+          
+          
+          presign = request_json("presign", {
+              "slug": slug,
+              "version": version,
+              "platform": platform,
+              "filename": filename,
+              "contentType": content_type,
+          })
+          print("Presign complete:", json.dumps({"key": presign.get("key"), "publicUrl": presign.get("publicUrl")}, indent=2))
+          
+          missing = [key for key in ("uploadUrl", "key", "publicUrl") if key not in presign]
+          if missing:
+              raise RuntimeError(f"Presign response missing required field(s): {missing}. Full response: {presign}")
+          
+          size = put_file(presign["uploadUrl"])
+          print(f"S3 upload complete: {size} bytes")
+          
+          confirm = request_json("confirm", {
+              "slug": slug,
+              "version": version,
+              "platform": platform,
+              "new_key": presign["key"],
+              "new_url": presign["publicUrl"],
+              "sha256": sha256,
+          })
+          print("content/downloads update complete:", json.dumps(confirm, indent=2))
+          PYEOF
 
       - name: Cleanup keychain
         if: always()
