@@ -6,7 +6,8 @@ on:
       - 'v*.*.*'
     paths:
       - 'src-tauri/tauri.conf.json'
-      - 'src-tauri/binaries/*'
+      - 'src-tauri/binaries/**'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
     inputs:
       version:
@@ -78,21 +79,10 @@ jobs:
           echo "AZURE_CLIENT_ID=${{ secrets.AZURE_CLIENT_ID }}" >> $env:GITHUB_ENV
           echo "AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}" >> $env:GITHUB_ENV
           echo "AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> $env:GITHUB_ENV
-          echo "AZURE_CODE_SIGNING_ACCOUNT=${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}" >> $env:GITHUB_ENV
-          echo "AZURE_CODE_SIGNING_PROFILE=${{ secrets.AZURE_CODE_SIGNING_PROFILE }}" >> $env:GITHUB_ENV
-          echo "AZURE_CODE_SIGNING_ENDPOINT=${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}" >> $env:GITHUB_ENV
 
-      # Install the Azure Code Signing dlib (trusted signing) and signtool
-      - name: Install Azure Code Signing tool
+      - name: Install trusted-signing-cli
         shell: pwsh
-        run: |
-          # Install the Microsoft.Trusted.Signing.Client NuGet package which
-          # provides the dlib used as a signtool /dlib argument
-          nuget install Microsoft.Trusted.Signing.Client `
-            -Version 1.0.60 -OutputDirectory "$env:TEMP\tsc"
-          $dlib = Get-ChildItem "$env:TEMP\tsc" -Recurse -Filter "Azure.CodeSigning.Dlib.dll" |
-            Select-Object -First 1 -ExpandProperty FullName
-          echo "AZURE_SIGNING_DLIB=$dlib" >> $env:GITHUB_ENV
+        run: cargo install trusted-signing-cli --quiet
 
       - name: Build Tauri (Windows)
         shell: pwsh
@@ -242,7 +232,10 @@ jobs:
       - name: Upload to S3 via release API (SigV4)
         run: |
           # AWS credentials are already in the environment from the OIDC step.
-          pip3 install awscurl --quiet
+          brew install pipx
+          pipx install awscurl
+          pipx ensurepath
+          export PATH="$PATH:$HOME/.local/bin"
 
           # Step 1 – presign (SigV4 signed POST)
           PRESIGN=$(awscurl --service execute-api --region "$AWS_REGION" \
