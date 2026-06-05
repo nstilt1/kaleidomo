@@ -2,6 +2,8 @@ name: Release Build
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*.*.*'
     paths:
@@ -10,14 +12,9 @@ on:
       - '.github/workflows/release.yml'
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version to release (e.g. 0.10.0)'
+      confirm:
+        description: 'Type "yes" to confirm manual release'
         required: true
-        type: string
-      slug:
-        description: 'downloads.json slug to update'
-        required: true
-        default: 'kaleidomo'
         type: string
 
 # Required for OIDC token issuance (AWS role assumption — no long-lived secrets)
@@ -28,7 +25,6 @@ permissions:
 # Derive version from tag (v0.10.0 → 0.10.0) or from manual input
 env:
   APP_NAME: Kaleidomo
-  SLUG: ${{ github.event.inputs.slug || 'kaleidomo' }}
   RELEASE_API: ${{ secrets.RELEASE_API_URL }}   # e.g. https://api.example.com/v1/api/release-upload
   AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}      # from CDK output GitHubActionsRoleArn
   AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
@@ -41,15 +37,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Derive version
-        shell: pwsh
+      - name: Derive version and slug from tauri.conf.json
+        shell: bash
         run: |
-          if ("${{ github.event_name }}" -eq "push") {
-            $v = "${{ github.ref_name }}" -replace '^v',''
-          } else {
-            $v = "${{ github.event.inputs.version }}"
-          }
-          echo "VERSION=$v" >> $env:GITHUB_ENV
+          VERSION=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json')); print(d['version'])")
+          SLUG=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json')); print(d['productName'].lower())")
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "SLUG=$SLUG" >> $GITHUB_ENV
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -152,15 +146,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Derive version
+      - name: Derive version and slug from tauri.conf.json
+        shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            VERSION="${{ github.ref_name }}"
-            VERSION="${VERSION#v}"
-          else
-            VERSION="${{ github.event.inputs.version }}"
-          fi
+          VERSION=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json')); print(d['version'])")
+          SLUG=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json')); print(d['productName'].lower())")
           echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "SLUG=$SLUG" >> $GITHUB_ENV
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
