@@ -57,9 +57,10 @@ jobs:
           # Session name helps identify which run/job made the call in CloudTrail
           role-session-name: release-windows-${{ github.run_id }}
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2025-11-07
           targets: x86_64-pc-windows-msvc
 
       - name: Install Bun
@@ -177,9 +178,10 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: release-macos-${{ github.run_id }}
 
-      - name: Install Rust stable (universal targets)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2025-11-07
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Install Bun
