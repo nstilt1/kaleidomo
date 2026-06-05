@@ -33,7 +33,7 @@ env:
   AWS_REGION: us-east-1
 
 jobs:
-  # ── Windows build ─────────────────────────────────────────────────────────
+  # ── Windows build + sign ───────────────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
 
@@ -48,24 +48,24 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "SLUG=$SLUG" >> "$GITHUB_ENV"
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
-          role-session-name: release-windows-${{ github.run_id }}
-
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2025-11-07
           targets: x86_64-pc-windows-msvc
 
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Cache trusted-signing-cli binary
+        id: cache-tsc
+        uses: actions/cache@v4
+        with:
+          path: C:\Users\runneradmin\.cargo\bin\trusted-signing-cli.exe
+          # Change the version string here when you want to force a fresh install.
+          key: trusted-signing-cli-0.5.1-windows
 
-      - name: Install Node deps
-        run: bun install
+      - name: Install trusted-signing-cli
+        if: steps.cache-tsc.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: cargo install trusted-signing-cli --version 0.5.1 --quiet
 
       - name: Set Azure Trusted Signing env
         shell: pwsh
@@ -74,9 +74,24 @@ jobs:
           echo "AZURE_CLIENT_SECRET=${{ secrets.AZURE_CLIENT_SECRET }}" >> $env:GITHUB_ENV
           echo "AZURE_TENANT_ID=${{ secrets.AZURE_TENANT_ID }}" >> $env:GITHUB_ENV
 
-      - name: Install trusted-signing-cli
+      - name: Verify trusted-signing-cli is on PATH
         shell: pwsh
-        run: cargo install trusted-signing-cli --quiet
+        run: |
+          $tool = Get-Command trusted-signing-cli -ErrorAction SilentlyContinue
+          if (-not $tool) {
+            # Cargo bin dir may not be on PATH in pwsh — add it explicitly.
+            $cargoBin = "$env:USERPROFILE\.cargo\bin"
+            echo "$cargoBin" >> $env:GITHUB_PATH
+            Write-Host "Added $cargoBin to PATH"
+          } else {
+            Write-Host "trusted-signing-cli found at $($tool.Source)"
+          }
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Node deps
+        run: bun install
 
       - name: Build Tauri (Windows)
         shell: pwsh
@@ -138,23 +153,78 @@ jobs:
           $hash = (Get-FileHash "$env:INSTALLER_PATH" -Algorithm SHA256).Hash.ToLower()
           echo "FILE_SHA256=$hash" >> $env:GITHUB_ENV
 
-      - name: Upload artifact
+      # Upload the signed installer as a workflow artifact so the upload job
+      # can download it without rebuilding. Retention is 7 days — long enough
+      # to retry the upload job if the API call fails.
+      - name: Cache signed installer
         uses: actions/upload-artifact@v4
         with:
           name: windows-nsis-installer
           path: ${{ env.INSTALLER_PATH }}
-          retention-days: 1
+          retention-days: 7
+
+      # Write installer name, SHA, and slug/version to a metadata file so the
+      # upload job can read them without re-deriving them.
+      - name: Save build metadata
+        shell: bash
+        run: |
+          cat > windows-meta.env << EOF
+          INSTALLER_NAME=$INSTALLER_NAME
+          FILE_SHA256=$FILE_SHA256
+          VERSION=$VERSION
+          SLUG=$SLUG
+          EOF
+      - name: Cache build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-meta
+          path: windows-meta.env
+          retention-days: 7
+
+  # ── Windows upload (separate job so it can be re-run without rebuilding) ──
+  upload-windows:
+    needs: build-windows
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+          role-session-name: release-upload-windows-${{ github.run_id }}
+
+      - name: Download signed installer
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-nsis-installer
+          path: installer/
+
+      - name: Download build metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-meta
+          path: .
+
+      - name: Load build metadata
+        shell: bash
+        run: |
+          # Strip leading whitespace that heredoc may have introduced
+          sed 's/^ *//' windows-meta.env >> "$GITHUB_ENV"
+
+      - name: Resolve installer path
+        shell: bash
+        run: |
+          FILE=$(find installer/ -maxdepth 1 -type f | head -n 1)
+          echo "FILE_PATH=$FILE" >> "$GITHUB_ENV"
 
       - name: Install botocore
-        shell: bash
-        run: pip3 install botocore --quiet
+        run: pip3 install botocore --break-system-packages --quiet
 
       - name: Upload NSIS to S3 and update content/downloads
         shell: bash
         env:
           PLATFORM: windows
-          FILE_PATH: ${{ env.INSTALLER_PATH }}
-          FILE_NAME: ${{ env.INSTALLER_NAME }}
           CONTENT_TYPE: application/octet-stream
         run: |
           if [ -z "$RELEASE_API" ]; then
@@ -178,7 +248,7 @@ jobs:
           slug = os.environ["SLUG"]
           version = os.environ["VERSION"]
           platform = os.environ["PLATFORM"]
-          filename = os.environ["FILE_NAME"]
+          filename = os.environ["INSTALLER_NAME"]
           filepath = os.environ["FILE_PATH"]
           content_type = os.environ.get("CONTENT_TYPE") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
           sha256 = os.environ["FILE_SHA256"]
@@ -199,22 +269,10 @@ jobs:
                   "Accept": "application/json",
                   "Host": urlsplit(url).netloc,
               }
-
-              aws_req = botocore.awsrequest.AWSRequest(
-                  method="POST",
-                  url=url,
-                  data=body,
-                  headers=headers,
-              )
+              aws_req = botocore.awsrequest.AWSRequest(method="POST", url=url, data=body, headers=headers)
               botocore.auth.SigV4Auth(frozen_creds, "execute-api", aws_region).add_auth(aws_req)
               signed_headers = dict(aws_req.headers.items())
-
-              req = urllib.request.Request(
-                  url,
-                  data=body,
-                  method="POST",
-                  headers=signed_headers,
-              )
+              req = urllib.request.Request(url, data=body, method="POST", headers=signed_headers)
               try:
                   with urllib.request.urlopen(req, timeout=120) as resp:
                       raw = resp.read().decode("utf-8")
@@ -231,13 +289,8 @@ jobs:
               size = os.path.getsize(filepath)
               with open(filepath, "rb") as f:
                   req = urllib.request.Request(
-                      upload_url,
-                      data=f,
-                      method="PUT",
-                      headers={
-                          "Content-Type": content_type,
-                          "Content-Length": str(size),
-                      },
+                      upload_url, data=f, method="PUT",
+                      headers={"Content-Type": content_type, "Content-Length": str(size)},
                   )
                   try:
                       with urllib.request.urlopen(req, timeout=1800) as resp:
@@ -249,33 +302,26 @@ jobs:
 
 
           presign = signed_post_json("api/release-upload/presign", {
-              "slug": slug,
-              "version": version,
-              "platform": platform,
-              "filename": filename,
-              "contentType": content_type,
+              "slug": slug, "version": version, "platform": platform,
+              "filename": filename, "contentType": content_type,
           })
           print("Presign complete:", json.dumps({"key": presign.get("key"), "publicUrl": presign.get("publicUrl")}, indent=2))
 
-          missing = [key for key in ("uploadUrl", "key", "publicUrl") if key not in presign]
+          missing = [k for k in ("uploadUrl", "key", "publicUrl") if k not in presign]
           if missing:
-              raise RuntimeError(f"Presign response missing required field(s): {missing}. Full response: {presign}")
+              raise RuntimeError(f"Presign response missing field(s): {missing}. Full: {presign}")
 
           size = put_file(presign["uploadUrl"])
           print(f"S3 upload complete: {size} bytes")
 
           confirm = signed_post_json("api/release-upload/confirm", {
-              "slug": slug,
-              "version": version,
-              "platform": platform,
-              "new_key": presign["key"],
-              "new_url": presign["publicUrl"],
-              "sha256": sha256,
+              "slug": slug, "version": version, "platform": platform,
+              "new_key": presign["key"], "new_url": presign["publicUrl"], "sha256": sha256,
           })
           print("content/downloads update complete:", json.dumps(confirm, indent=2))
           PYEOF
 
-  # ── macOS build ───────────────────────────────────────────────────────────
+  # ── macOS build + sign ────────────────────────────────────────────────────
   build-macos:
     runs-on: macos-latest
 
@@ -288,13 +334,6 @@ jobs:
           SLUG=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json')); print(d['productName'].lower().replace(' ', '-'))")
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "SLUG=$SLUG" >> "$GITHUB_ENV"
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
-          role-session-name: release-macos-${{ github.run_id }}
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -349,9 +388,7 @@ jobs:
           for root in src-tauri/target target; do
             if [ -d "$root" ]; then
               DMG=$(find "$root" -type f -path "*/bundle/dmg/*.dmg" -print | sort | tail -n 1)
-              if [ -n "$DMG" ]; then
-                break
-              fi
+              [ -n "$DMG" ] && break
             fi
           done
 
@@ -359,15 +396,13 @@ jobs:
             for root in src-tauri/target target; do
               if [ -d "$root" ]; then
                 DMG=$(find "$root" -type f -name "*.dmg" -print | sort | tail -n 1)
-                if [ -n "$DMG" ]; then
-                  break
-                fi
+                [ -n "$DMG" ] && break
               fi
             done
           fi
 
           if [ -z "$DMG" ]; then
-            echo "No DMG found under src-tauri/target or target. Check the Debug bundle output step above." >&2
+            echo "No DMG found. Check the Debug bundle output step above." >&2
             exit 1
           fi
 
@@ -379,21 +414,74 @@ jobs:
         run: |
           echo "FILE_SHA256=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')" >> "$GITHUB_ENV"
 
-      - name: Upload artifact
+      # Upload the signed DMG as a workflow artifact so the upload job
+      # can download it without rebuilding. Retention is 7 days — long enough
+      # to retry the upload job if the API call fails.
+      - name: Cache signed DMG
         uses: actions/upload-artifact@v4
         with:
           name: macos-dmg
           path: ${{ env.DMG_PATH }}
-          retention-days: 1
+          retention-days: 7
+
+      - name: Save build metadata
+        run: |
+          cat > macos-meta.env << EOF
+          DMG_NAME=$DMG_NAME
+          FILE_SHA256=$FILE_SHA256
+          VERSION=$VERSION
+          SLUG=$SLUG
+          EOF
+      - name: Cache build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-meta
+          path: macos-meta.env
+          retention-days: 7
+
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain "$KEYCHAIN_PATH" || true
+
+  # ── macOS upload (separate job so it can be re-run without rebuilding) ────
+  upload-macos:
+    needs: build-macos
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+          role-session-name: release-upload-macos-${{ github.run_id }}
+
+      - name: Download signed DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
+          path: dmg/
+
+      - name: Download build metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-meta
+          path: .
+
+      - name: Load build metadata
+        run: sed 's/^ *//' macos-meta.env >> "$GITHUB_ENV"
+
+      - name: Resolve DMG path
+        run: |
+          FILE=$(find dmg/ -maxdepth 1 -type f | head -n 1)
+          echo "FILE_PATH=$FILE" >> "$GITHUB_ENV"
 
       - name: Install botocore
-        run: pip3 install botocore --quiet
+        run: pip3 install botocore --break-system-packages --quiet
 
       - name: Upload DMG to S3 and update content/downloads
         env:
           PLATFORM: macos
-          FILE_PATH: ${{ env.DMG_PATH }}
-          FILE_NAME: ${{ env.DMG_NAME }}
           CONTENT_TYPE: application/x-apple-diskimage
         run: |
           if [ -z "$RELEASE_API" ]; then
@@ -417,7 +505,7 @@ jobs:
           slug = os.environ["SLUG"]
           version = os.environ["VERSION"]
           platform = os.environ["PLATFORM"]
-          filename = os.environ["FILE_NAME"]
+          filename = os.environ["DMG_NAME"]
           filepath = os.environ["FILE_PATH"]
           content_type = os.environ.get("CONTENT_TYPE") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
           sha256 = os.environ["FILE_SHA256"]
@@ -438,22 +526,10 @@ jobs:
                   "Accept": "application/json",
                   "Host": urlsplit(url).netloc,
               }
-
-              aws_req = botocore.awsrequest.AWSRequest(
-                  method="POST",
-                  url=url,
-                  data=body,
-                  headers=headers,
-              )
+              aws_req = botocore.awsrequest.AWSRequest(method="POST", url=url, data=body, headers=headers)
               botocore.auth.SigV4Auth(frozen_creds, "execute-api", aws_region).add_auth(aws_req)
               signed_headers = dict(aws_req.headers.items())
-
-              req = urllib.request.Request(
-                  url,
-                  data=body,
-                  method="POST",
-                  headers=signed_headers,
-              )
+              req = urllib.request.Request(url, data=body, method="POST", headers=signed_headers)
               try:
                   with urllib.request.urlopen(req, timeout=120) as resp:
                       raw = resp.read().decode("utf-8")
@@ -470,13 +546,8 @@ jobs:
               size = os.path.getsize(filepath)
               with open(filepath, "rb") as f:
                   req = urllib.request.Request(
-                      upload_url,
-                      data=f,
-                      method="PUT",
-                      headers={
-                          "Content-Type": content_type,
-                          "Content-Length": str(size),
-                      },
+                      upload_url, data=f, method="PUT",
+                      headers={"Content-Type": content_type, "Content-Length": str(size)},
                   )
                   try:
                       with urllib.request.urlopen(req, timeout=1800) as resp:
@@ -488,39 +559,28 @@ jobs:
 
 
           presign = signed_post_json("api/release-upload/presign", {
-              "slug": slug,
-              "version": version,
-              "platform": platform,
-              "filename": filename,
-              "contentType": content_type,
+              "slug": slug, "version": version, "platform": platform,
+              "filename": filename, "contentType": content_type,
           })
           print("Presign complete:", json.dumps({"key": presign.get("key"), "publicUrl": presign.get("publicUrl")}, indent=2))
 
-          missing = [key for key in ("uploadUrl", "key", "publicUrl") if key not in presign]
+          missing = [k for k in ("uploadUrl", "key", "publicUrl") if k not in presign]
           if missing:
-              raise RuntimeError(f"Presign response missing required field(s): {missing}. Full response: {presign}")
+              raise RuntimeError(f"Presign response missing field(s): {missing}. Full: {presign}")
 
           size = put_file(presign["uploadUrl"])
           print(f"S3 upload complete: {size} bytes")
 
           confirm = signed_post_json("api/release-upload/confirm", {
-              "slug": slug,
-              "version": version,
-              "platform": platform,
-              "new_key": presign["key"],
-              "new_url": presign["publicUrl"],
-              "sha256": sha256,
+              "slug": slug, "version": version, "platform": platform,
+              "new_key": presign["key"], "new_url": presign["publicUrl"], "sha256": sha256,
           })
           print("content/downloads update complete:", json.dumps(confirm, indent=2))
           PYEOF
 
-      - name: Cleanup keychain
-        if: always()
-        run: security delete-keychain "$KEYCHAIN_PATH" || true
-
   # ── Trigger Amplify rebuild after both platforms upload ──────────────────
   rebuild-site:
-    needs: [build-windows, build-macos]
+    needs: [upload-windows, upload-macos]
     runs-on: ubuntu-latest
 
     steps:
