@@ -17,9 +17,9 @@ on:
         required: true
         type: string
 
-# Required for OIDC token issuance for the rebuild job. The release API itself
-# is protected by the app/admin bearer-token guard, so upload/update requests use
-# RELEASE_API_BEARER_TOKEN rather than SigV4.
+# Required for GitHub OIDC -> AWS role assumption. The release API calls below
+# are SigV4-signed with the assumed AWS role and require the Lambda/API route
+# to allow the trusted release role.
 permissions:
   id-token: write
   contents: read
@@ -27,7 +27,6 @@ permissions:
 env:
   APP_NAME: Kaleidomo
   RELEASE_API: ${{ secrets.RELEASE_API_URL }}
-  RELEASE_API_BEARER_TOKEN: ${{ secrets.RELEASE_API_BEARER_TOKEN }}
   AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
   AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
 
@@ -156,20 +155,20 @@ jobs:
             echo "Missing RELEASE_API_URL secret." >&2
             exit 1
           fi
-          if [ -z "$RELEASE_API_BEARER_TOKEN" ]; then
-            echo "Missing RELEASE_API_BEARER_TOKEN secret. This endpoint requires Authorization: Bearer <token>." >&2
-            exit 1
-          fi
-
           python << 'PYEOF'
           import json
           import mimetypes
           import os
           import urllib.error
           import urllib.request
-          
+          from urllib.parse import urlsplit
+
+          import botocore.auth
+          import botocore.awsrequest
+          import botocore.credentials
+          import botocore.session
+
           api_base = os.environ["RELEASE_API"].rstrip("/")
-          token = os.environ["RELEASE_API_BEARER_TOKEN"]
           slug = os.environ["SLUG"]
           version = os.environ["VERSION"]
           platform = os.environ["PLATFORM"]
@@ -177,19 +176,38 @@ jobs:
           filepath = os.environ["FILE_PATH"]
           content_type = os.environ.get("CONTENT_TYPE") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
           sha256 = os.environ["FILE_SHA256"]
-          
-          
-          def request_json(path, payload):
-              body = json.dumps(payload).encode("utf-8")
+          aws_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+
+          session = botocore.session.get_session()
+          creds = session.get_credentials()
+          if creds is None:
+              raise RuntimeError("No AWS credentials available for SigV4 signing. Did configure-aws-credentials run?")
+          frozen_creds = creds.get_frozen_credentials()
+
+
+          def signed_post_json(path, payload):
+              url = f"{api_base}/{path.lstrip('/')}"
+              body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+              headers = {
+                  "Content-Type": "application/json",
+                  "Accept": "application/json",
+                  "Host": urlsplit(url).netloc,
+              }
+
+              aws_req = botocore.awsrequest.AWSRequest(
+                  method="POST",
+                  url=url,
+                  data=body,
+                  headers=headers,
+              )
+              botocore.auth.SigV4Auth(frozen_creds, "execute-api", aws_region).add_auth(aws_req)
+              signed_headers = dict(aws_req.headers.items())
+
               req = urllib.request.Request(
-                  f"{api_base}/{path.lstrip('/')}",
+                  url,
                   data=body,
                   method="POST",
-                  headers={
-                      "Authorization": f"Bearer {token}",
-                      "Content-Type": "application/json",
-                      "Accept": "application/json",
-                  },
+                  headers=signed_headers,
               )
               try:
                   with urllib.request.urlopen(req, timeout=120) as resp:
@@ -201,8 +219,8 @@ jobs:
               except urllib.error.HTTPError as exc:
                   raw = exc.read().decode("utf-8", errors="replace")
                   raise RuntimeError(f"{path} failed with HTTP {exc.code}: {raw[:2000]}") from exc
-          
-          
+
+
           def put_file(upload_url):
               size = os.path.getsize(filepath)
               with open(filepath, "rb") as f:
@@ -222,9 +240,9 @@ jobs:
                       raw = exc.read().decode("utf-8", errors="replace")
                       raise RuntimeError(f"S3 PUT failed with HTTP {exc.code}: {raw[:2000]}") from exc
               return size
-          
-          
-          presign = request_json("presign", {
+
+
+          presign = signed_post_json("presign", {
               "slug": slug,
               "version": version,
               "platform": platform,
@@ -232,15 +250,15 @@ jobs:
               "contentType": content_type,
           })
           print("Presign complete:", json.dumps({"key": presign.get("key"), "publicUrl": presign.get("publicUrl")}, indent=2))
-          
+
           missing = [key for key in ("uploadUrl", "key", "publicUrl") if key not in presign]
           if missing:
               raise RuntimeError(f"Presign response missing required field(s): {missing}. Full response: {presign}")
-          
+
           size = put_file(presign["uploadUrl"])
           print(f"S3 upload complete: {size} bytes")
-          
-          confirm = request_json("confirm", {
+
+          confirm = signed_post_json("confirm", {
               "slug": slug,
               "version": version,
               "platform": platform,
@@ -389,20 +407,20 @@ jobs:
             echo "Missing RELEASE_API_URL secret." >&2
             exit 1
           fi
-          if [ -z "$RELEASE_API_BEARER_TOKEN" ]; then
-            echo "Missing RELEASE_API_BEARER_TOKEN secret. This endpoint requires Authorization: Bearer <token>." >&2
-            exit 1
-          fi
-
           python3 << 'PYEOF'
           import json
           import mimetypes
           import os
           import urllib.error
           import urllib.request
-          
+          from urllib.parse import urlsplit
+
+          import botocore.auth
+          import botocore.awsrequest
+          import botocore.credentials
+          import botocore.session
+
           api_base = os.environ["RELEASE_API"].rstrip("/")
-          token = os.environ["RELEASE_API_BEARER_TOKEN"]
           slug = os.environ["SLUG"]
           version = os.environ["VERSION"]
           platform = os.environ["PLATFORM"]
@@ -410,19 +428,38 @@ jobs:
           filepath = os.environ["FILE_PATH"]
           content_type = os.environ.get("CONTENT_TYPE") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
           sha256 = os.environ["FILE_SHA256"]
-          
-          
-          def request_json(path, payload):
-              body = json.dumps(payload).encode("utf-8")
+          aws_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+
+          session = botocore.session.get_session()
+          creds = session.get_credentials()
+          if creds is None:
+              raise RuntimeError("No AWS credentials available for SigV4 signing. Did configure-aws-credentials run?")
+          frozen_creds = creds.get_frozen_credentials()
+
+
+          def signed_post_json(path, payload):
+              url = f"{api_base}/{path.lstrip('/')}"
+              body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+              headers = {
+                  "Content-Type": "application/json",
+                  "Accept": "application/json",
+                  "Host": urlsplit(url).netloc,
+              }
+
+              aws_req = botocore.awsrequest.AWSRequest(
+                  method="POST",
+                  url=url,
+                  data=body,
+                  headers=headers,
+              )
+              botocore.auth.SigV4Auth(frozen_creds, "execute-api", aws_region).add_auth(aws_req)
+              signed_headers = dict(aws_req.headers.items())
+
               req = urllib.request.Request(
-                  f"{api_base}/{path.lstrip('/')}",
+                  url,
                   data=body,
                   method="POST",
-                  headers={
-                      "Authorization": f"Bearer {token}",
-                      "Content-Type": "application/json",
-                      "Accept": "application/json",
-                  },
+                  headers=signed_headers,
               )
               try:
                   with urllib.request.urlopen(req, timeout=120) as resp:
@@ -434,8 +471,8 @@ jobs:
               except urllib.error.HTTPError as exc:
                   raw = exc.read().decode("utf-8", errors="replace")
                   raise RuntimeError(f"{path} failed with HTTP {exc.code}: {raw[:2000]}") from exc
-          
-          
+
+
           def put_file(upload_url):
               size = os.path.getsize(filepath)
               with open(filepath, "rb") as f:
@@ -455,9 +492,9 @@ jobs:
                       raw = exc.read().decode("utf-8", errors="replace")
                       raise RuntimeError(f"S3 PUT failed with HTTP {exc.code}: {raw[:2000]}") from exc
               return size
-          
-          
-          presign = request_json("presign", {
+
+
+          presign = signed_post_json("presign", {
               "slug": slug,
               "version": version,
               "platform": platform,
@@ -465,15 +502,15 @@ jobs:
               "contentType": content_type,
           })
           print("Presign complete:", json.dumps({"key": presign.get("key"), "publicUrl": presign.get("publicUrl")}, indent=2))
-          
+
           missing = [key for key in ("uploadUrl", "key", "publicUrl") if key not in presign]
           if missing:
               raise RuntimeError(f"Presign response missing required field(s): {missing}. Full response: {presign}")
-          
+
           size = put_file(presign["uploadUrl"])
           print(f"S3 upload complete: {size} bytes")
-          
-          confirm = request_json("confirm", {
+
+          confirm = signed_post_json("confirm", {
               "slug": slug,
               "version": version,
               "platform": platform,
