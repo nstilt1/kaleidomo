@@ -246,7 +246,7 @@ jobs:
           slug = os.environ["SLUG"]
           version = os.environ["VERSION"]
           platform = os.environ["PLATFORM"]
-          filename = os.environ["FILE_NAME"]
+          filename = os.environ["INSTALLER_NAME"]
           filepath = os.environ["FILE_PATH"]
           content_type = os.environ.get("CONTENT_TYPE") or mimetypes.guess_type(filename)[0] or "application/octet-stream"
           sha256 = os.environ["FILE_SHA256"]
