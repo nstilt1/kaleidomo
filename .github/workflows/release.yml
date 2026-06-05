@@ -28,7 +28,9 @@ env:
   APP_NAME: Kaleidomo
   RELEASE_API: ${{ secrets.RELEASE_API_URL }}
   AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
-  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+  # Note: secrets expressions are not valid in top-level env, so AWS_REGION is
+  # set via a default here and overridden per-job if the secret is present.
+  AWS_REGION: us-east-1
 
 jobs:
   # ── Windows build ─────────────────────────────────────────────────────────
@@ -41,8 +43,8 @@ jobs:
       - name: Derive version and slug from tauri.conf.json
         shell: bash
         run: |
-          VERSION=$(python -c "import json; d=json.load(open('src-tauri/tauri.conf.json', encoding='utf-8')); print(d['version'])")
-          SLUG=$(python -c "import json; d=json.load(open('src-tauri/tauri.conf.json', encoding='utf-8')); print(d['productName'].lower().replace(' ', '-'))")
+          VERSION=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json', encoding='utf-8')); print(d['version'])")
+          SLUG=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json', encoding='utf-8')); print(d['productName'].lower().replace(' ', '-'))")
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "SLUG=$SLUG" >> "$GITHUB_ENV"
 
@@ -50,7 +52,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
           role-session-name: release-windows-${{ github.run_id }}
 
       - name: Install Rust nightly
@@ -143,6 +145,10 @@ jobs:
           path: ${{ env.INSTALLER_PATH }}
           retention-days: 1
 
+      - name: Install botocore
+        shell: bash
+        run: pip3 install botocore --quiet
+
       - name: Upload NSIS to S3 and update content/downloads
         shell: bash
         env:
@@ -155,7 +161,7 @@ jobs:
             echo "Missing RELEASE_API_URL secret." >&2
             exit 1
           fi
-          python << 'PYEOF'
+          python3 << 'PYEOF'
           import json
           import mimetypes
           import os
@@ -242,7 +248,7 @@ jobs:
               return size
 
 
-          presign = signed_post_json("presign", {
+          presign = signed_post_json("api/release-upload/presign", {
               "slug": slug,
               "version": version,
               "platform": platform,
@@ -258,7 +264,7 @@ jobs:
           size = put_file(presign["uploadUrl"])
           print(f"S3 upload complete: {size} bytes")
 
-          confirm = signed_post_json("confirm", {
+          confirm = signed_post_json("api/release-upload/confirm", {
               "slug": slug,
               "version": version,
               "platform": platform,
@@ -272,16 +278,14 @@ jobs:
   # ── macOS build ───────────────────────────────────────────────────────────
   build-macos:
     runs-on: macos-latest
-    needs: []
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Derive version and slug from tauri.conf.json
-        shell: bash
         run: |
-          VERSION=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json', encoding='utf-8')); print(d['version'])")
-          SLUG=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json', encoding='utf-8')); print(d['productName'].lower().replace(' ', '-'))")
+          VERSION=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json')); print(d['version'])")
+          SLUG=$(python3 -c "import json; d=json.load(open('src-tauri/tauri.conf.json')); print(d['productName'].lower().replace(' ', '-'))")
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "SLUG=$SLUG" >> "$GITHUB_ENV"
 
@@ -289,14 +293,14 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
           role-session-name: release-macos-${{ github.run_id }}
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2025-11-07
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
@@ -304,37 +308,23 @@ jobs:
       - name: Install Node deps
         run: bun install
 
-      - name: Import Apple signing certificate
+      - name: Import signing certificate
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
-          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
-          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/cert.p12
-
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          security import "$RUNNER_TEMP/cert.p12" \
-            -k "$KEYCHAIN_PATH" \
-            -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign
-
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-          security set-key-partition-list \
-            -S apple-tool:,apple: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
           echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          security create-keychain -p "" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > /tmp/cert.p12
+          security import /tmp/cert.p12 -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "" "$KEYCHAIN_PATH"
 
-      - name: Build Tauri (universal macOS)
+      - name: Build Tauri (macOS universal)
         env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: bun run tauri:build -- --target universal-apple-darwin
@@ -395,6 +385,9 @@ jobs:
           name: macos-dmg
           path: ${{ env.DMG_PATH }}
           retention-days: 1
+
+      - name: Install botocore
+        run: pip3 install botocore --quiet
 
       - name: Upload DMG to S3 and update content/downloads
         env:
@@ -494,7 +487,7 @@ jobs:
               return size
 
 
-          presign = signed_post_json("presign", {
+          presign = signed_post_json("api/release-upload/presign", {
               "slug": slug,
               "version": version,
               "platform": platform,
@@ -510,7 +503,7 @@ jobs:
           size = put_file(presign["uploadUrl"])
           print(f"S3 upload complete: {size} bytes")
 
-          confirm = signed_post_json("confirm", {
+          confirm = signed_post_json("api/release-upload/confirm", {
               "slug": slug,
               "version": version,
               "platform": platform,
@@ -535,7 +528,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
           role-session-name: release-rebuild-${{ github.run_id }}
 
       - name: Trigger Amplify rebuild via webhook
