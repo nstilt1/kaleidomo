@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Kaliedomo",
+        "title": "Kaliedomo", 
         "width": 800,
         "height": 600
       }
