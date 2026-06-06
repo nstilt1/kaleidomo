@@ -84,7 +84,7 @@ pub async fn is_new_version_available(state: tauri::State<'_, AppState>, app: ta
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
     let should_fetch = match *last {
-        Some(ts) => now - ts >= Duration::from_hours(1).as_secs(),
+        Some(ts) => now - ts >= Duration::from_hours(48).as_secs(),
         None => true
     };
 

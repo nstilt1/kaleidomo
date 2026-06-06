@@ -1,7 +1,7 @@
 const PRODUCT_NAME: &str = "Kaleidomo";
-const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/dashboard/downloads";
-const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/shop/kaleidomo-kaleidoscope-generator/";
-const VERSION_URL: &str = "https://0-plugin-versioning.s3.us-east-1.amazonaws.com/kaleidomo-version.txt";
+const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/downloads";
+const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/downloads/kaleidomo";
+const VERSION_URL: &str = "https://hephaestus.alteredbrainchemistry.com/downloads/kaleidomo-version.txt";
 
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::ShellExt;
