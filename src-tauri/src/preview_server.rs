@@ -38,6 +38,8 @@ use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+use crate::{log_error, log_info, log_warn};
+
 // ---------------------------------------------------------------------------
 // Request type (mirrors FrameParams in native-live-preview.ts)
 // ---------------------------------------------------------------------------
@@ -112,22 +114,22 @@ pub async fn start(gpu_arc: Arc<Mutex<Option<GpuBackend>>>) -> u16 {
         .expect("failed to bind preview WebSocket server");
 
     let port = listener.local_addr().unwrap().port();
-    log::info!("[preview_server] listening on 127.0.0.1:{port}");
+    log_info!("[preview_server] listening on 127.0.0.1:{port}");
 
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    log::info!("[preview_server] client connected from {addr}");
+                    log_info!("[preview_server] client connected from {addr}");
                     let gpu = Arc::clone(&gpu_arc);
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(stream, gpu).await {
-                            log::warn!("[preview_server] connection closed: {e}");
+                            log_warn!("[preview_server] connection closed: {e}");
                         }
                     });
                 }
                 Err(e) => {
-                    log::error!("[preview_server] accept error: {e}");
+                    log_error!("[preview_server] accept error: {e}");
                 }
             }
         }
@@ -180,7 +182,7 @@ async fn handle_connection(
             Ok(Some(m)) => m,
             Ok(None) => break, // connection closed
             Err(e) => {
-                log::warn!("[preview_server] read error: {e}");
+                log_warn!("[preview_server] read error: {e}");
                 break;
             }
         };
@@ -189,7 +191,7 @@ async fn handle_connection(
         let req: FrameRequest = match serde_json::from_str(&msg) {
             Ok(r) => r,
             Err(e) => {
-                log::warn!("[preview_server] bad request JSON: {e}");
+                log_warn!("[preview_server] bad request JSON: {e}");
                 continue;
             }
         };
@@ -211,7 +213,7 @@ async fn handle_connection(
     let (jpeg_result, returned_scratch) = match render_result {
         Ok(v) => v,
         Err(e) => {
-            log::error!("[preview_server] spawn_blocking error: {e}");
+            log_error!("[preview_server] spawn_blocking error: {e}");
             scratch = Some(PreviewScratch::default());
             write_ws_binary_frame(&mut stream, &[]).await?;
             continue;
@@ -223,7 +225,7 @@ async fn handle_connection(
     let jpeg = match jpeg_result {
         Ok(j) => j,
         Err(e) => {
-            log::error!("[preview_server] render error: {e}");
+            log_error!("[preview_server] render error: {e}");
             write_ws_binary_frame(&mut stream, &[]).await?;
             continue;
         }
@@ -235,7 +237,7 @@ async fn handle_connection(
         let frame_no = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 
         if frame_no % 300 == 0 {
-            log::info!(
+            log_info!(
                 "[preview_server] frame={} jpeg={} bytes output={}x{}",
                 frame_no,
                 jpeg.len(),

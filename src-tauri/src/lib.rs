@@ -108,6 +108,21 @@ macro_rules! log_info {
     }};
 }
 
+#[cfg(feature = "logging")]
+#[macro_export]
+macro_rules! log_warn {
+    ($($arg:tt)*) => {{
+        log::warn!("{}", &::std::format!($($arg)*))
+    }};
+}
+
+#[macro_export]
+#[cfg(not(feature = "logging"))]
+macro_rules! log_warn {
+    ($($arg:tt)*) => {{
+    }};
+}
+
 use std::backtrace::Backtrace;
 use std::panic;
 
@@ -718,8 +733,8 @@ async fn generate_video(
         if !audio_path.is_empty() {
             let video_path_str = file_path.to_string();
 
-            log::info!("[generate_video] audio_file_path={audio_path}");
-            log::info!("[generate_video] video_path={video_path_str}");
+            log_info!("[generate_video] audio_file_path={audio_path}");
+            log_info!("[generate_video] video_path={video_path_str}");
 
             if !std::path::Path::new(&audio_path).exists() {
                 return Err(format!("Audio file does not exist: {audio_path}"));

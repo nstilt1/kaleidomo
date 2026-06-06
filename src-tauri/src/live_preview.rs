@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use kaleidomo_core::{KaleidoSettings, KaleidoType};
 use tauri::{ipc::Response, State};
 
-use crate::AppState;
+use crate::{AppState, log_error, log_info};
 
 // ---------------------------------------------------------------------------
 // Parameter struct
@@ -111,7 +111,7 @@ pub async fn render_live_preview_frame(
         Arc::clone(&state.gpu_arc);
 
     let body = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        log::info!(
+        log_info!(
             "[live_preview] rendering {}x{} x={:.1} y={:.1} rot={:.4} zoom={:.3} hue={}",
             w, h, settings.triangle_center_x, settings.triangle_center_y,
             settings.triangle_rotation_rad, settings.zoom, settings.hue_rotation,
@@ -132,7 +132,7 @@ pub async fn render_live_preview_frame(
 
         gpu.render_into_buffer(&settings, &mut body[8..])
             .map_err(|e| {
-                log::error!("[live_preview] GPU render failed: {e}");
+                log_error!("[live_preview] GPU render failed: {e}");
                 format!("GPU render failed: {e}")
             })?;
 
