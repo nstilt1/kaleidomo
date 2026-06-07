@@ -1,5 +1,5 @@
 const PRODUCT_NAME: &str = "Kaleidomo";
-const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/downloads";
+const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/downloads/kaleidomo";
 const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/downloads/kaleidomo";
 const VERSION_URL: &str = "https://hephaestus.alteredbrainchemistry.com/downloads/kaleidomo-version.txt";
 
