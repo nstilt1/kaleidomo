@@ -937,7 +937,6 @@ fn render_one_frame(
     let final_orientation = orientation
         + elapsed_seconds_f32 * base_speed_cycles      // continuous base drift (px/s → cycles/s)
         + accumulated;                                  // permanent beat accumulator
-    let audio_rotation_offset = accumulated;            // rotation also tracks accumulator
 
     let (orientation_x, orientation_y, orientation_rotation) =
         modulation::orientation_to_hero_params_with_circle(
@@ -951,7 +950,8 @@ fn render_one_frame(
     let frame_settings = KaleidoSettings {
         triangle_center_x: orientation_x,
         triangle_center_y: orientation_y,
-        triangle_rotation_rad: orientation_rotation + (rotation - base.triangle_rotation_rad) + audio_rotation_offset,
+        triangle_rotation_rad: (orientation_rotation + (rotation - base.triangle_rotation_rad))
+            .rem_euclid(2.0 * PI),
         hue_rotation: hue,
         zoom,
         output_size_w: state.canvas_width,
