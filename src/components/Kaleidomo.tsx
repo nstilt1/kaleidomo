@@ -412,8 +412,22 @@ function Kaleidomo() {
       vs.hue_start_offset = settings.hue_start_offset;
       vs.set_hue_fn(settings.hue_fn);
       vs.fps = settings.fps;
-      vs.zoom_max = settings.zoom_max;
-      vs.zoom_min = settings.zoom_min;
+      vs.zoom_max = getEffectiveZoomAndSourceRadius(
+        settings.zoom_max,
+        settings.resolution,
+        imgWidth,
+        imgHeight,
+        settings.tile_count,
+        wedgePickerMode
+      ).effectiveZoom;
+      vs.zoom_min = getEffectiveZoomAndSourceRadius(
+        settings.zoom_min,
+        settings.resolution,
+        imgWidth,
+        imgHeight,
+        settings.tile_count,
+        wedgePickerMode
+      ).effectiveZoom;
       vs.set_zoom_fn(settings.zoom_fn);
       vs.zoom_start_offset = settings.zoom_start_offset;
       vs.num_zoom_loops = settings.num_zoom_loops;
@@ -624,6 +638,40 @@ function Kaleidomo() {
         engineRef.current = null;
       }
 
+      // Size the canvas to match the project's aspect ratio (capped to the
+      // selected preview resolution), so the WASM engine's WGPU surface —
+      // and therefore output_size_w/output_size_h used for wedge geometry —
+      // matches what generate_video will produce. Without this the canvas
+      // stays at its hardcoded 1920x1080 attributes regardless of ratio_num/
+      // ratio_den, so the live preview frames a different aspect ratio than
+      // the final video.
+      {
+        const NATIVE_PREVIEW_MAX_PX = nativePreviewRes;
+        const num = Math.max(1, settings.ratio_num);
+        const den = Math.max(1, settings.ratio_den);
+        let w: number, h: number;
+        if (num >= den) {
+          h = Math.min(Math.max(1, settings.resolution), NATIVE_PREVIEW_MAX_PX);
+          w = Math.round((h * num) / den / 8) * 8;
+          h = Math.floor((w * den) / num);
+        } else {
+          w = Math.min(Math.max(1, settings.resolution), NATIVE_PREVIEW_MAX_PX);
+          h = Math.floor((w * den) / num);
+          w = Math.round(w / 8) * 8;
+          h = Math.floor((w * den) / num);
+        }
+        if (w > NATIVE_PREVIEW_MAX_PX) {
+          w = Math.floor(NATIVE_PREVIEW_MAX_PX / 8) * 8;
+          h = Math.floor((w * den) / num);
+        }
+        if (h > NATIVE_PREVIEW_MAX_PX) {
+          h = NATIVE_PREVIEW_MAX_PX;
+          w = Math.round((h * num) / den / 8) * 8;
+        }
+        canvas.width = Math.max(8, w);
+        canvas.height = Math.max(8, h);
+      }
+
       const engine = await new wasmModule.LiveKaleidoscopeEngine(canvas);
       engine.__vsModule = wasmModule;
       engineRef.current = engine;
@@ -650,8 +698,22 @@ function Kaleidomo() {
       vs.hue_start_offset = settings.hue_start_offset;
       vs.set_hue_fn(settings.hue_fn);
       vs.fps = settings.fps;
-      vs.zoom_max = settings.zoom_max;
-      vs.zoom_min = settings.zoom_min;
+      vs.zoom_max = getEffectiveZoomAndSourceRadius(
+        settings.zoom_max,
+        settings.resolution,
+        imgWidth,
+        imgHeight,
+        settings.tile_count,
+        wedgePickerMode
+      ).effectiveZoom;
+      vs.zoom_min = getEffectiveZoomAndSourceRadius(
+        settings.zoom_min,
+        settings.resolution,
+        imgWidth,
+        imgHeight,
+        settings.tile_count,
+        wedgePickerMode
+      ).effectiveZoom;
       vs.set_zoom_fn(settings.zoom_fn);
       vs.zoom_start_offset = settings.zoom_start_offset;
       vs.num_zoom_loops = settings.num_zoom_loops;
@@ -701,7 +763,7 @@ function Kaleidomo() {
       setLivePreviewError(message);
       console.error("startLiveEngine failed", e);
     }
-  }, [imageSrc, imagePath, startNativeLiveEngine, settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode]);
+  }, [imageSrc, imagePath, startNativeLiveEngine, settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode, nativePreviewRes]);
 
   // Sync settings changes to engine (no restart)
   useEffect(() => {
