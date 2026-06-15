@@ -102,6 +102,22 @@ build_windows() {
 
   make distclean >/dev/null 2>&1 || true
 
+  # NOTE: The previous version of this script used
+  #   --disable-w32threads --enable-pthreads
+  # which links against MinGW-w64's winpthreads. On Homebrew's mingw-w64,
+  # the import library for winpthreads commonly resolves to the *shared*
+  # libwinpthread-1.dll rather than a static .a, producing an .exe that
+  # depends on libwinpthread-1.dll at runtime. Since Tauri sidecars are
+  # shipped as a single bare executable (no accompanying DLLs), this
+  # results in STATUS_DLL_NOT_FOUND (exit code -1073741511 / 0xC0000135)
+  # on Windows, with the process crashing before main() runs and producing
+  # no stdout/stderr.
+  #
+  # Fix: use Win32 native threads (--enable-w32threads, the MinGW default
+  # and recommended option for Windows builds) instead of pthreads, and
+  # pass -static to the linker so any remaining MinGW runtime libs
+  # (libgcc, libstdc++, winpthread if pulled in transitively) are linked
+  # statically into the executable.
   ./configure \
     --prefix="$PREFIX" \
     --disable-gpl \
@@ -117,13 +133,32 @@ build_windows() {
     --target-os=mingw32 \
     --cross-prefix="${CROSS}-" \
     --pkg-config=pkg-config \
-    --disable-w32threads \
-    --enable-pthreads
+    --enable-w32threads \
+    --disable-pthreads \
+    --extra-ldflags="-static -static-libgcc -static-libstdc++"
 
   make -j"$JOBS"
   make install
 
   cp "$PREFIX/bin/ffmpeg.exe" "$SRC_TAURI_DIR/binaries/ffmpeg-${TRIPLE}.exe"
+
+  # Sanity check: make sure the resulting binary doesn't depend on any
+  # MinGW runtime DLLs that won't be present on a bare Windows install or
+  # alongside a Tauri sidecar. Requires x86_64-w64-mingw32-objdump.
+  if command -v "${CROSS}-objdump" >/dev/null 2>&1; then
+    echo ""
+    echo "Checking DLL dependencies of ffmpeg-${TRIPLE}.exe:"
+    "${CROSS}-objdump" -p "$SRC_TAURI_DIR/binaries/ffmpeg-${TRIPLE}.exe" \
+      | grep -i "DLL Name" || true
+    if "${CROSS}-objdump" -p "$SRC_TAURI_DIR/binaries/ffmpeg-${TRIPLE}.exe" \
+        | grep -iE "libwinpthread|libgcc|libstdc\+\+|libssp" ; then
+      echo "WARNING: binary still depends on a MinGW runtime DLL above." >&2
+      echo "         The sidecar will fail with STATUS_DLL_NOT_FOUND unless" >&2
+      echo "         that DLL is bundled alongside it on Windows." >&2
+    else
+      echo "OK: no MinGW runtime DLL dependencies found."
+    fi
+  fi
 
   cat > "$SRC_TAURI_DIR/binaries/ffmpeg-${TRIPLE}-build-notes.txt" <<EOF
 FFmpeg ref: $FFMPEG_REF
@@ -133,6 +168,8 @@ Configure flags: --disable-gpl --disable-nonfree --disable-doc --disable-debug
                  --disable-ffplay --disable-ffprobe --enable-ffmpeg
                  --enable-static --disable-shared
                  --arch=x86_64 --target-os=mingw32 --cross-prefix=${CROSS}-
+                 --enable-w32threads --disable-pthreads
+                 --extra-ldflags="-static -static-libgcc -static-libstdc++"
 EOF
 
   echo "Built: $SRC_TAURI_DIR/binaries/ffmpeg-${TRIPLE}.exe"
