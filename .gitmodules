@@ -1,0 +1,4 @@
+[submodule "kaleidomo-core"]
+	path = kaleidomo-core
+	url = https://github.com/nstilt1/kaleidomo-core
+	branch = master
