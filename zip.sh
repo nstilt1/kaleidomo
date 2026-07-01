@@ -10,4 +10,8 @@ zip -r kaleidomo-source.zip ./kaleidomo-2 \
   -i "*.json" \
   -i "*.toml" \
   -i "*.rs" \
-  -i "*.wgsl"
+  -i "*.wgsl" \
+  -x "*/node_modules/*" \
+  -x "*/target/*" \
+  -x "*/pkg/*" \
+  -x "*/dist/*"
