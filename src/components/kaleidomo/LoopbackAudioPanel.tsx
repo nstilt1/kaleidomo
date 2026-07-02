@@ -1,0 +1,208 @@
+// src/components/kaleidomo/LoopbackAudioPanel.tsx
+//
+// UI panel for system audio loopback source selection.
+// Shown inside the Audio tab when the Tauri app is running (not in the browser).
+//
+// Behaviour by platform:
+//   Windows  — shows "System Audio (all apps)" immediately, no prompt needed.
+//   macOS    — shows "System Audio" and per-app list after the user clicks
+//              "Scan Sources". First-time use triggers the macOS Screen
+//              Recording permission dialog automatically.
+//   Linux    — shows PipeWire monitor sources immediately.
+//
+// The component emits peaks via `onPeakRef` (a ref, not a callback) so the
+// parent can feed them into the existing audio-reactive render path without
+// re-rendering on every frame.
+
+import { useEffect, useRef } from "react";
+import { AudioSource, LoopbackStatus, UseLoopbackAudioReturn } from "@/lib/use-loopback-audio";
+
+interface LoopbackAudioPanelProps {
+  loopback: UseLoopbackAudioReturn;
+  /** Called with a new peak value each poll cycle (~30 fps). */
+  onPeak: (peak: number) => void;
+}
+
+function kindLabel(kind: AudioSource["kind"]): string {
+  switch (kind) {
+    case "system_loopback": return "System";
+    case "application":     return "App";
+    case "input_device":    return "Input";
+  }
+}
+
+export function LoopbackAudioPanel({ loopback, onPeak }: LoopbackAudioPanelProps) {
+  const { status, error, sources, selectedId, peakRef, listSources, startCapture, stopCapture } = loopback;
+
+  // Forward peaks to the parent every animation frame while active.
+  // Using rAF rather than interval ties us to the render cadence.
+  const rafRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (status !== "active") {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      return;
+    }
+    const tick = () => {
+      onPeak(peakRef.current);
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
+  }, [status, peakRef, onPeak]);
+
+  const systemSources = sources.filter((s) => s.kind === "system_loopback");
+  const appSources    = sources.filter((s) => s.kind === "application");
+  const inputSources  = sources.filter((s) => s.kind === "input_device");
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+          Live System Audio
+        </p>
+        {status === "active" && (
+          <span className="text-xs text-green-500 flex items-center gap-1">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+            Live
+          </span>
+        )}
+      </div>
+
+      {/* macOS note — ScreenCaptureKit requires the user to grant permission */}
+      {sources.length === 0 && status === "idle" && (
+        <p className="text-xs text-muted-foreground">
+          Click <strong>Scan Sources</strong> to discover available audio sources.
+          {" "}On macOS, you may be prompted to grant Screen &amp; System Audio Recording permission.
+        </p>
+      )}
+
+      {error && (
+        <div className="rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive space-y-1">
+          <p className="font-medium">Capture error</p>
+          <p>{error}</p>
+          {error.includes("Screen Recording") && (
+            <p className="text-muted-foreground">
+              Open <strong>System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording</strong> and enable Kaleidomo.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Source list */}
+      {sources.length > 0 && (
+        <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
+          {systemSources.length > 0 && (
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide pt-1">System</p>
+          )}
+          {systemSources.map((src) => (
+            <SourceRow
+              key={src.id}
+              source={src}
+              isSelected={selectedId === src.id}
+              isActive={status === "active"}
+              onSelect={() => {
+                if (selectedId === src.id && status === "active") {
+                  stopCapture();
+                } else {
+                  startCapture(src.id);
+                }
+              }}
+            />
+          ))}
+
+          {appSources.length > 0 && (
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide pt-1">Applications</p>
+          )}
+          {appSources.map((src) => (
+            <SourceRow
+              key={src.id}
+              source={src}
+              isSelected={selectedId === src.id}
+              isActive={status === "active"}
+              onSelect={() => {
+                if (selectedId === src.id && status === "active") {
+                  stopCapture();
+                } else {
+                  startCapture(src.id);
+                }
+              }}
+            />
+          ))}
+
+          {inputSources.length > 0 && (
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide pt-1">Input Devices</p>
+          )}
+          {inputSources.map((src) => (
+            <SourceRow
+              key={src.id}
+              source={src}
+              isSelected={selectedId === src.id}
+              isActive={status === "active"}
+              onSelect={() => {
+                if (selectedId === src.id && status === "active") {
+                  stopCapture();
+                } else {
+                  startCapture(src.id);
+                }
+              }}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Action buttons */}
+      <div className="flex gap-2">
+        <button
+          type="button"
+          disabled={status === "loading"}
+          onClick={listSources}
+          className="flex-1 text-xs border rounded px-2 py-1.5 bg-background hover:bg-accent disabled:opacity-50 transition-colors"
+        >
+          {status === "loading" ? "Scanning…" : sources.length > 0 ? "Refresh Sources" : "Scan Sources"}
+        </button>
+        {status === "active" && (
+          <button
+            type="button"
+            onClick={stopCapture}
+            className="text-xs border border-destructive/40 text-destructive rounded px-2 py-1.5 hover:bg-destructive/10 transition-colors"
+          >
+            Stop
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Source row ────────────────────────────────────────────────────────────────
+
+interface SourceRowProps {
+  source: AudioSource;
+  isSelected: boolean;
+  isActive: boolean;
+  onSelect: () => void;
+}
+
+function SourceRow({ source, isSelected, isActive, onSelect }: SourceRowProps) {
+  const isCapturing = isSelected && isActive;
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`w-full flex items-center justify-between gap-2 rounded px-2 py-1.5 text-xs border transition-colors text-left
+        ${isCapturing
+          ? "bg-primary/10 border-primary/40 text-primary"
+          : "bg-background border-border hover:bg-accent"}`}
+    >
+      <span className="truncate flex-1">{source.label}</span>
+      <span className={`shrink-0 text-[10px] px-1 rounded ${isCapturing ? "bg-primary/20 text-primary" : "bg-muted text-muted-foreground"}`}>
+        {isCapturing ? "●  active" : kindLabel(source.kind)}
+      </span>
+    </button>
+  );
+}

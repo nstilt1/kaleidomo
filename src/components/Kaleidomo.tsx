@@ -185,16 +185,17 @@ const VIDEO_SETTING_KEYS = [
   "zoom_min",
   "zoom_fn",
   "zoom_start_offset",
-  "num_zoom_loops",
-  "animation_duration",
+  "zoom_cps",
   "rotation_range",
-  "rotation_cycles",
   "rotation_start_offset",
   "rotation_fn",
+  "rotation_cps",
   "hue_range",
-  "hue_cycles",
   "hue_start_offset",
   "hue_fn",
+  "hue_cps",
+  "exportDurationMode",
+  "export_duration_s",
 ] as const satisfies readonly (keyof Settings)[];
 
 function clampMin(value: number, min: number) {
@@ -281,37 +282,90 @@ function migrateVideoSettings(incoming: unknown): Partial<Settings> {
       ? incoming.fps
       : DEFAULT_SETTINGS.fps;
 
-  if (oldFrameCount !== undefined && typeof migrated.animation_duration !== "number") {
-    migrated.animation_duration = oldFrameCount / Math.max(1, fps);
+  // Derive animationDuration from legacy frame_count if needed, for use in cps conversion below.
+  const animDur: number =
+    typeof incoming.animation_duration === "number" && Number.isFinite(incoming.animation_duration)
+      ? incoming.animation_duration
+      : oldFrameCount !== undefined
+        ? oldFrameCount / Math.max(1, fps)
+        : DEFAULT_SETTINGS.export_duration_s;
+
+  // ── Migrate legacy rotation fields to rotation_cps ───────────────────────
+  if (typeof migrated.rotation_cps !== "number") {
+    if (
+      typeof incoming.triangle_rotation_degrees_per_frame === "number" &&
+      Number.isFinite(incoming.triangle_rotation_degrees_per_frame)
+    ) {
+      // Very old format: degrees-per-frame scalar
+      const totalDeg =
+        incoming.triangle_rotation_degrees_per_frame *
+        (oldFrameCount ?? Math.round(animDur * fps));
+      migrated.rotation_range = totalDeg;
+      migrated.rotation_cps = 1 / Math.max(0.001, animDur);
+      migrated.rotation_start_offset = 0;
+      migrated.rotation_fn = "sawtooth";
+    } else if (
+      typeof incoming.rotation_cycles === "number" &&
+      Number.isFinite(incoming.rotation_cycles)
+    ) {
+      // Previous format: cycles + animationDuration → convert to cps
+      migrated.rotation_cps = incoming.rotation_cycles / Math.max(0.001, animDur);
+    } else {
+      migrated.rotation_cps = DEFAULT_SETTINGS.rotation_cps;
+    }
   }
 
-  if (
-    typeof incoming.triangle_rotation_degrees_per_frame === "number" &&
-    Number.isFinite(incoming.triangle_rotation_degrees_per_frame) &&
-    typeof migrated.rotation_range !== "number"
-  ) {
-    migrated.rotation_range =
-      incoming.triangle_rotation_degrees_per_frame *
-      (oldFrameCount ?? Math.round(DEFAULT_SETTINGS.animation_duration * fps));
-    migrated.rotation_cycles = 1;
-    migrated.rotation_start_offset = 0;
-    migrated.rotation_fn = "sawtooth";
+  // ── Migrate legacy hue fields to hue_cps ─────────────────────────────────
+  if (typeof migrated.hue_cps !== "number") {
+    if (
+      typeof incoming.hue_rotation_degrees_per_frame === "number" &&
+      Number.isFinite(incoming.hue_rotation_degrees_per_frame)
+    ) {
+      // Very old format: degrees-per-frame scalar
+      const totalDeg =
+        incoming.hue_rotation_degrees_per_frame *
+        (oldFrameCount ?? Math.round(animDur * fps));
+      migrated.hue_range = totalDeg;
+      migrated.hue_cps = 1 / Math.max(0.001, animDur);
+      migrated.hue_start_offset = 0;
+      migrated.hue_fn = "sawtooth";
+    } else if (
+      typeof incoming.hue_cycles === "number" &&
+      Number.isFinite(incoming.hue_cycles)
+    ) {
+      // Previous format: cycles + animationDuration → convert to cps
+      migrated.hue_cps = incoming.hue_cycles / Math.max(0.001, animDur);
+    } else {
+      migrated.hue_cps = DEFAULT_SETTINGS.hue_cps;
+    }
   }
 
-  if (
-    typeof incoming.hue_rotation_degrees_per_frame === "number" &&
-    Number.isFinite(incoming.hue_rotation_degrees_per_frame) &&
-    typeof migrated.hue_range !== "number"
-  ) {
-    migrated.hue_range =
-      incoming.hue_rotation_degrees_per_frame *
-      (oldFrameCount ?? Math.round(DEFAULT_SETTINGS.animation_duration * fps));
-    migrated.hue_cycles = 1;
-    migrated.hue_start_offset = 0;
-    migrated.hue_fn = "sawtooth";
+  // ── Migrate legacy zoom fields to zoom_cps ───────────────────────────────
+  if (typeof migrated.zoom_cps !== "number") {
+    if (
+      typeof incoming.num_zoom_loops === "number" &&
+      Number.isFinite(incoming.num_zoom_loops)
+    ) {
+      // Previous format: num_zoom_loops + animationDuration → convert to cps
+      migrated.zoom_cps = incoming.num_zoom_loops / Math.max(0.001, animDur);
+    } else {
+      migrated.zoom_cps = DEFAULT_SETTINGS.zoom_cps;
+    }
   }
 
+  // ── Migrate export duration ───────────────────────────────────────────────
+  // If the save has animation_duration but no exportDurationMode, carry it forward.
+  if (typeof migrated.exportDurationMode !== "string") {
+    migrated.exportDurationMode = "seconds";
+    migrated.export_duration_s = animDur;
+  }
+
+  // Clean up fields that no longer exist in Settings.
   delete migrated.frame_count;
+  delete migrated.animation_duration;
+  delete migrated.rotation_cycles;
+  delete migrated.num_zoom_loops;
+  delete migrated.hue_cycles;
   delete migrated.triangle_rotation_degrees_per_frame;
   delete migrated.hue_rotation_degrees_per_frame;
 
@@ -402,13 +456,16 @@ function Kaleidomo() {
       // we'll store a reference to it on the engine instance's module.
       if (!engine.__vsModule) return;
       const vs = new engine.__vsModule.WasmVideoSettings();
-      vs.animation_duration = settings.animation_duration;
+      // WASM shim: the compiled engine still expects animation_duration + cycle counts.
+      // Setting animation_duration=1.0 makes cycles/duration = cps/1.0 = cps exactly,
+      // so we can pass the _cps values directly as the cycle fields without recompiling WASM.
+      vs.animation_duration = 1.0;
       vs.rotation_range = settings.rotation_range;
-      vs.rotation_cycles = settings.rotation_cycles;
+      vs.rotation_cycles = settings.rotation_cps;
       vs.rotation_start_offset = settings.rotation_start_offset;
       vs.set_rotation_fn(settings.rotation_fn);
       vs.hue_range = settings.hue_range;
-      vs.hue_cycles = settings.hue_cycles;
+      vs.hue_cycles = settings.hue_cps;
       vs.hue_start_offset = settings.hue_start_offset;
       vs.set_hue_fn(settings.hue_fn);
       vs.fps = settings.fps;
@@ -430,8 +487,10 @@ function Kaleidomo() {
       ).effectiveZoom;
       vs.set_zoom_fn(settings.zoom_fn);
       vs.zoom_start_offset = settings.zoom_start_offset;
-      vs.num_zoom_loops = settings.num_zoom_loops;
-      vs.orientation_start_offset = settings.orientationPhase;
+      // WASM shim: pass zoom_cps as num_zoom_loops since animation_duration=1.0
+      vs.num_zoom_loops = settings.zoom_cps;
+      // orientationPhase is in degrees; convert to [0,1) fraction for the WASM engine
+      vs.orientation_start_offset = settings.orientationPhase / 360;
       vs.audio_reactive_enabled = settings.audioReactiveEnabled;
       vs.audio_orientation_amount = settings.audioOrientationAmount;
       vs.audio_reorientation_amount = settings.audioReorientationAmount;
@@ -524,22 +583,21 @@ function Kaleidomo() {
       hueRotation: settings.hue_rotate,
       imgWidth,
       imgHeight,
-      // Animation / video settings
-      animationDuration: settings.animation_duration,
+      // Animation / video settings — pass rates directly, no animationDuration needed
       fps: settings.fps,
       rotationRange: settings.rotation_range,
-      rotationCycles: settings.rotation_cycles,
+      rotationCps: settings.rotation_cps,
       rotationStartOffset: settings.rotation_start_offset,
       rotationFn: settings.rotation_fn,
       hueRange: settings.hue_range,
-      hueCycles: settings.hue_cycles,
+      hueCps: settings.hue_cps,
       hueStartOffset: settings.hue_start_offset,
       hueFn: settings.hue_fn,
       zoomMax: effectiveMaxZoomState.effectiveZoom,
       zoomMin: effectiveMinZoomState.effectiveZoom,
       zoomFn: settings.zoom_fn,
       zoomStartOffset: settings.zoom_start_offset,
-      numZoomLoops: settings.num_zoom_loops,
+      zoomCps: settings.zoom_cps,
       // Orientation / hero-circle
       orientationBaseSpeed: settings.orientationBaseSpeed,
       heroCircleLeftX: settings.heroCircleLeftX,
@@ -547,6 +605,11 @@ function Kaleidomo() {
       heroCircleY: settings.heroCircleY,
       // hero_desired_left_rotation is the base rotation at value=0 on the circle
       heroDesiredLeftRotation: settings.rotation,
+      // Phase offset in degrees (0° = leftmost point on hero circle, clockwise)
+      orientationPhase: settings.orientationPhase,
+      // Arc traversal range in degrees and waveform
+      orientationArcRange: settings.orientationArcRange,
+      orientationArcFn: settings.orientationArcFn,
       // Audio-reactive
       audioReactiveEnabled: settings.audioReactiveEnabled,
       audioPeakSmoothing: settings.audioPeakSmoothing,
@@ -688,13 +751,14 @@ function Kaleidomo() {
       engine.load_source_image(imageData.data, imgBitmap.width, imgBitmap.height);
 
       const vs = new wasmModule.WasmVideoSettings();
-      vs.animation_duration = settings.animation_duration;
+      // WASM shim: animation_duration=1.0 so cycle fields equal cps values directly
+      vs.animation_duration = 1.0;
       vs.rotation_range = settings.rotation_range;
-      vs.rotation_cycles = settings.rotation_cycles;
+      vs.rotation_cycles = settings.rotation_cps;
       vs.rotation_start_offset = settings.rotation_start_offset;
       vs.set_rotation_fn(settings.rotation_fn);
       vs.hue_range = settings.hue_range;
-      vs.hue_cycles = settings.hue_cycles;
+      vs.hue_cycles = settings.hue_cps;
       vs.hue_start_offset = settings.hue_start_offset;
       vs.set_hue_fn(settings.hue_fn);
       vs.fps = settings.fps;
@@ -716,10 +780,10 @@ function Kaleidomo() {
       ).effectiveZoom;
       vs.set_zoom_fn(settings.zoom_fn);
       vs.zoom_start_offset = settings.zoom_start_offset;
-      vs.num_zoom_loops = settings.num_zoom_loops;
-      vs.orientation_start_offset = settings.orientationPhase;
-      vs.audio_reactive_enabled = settings.audioReactiveEnabled;
-      vs.audio_orientation_amount = settings.audioOrientationAmount;
+      // WASM shim: pass zoom_cps as num_zoom_loops since animation_duration=1.0
+      vs.num_zoom_loops = settings.zoom_cps;
+      // orientationPhase is in degrees; convert to [0,1) fraction for the WASM engine
+      vs.orientation_start_offset = settings.orientationPhase / 360;
       vs.audio_reorientation_amount = settings.audioReorientationAmount;
       vs.audio_peak_smoothing = settings.audioPeakSmoothing;
       vs.hero_circle_left_x = settings.heroCircleLeftX;
@@ -1282,17 +1346,24 @@ function Kaleidomo() {
   const resetVideoSettings = () => {
     setSettings((prev) => ({
       ...prev,
-      frame_count: 360,
       still_frame_ending: 0,
       fps: 30,
       quality: 0.1,
-      triangle_rotation_degrees_per_frame: 1.0,
-      hue_rotation_degrees_per_frame: 1.0,
       zoom_max: 1.0,
       zoom_min: 1.0,
       zoom_fn: "sin",
       zoom_start_offset: 0.0,
-      num_zoom_loops: 1,
+      zoom_cps: 0.0,
+      rotation_range: 360,
+      rotation_start_offset: 0,
+      rotation_fn: "sin",
+      rotation_cps: 0.0,
+      hue_range: 360,
+      hue_start_offset: 0,
+      hue_fn: "sawtooth",
+      hue_cps: 0.0,
+      exportDurationMode: "seconds",
+      export_duration_s: 12,
     }));
   };
 
@@ -1612,6 +1683,20 @@ function Kaleidomo() {
 
       const audioFilePath = audioFilePathRef.current;
 
+      // Derive the video export duration from the user's chosen mode.
+      // The Rust generate_video command still expects animation_duration + cycle counts,
+      // so we convert _cps back: cycles = cps * duration.
+      let exportDurationS: number;
+      if (settings.exportDurationMode === "audio" && audioBufferRef.current) {
+        // Snap to audio length
+        exportDurationS = audioBufferRef.current.duration;
+      } else if (settings.exportDurationMode === "seconds") {
+        exportDurationS = Math.max(0.1, settings.export_duration_s);
+      } else {
+        // "infinite" is not meaningful for a finite video file — fall back to 60s
+        exportDurationS = 60;
+      }
+
       const message = await invoke("generate_video", {
         path: imagePath,
         x: settings.x,
@@ -1633,16 +1718,19 @@ function Kaleidomo() {
         zoomMin: effectiveMinZoomState.effectiveZoom,
         zoomFn: settings.zoom_fn,
         zoomStartOffset: settings.zoom_start_offset,
-        numZoomLoops: settings.num_zoom_loops,
+        // Convert cps back to cycles for the Rust command (cycles = cps * duration)
+        numZoomLoops: Math.max(1, Math.round(settings.zoom_cps * exportDurationS)),
         imgWidth,
         imgHeight,
-        animationDuration: settings.animation_duration,
+        animationDuration: exportDurationS,
         rotationRange: settings.rotation_range,
-        rotationCycles: settings.rotation_cycles,
+        // Convert cps back to cycles for the Rust command
+        rotationCycles: settings.rotation_cps * exportDurationS,
         rotationStartOffset: settings.rotation_start_offset,
         rotationFn: settings.rotation_fn,
         hueRange: settings.hue_range,
-        hueCycles: settings.hue_cycles,
+        // Convert cps back to cycles for the Rust command
+        hueCycles: settings.hue_cps * exportDurationS,
         hueStartOffset: settings.hue_start_offset,
         hueFn: settings.hue_fn,
         audioFilePath,
@@ -1752,7 +1840,27 @@ function Kaleidomo() {
 
             {/* ── VIDEO TAB ── */}
             <TabsContent value="video" className="p-4 space-y-4">
-              <NumberSliderInput label="Animation Duration" value={settings.animation_duration} min={0.1} shouldLimit={!isUnlocked} limitedCap={12} max={600} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, animation_duration: v }))} unit="s" roundToInteger={true} />
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Export Duration</p>
+              <div className="flex gap-1">
+                {(["audio", "seconds", "infinite"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    className={`flex-1 rounded px-2 py-1 text-xs border ${settings.exportDurationMode === mode ? "bg-primary text-primary-foreground" : "bg-transparent"}`}
+                    onClick={() => setSettings((s) => ({ ...s, exportDurationMode: mode }))}
+                  >
+                    {mode === "audio" ? "Match Audio" : mode === "seconds" ? "Fixed Length" : "Infinite"}
+                  </button>
+                ))}
+              </div>
+              {settings.exportDurationMode === "seconds" && (
+                <NumberSliderInput label="Duration" value={settings.export_duration_s} min={0.1} shouldLimit={!isUnlocked} limitedCap={12} max={600} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, export_duration_s: v }))} unit="s" roundToInteger={true} />
+              )}
+              {settings.exportDurationMode === "audio" && (
+                <p className="text-xs text-muted-foreground">Video length will match the loaded audio file.</p>
+              )}
+              {settings.exportDurationMode === "infinite" && (
+                <p className="text-xs text-muted-foreground">Live preview runs indefinitely. Export will use 60s.</p>
+              )}
               <NumberSliderInput label="Still Frames at End" value={settings.still_frame_ending} min={0} max={360} step={1} onChange={(v) => setSettings((s) => ({ ...s, still_frame_ending: v }))} unit="frames" roundToInteger={true} />
               <NumberSliderInput label="FPS" value={settings.fps} min={1} max={144} step={1} onChange={(v) => setSettings((s) => ({ ...s, fps: v }))} unit="fps" roundToInteger={true} />
               <NumberSliderInput label="Quality" value={settings.quality} min={0.1} max={0.3} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, quality: v }))} unit="bpp/f" roundToInteger={false} />
@@ -1760,7 +1868,7 @@ function Kaleidomo() {
               <hr className="opacity-20" />
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Rotation</p>
               <NumberSliderInput label="Rotation Range" value={settings.rotation_range} min={-720.0} max={720.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, rotation_range: v }))} unit="°" roundToInteger={false} />
-              <NumberSliderInput label="Rotation Cycles" value={settings.rotation_cycles} min={0.1} max={16} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, rotation_cycles: v }))} unit="cycles" roundToInteger={false} />
+              <NumberSliderInput label="Rotation Rate" value={settings.rotation_cps} min={0} max={16} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, rotation_cps: v }))} unit="cycles/s" roundToInteger={false} />
               <NumberSliderInput label="Rotation Phase Offset" value={settings.rotation_start_offset} min={-360} max={360} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, rotation_start_offset: v }))} unit="cycles" roundToInteger={false} presetValues={[0, 90, 180]} />
               <Select onValueChange={(v) => setSettings((s) => ({ ...s, rotation_fn: v }))} value={settings.rotation_fn}>
                 <SelectTrigger className="w-full"><SelectValue placeholder="Rotation function" /></SelectTrigger>
@@ -1780,7 +1888,7 @@ function Kaleidomo() {
               <hr className="opacity-20" />
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Color</p>
               <NumberSliderInput label="Color Range" value={settings.hue_range} min={-720.0} max={720.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, hue_range: v }))} unit="°" roundToInteger={false} presetValues={[-360, 0, 360]} />
-              <NumberSliderInput label="Color Cycles" value={settings.hue_cycles} min={0} max={16.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, hue_cycles: v }))} roundToInteger={false} presetValues={[0, 1, 2, 3, 4, 5]} />
+              <NumberSliderInput label="Color Rate" value={settings.hue_cps} min={0} max={16.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, hue_cps: v }))} unit="cycles/s" roundToInteger={false} presetValues={[0, 0.5, 1, 2]} />
               <NumberSliderInput label="Color Phase Offset" value={settings.hue_start_offset} min={-360} max={360} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, hue_start_offset: v }))} roundToInteger={false} presetValues={[0, 90, 180]} />
               <Select onValueChange={(v) => setSettings((s) => ({ ...s, hue_fn: v }))} value={settings.hue_fn}>
                 <SelectTrigger className="w-full"><SelectValue placeholder="Color function" /></SelectTrigger>
@@ -1816,7 +1924,7 @@ function Kaleidomo() {
                 </SelectContent>
               </Select>
               <NumberSliderInput label="Zoom Offset" value={settings.zoom_start_offset} min={0.0} max={1.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, zoom_start_offset: v }))} unit="cycles" roundToInteger={false} />
-              <NumberSliderInput label="Zoom Cycles" value={settings.num_zoom_loops} min={1} max={10} step={1} onChange={(v) => setSettings((s) => ({ ...s, num_zoom_loops: v }))} unit="cycles" roundToInteger={true} />
+              <NumberSliderInput label="Zoom Rate" value={settings.zoom_cps} min={0} max={10} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, zoom_cps: v }))} unit="cycles/s" roundToInteger={false} />
 
               <div className="grid grid-cols-2 gap-2 pt-2">
                 <Button onClick={handleVideo} className="bg-primary">Export MP4</Button>
@@ -1893,6 +2001,26 @@ function Kaleidomo() {
 
               <NumberSliderInput label="Base Speed" value={settings.orientationBaseSpeed} min={0} max={500} step={1} onChange={(v) => setSettings((s) => ({ ...s, orientationBaseSpeed: v }))} unit="px/s" roundToInteger={false} />
               <NumberSliderInput label="Beat Drive" value={settings.orientationPeakMultiplier} min={0} max={5} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, orientationPeakMultiplier: v }))} unit="circles/s" roundToInteger={false} />
+              {/* Phase offset: starting position on the hero circle in degrees.
+                  0° = leftmost point, increases clockwise. */}
+              <NumberSliderInput label="Start Position" value={settings.orientationPhase} min={0} max={360} step={1} onChange={(v) => setSettings((s) => ({ ...s, orientationPhase: v }))} unit="°" roundToInteger={true} presetValues={[0, 90, 180, 270]} />
+              {/* Arc range: limits how much of the circle is traversed per cycle.
+                  360° = full loop; lower values confine movement to an arc. */}
+              <NumberSliderInput label="Arc Range" value={settings.orientationArcRange} min={1} max={360} step={1} onChange={(v) => setSettings((s) => ({ ...s, orientationArcRange: v }))} unit="°" roundToInteger={true} presetValues={[45, 90, 180, 360]} />
+              <Select onValueChange={(v) => setSettings((s) => ({ ...s, orientationArcFn: v }))} value={settings.orientationArcFn}>
+                <SelectTrigger className="w-full"><SelectValue placeholder="Arc function" /></SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectLabel>Arc Function</SelectLabel>
+                    <SelectItem value="sawtooth">Sawtooth (continuous loop)</SelectItem>
+                    <SelectItem value="triangle">Triangle (back and forth, linear)</SelectItem>
+                    <SelectItem value="sin">Sin (back and forth, smooth)</SelectItem>
+                    <SelectItem value="sin2">Sin² (ease in/out)</SelectItem>
+                    <SelectItem value="-cos">-Cos (starts slow, peaks at center)</SelectItem>
+                    <SelectItem value="cos">Cos (starts fast, slows at center)</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
 
               <hr className="opacity-20" />
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Peak Detection</p>

@@ -24,6 +24,15 @@ pub use live_preview::render_live_preview_frame;
 
 mod preview_server;
 
+mod audio_loopback;
+pub use audio_loopback::{
+    LoopbackState,
+    list_loopback_sources,
+    start_loopback_capture,
+    stop_loopback_capture,
+    get_loopback_peak,
+};
+
 use tokio::sync::Mutex as AsyncMutex;
 
 use std::fs::File;
@@ -170,6 +179,33 @@ pub struct AppState {
     pub license_sync_cooldown: AsyncMutex<licensing::cooldown::LicenseSyncCooldownState>,
     pub loaded_gpu_image_path: Mutex<Option<String>>,
     pub last_version_fetch: AsyncMutex<Option<u64>>,
+    /// System audio loopback capture state.
+    pub loopback: LoopbackState,
+}
+
+/// Toggle or set fullscreen on the main window.
+///
+/// Tauri 2's `WebviewWindow` exposes `set_fullscreen(bool)` and
+/// `is_fullscreen()`. We expose both directions so the frontend can
+/// sync its own state after an OS-level fullscreen change (e.g. Escape key).
+#[tauri::command]
+fn set_fullscreen(app: tauri::AppHandle, fullscreen: bool) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("main window not found")?;
+    window
+        .set_fullscreen(fullscreen)
+        .map_err(|e| format!("set_fullscreen error: {e}"))
+}
+
+#[tauri::command]
+fn get_fullscreen(app: tauri::AppHandle) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("main window not found")?;
+    window
+        .is_fullscreen()
+        .map_err(|e| format!("is_fullscreen error: {e}"))
 }
 
 fn round_to_nearest_multiple(value: u32, multiple: u32) -> u32 {
@@ -890,6 +926,7 @@ pub fn run() {
                 license_sync_cooldown: AsyncMutex::new(cooldown_state),
                 loaded_gpu_image_path: Mutex::new(None),
                 last_version_fetch: AsyncMutex::new(ts),
+                loopback: LoopbackState::new(),
             });
             
             #[cfg(feature = "logging")]
@@ -944,6 +981,14 @@ pub fn run() {
             store_page_url,
             accept_eula,
             get_eula_status,
+            // Fullscreen
+            set_fullscreen,
+            get_fullscreen,
+            // System audio loopback
+            list_loopback_sources,
+            start_loopback_capture,
+            stop_loopback_capture,
+            get_loopback_peak,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

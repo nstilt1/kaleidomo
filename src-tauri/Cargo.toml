@@ -22,6 +22,9 @@ default = ["cert_check"]
 #default = ["logging"]
 cert_check = []
 logging = ["log", "tauri/devtools"]
+# Enable to get per-app WASAPI session enumeration on Windows.
+# Requires the `windows` crate's IAudioSessionManager2 bindings.
+wasapi_sessions = []
 
 [dependencies]
 base64 = "0.21"
@@ -39,3 +42,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = "1.50.0"
 sha1 = "0.10"
+
+# Cross-platform audio capture (mic, line-in, and WASAPI loopback on Windows).
+# On macOS, system audio loopback goes through ScreenCaptureKit instead;
+# cpal is still used here for CoreAudio input devices (mic, USB audio).
+cpal = "0.15"
+
+# macOS system audio loopback via ScreenCaptureKit (macOS 12.3+).
+# Requires the com.apple.security.screen-capture entitlement in
+# src-tauri/entitlements.plist (see note below).
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = "0.3"
