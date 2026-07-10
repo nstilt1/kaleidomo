@@ -1,18 +1,3 @@
-// src/lib/use-fullscreen.ts
-//
-// Hook that manages fullscreen state, synced with the Tauri window.
-//
-// Usage:
-//   const { isFullscreen, toggleFullscreen, exitFullscreen } = useFullscreen();
-//
-// Keyboard shortcut:
-//   F11       — toggle (all platforms)
-//   Cmd+Ctrl+F — toggle (macOS convention)
-//   Escape    — exit fullscreen
-//
-// The hook listens for the `tauri://window-resized` event so it stays in sync
-// when the user presses Esc or uses the OS window controls to exit fullscreen.
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -24,20 +9,26 @@ export interface UseFullscreenReturn {
   exitFullscreen: () => Promise<void>;
 }
 
-export function useFullscreen(): UseFullscreenReturn {
+export interface UseFullscreenOptions {
+  /** Disable click-to-exit in the controls window while keeping Escape active. */
+  disablePointerExit?: boolean;
+}
+
+export function useFullscreen(
+  options: UseFullscreenOptions = {},
+): UseFullscreenReturn {
+  const { disablePointerExit = false } = options;
   const [isFullscreen, setIsFullscreen] = useState(false);
-  // Debounce flag so we don't fire two syncs at once.
   const syncingRef = useRef(false);
 
-  // Read the current window state from Tauri.
   const syncState = useCallback(async () => {
     if (syncingRef.current) return;
+
     syncingRef.current = true;
     try {
-      const fs = await invoke<boolean>("get_fullscreen");
-      setIsFullscreen(fs);
-    } catch {
-      // Not a Tauri context (browser dev mode) — stay false.
+      setIsFullscreen(await invoke<boolean>("get_fullscreen"));
+    } catch (error) {
+      console.error("Failed to read fullscreen state:", error);
     } finally {
       syncingRef.current = false;
     }
@@ -47,62 +38,120 @@ export function useFullscreen(): UseFullscreenReturn {
     try {
       await invoke("set_fullscreen", { fullscreen: true });
       setIsFullscreen(true);
-    } catch {/* browser dev mode */}
-  }, []);
+      await invoke("open_controls_window");
+    } catch (error) {
+      console.error("Failed to enter fullscreen:", error);
+      await syncState();
+    }
+  }, [syncState]);
 
   const exitFullscreen = useCallback(async () => {
     try {
-      await invoke("set_fullscreen", { fullscreen: false });
+      // This Rust command always targets the native window labeled "main",
+      // even when Escape originates in the controls webview.
+      await invoke("exit_fullscreen");
       setIsFullscreen(false);
-    } catch {/* browser dev mode */}
-  }, []);
+    } catch (error) {
+      console.error("Failed to exit fullscreen:", error);
+      await syncState();
+    }
+  }, [syncState]);
 
   const toggleFullscreen = useCallback(async () => {
-    if (isFullscreen) {
+    let fullscreen = isFullscreen;
+
+    try {
+      fullscreen = await invoke<boolean>("get_fullscreen");
+    } catch {
+      // Fall back to the last synchronized React state.
+    }
+
+    if (fullscreen) {
       await exitFullscreen();
     } else {
       await enterFullscreen();
     }
-  }, [isFullscreen, enterFullscreen, exitFullscreen]);
+  }, [enterFullscreen, exitFullscreen, isFullscreen]);
 
-  // Subscribe to window resize events to detect OS-level fullscreen changes
-  // (e.g. user presses Esc, or the green traffic-light button on macOS).
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+
     getCurrentWindow()
-      .onResized(() => { syncState(); })
-      .then((fn) => { unlisten = fn; })
-      .catch(() => {/* not in Tauri */});
-    return () => { unlisten?.(); };
+      .onResized(() => {
+        void syncState();
+      })
+      .then((fn) => {
+        unlisten = fn;
+      })
+      .catch((error) => {
+        console.error("Failed to attach fullscreen resize listener:", error);
+      });
+
+    return () => unlisten?.();
   }, [syncState]);
 
-  // Keyboard shortcuts.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      // F11 — all platforms
-      if (e.key === "F11") {
-        e.preventDefault();
-        toggleFullscreen();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        void exitFullscreen();
         return;
       }
-      // Cmd+Ctrl+F — macOS convention (matches what the OS green button does)
-      if (e.key === "f" && e.metaKey && e.ctrlKey) {
-        e.preventDefault();
-        toggleFullscreen();
+
+      if (event.key === "F11") {
+        event.preventDefault();
+        event.stopPropagation();
+        void toggleFullscreen();
         return;
       }
-      // Escape — exit only (don't toggle into fullscreen with Escape)
-      if (e.key === "Escape" && isFullscreen) {
-        e.preventDefault();
-        exitFullscreen();
+
+      if (event.key.toLowerCase() === "f" && event.metaKey && event.ctrlKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        void toggleFullscreen();
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [isFullscreen, toggleFullscreen, exitFullscreen]);
 
-  // Read initial state.
-  useEffect(() => { syncState(); }, [syncState]);
+    // Capture phase prevents canvas/input handlers from swallowing Escape.
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [exitFullscreen, toggleFullscreen]);
 
-  return { isFullscreen, toggleFullscreen, enterFullscreen, exitFullscreen };
+  useEffect(() => {
+    if (disablePointerExit || !isFullscreen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      // Only the main canvas window enables this listener.
+      if (event.button !== 0) return;
+      void exitFullscreen();
+    };
+
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => window.removeEventListener("pointerdown", onPointerDown, true);
+  }, [disablePointerExit, exitFullscreen, isFullscreen]);
+
+  useEffect(() => {
+    const onBrowserFullscreenChange = () => {
+      if (!document.fullscreenElement) {
+        void syncState();
+      }
+    };
+
+    document.addEventListener("fullscreenchange", onBrowserFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onBrowserFullscreenChange);
+    };
+  }, [syncState]);
+
+  useEffect(() => {
+    void syncState();
+  }, [syncState]);
+
+  return {
+    isFullscreen,
+    toggleFullscreen,
+    enterFullscreen,
+    exitFullscreen,
+  };
 }

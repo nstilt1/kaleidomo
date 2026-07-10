@@ -26,6 +26,10 @@ import { type Settings, DEFAULT_SETTINGS } from "@/lib/kaleidomo-session-context
 import { useSettings } from "@/lib/settings-context";
 import { checkLivePreviewWebGpuSupport } from "@/lib/webgpu-live-engine-guard";
 import { isTauriMacOS, NativeLivePreviewEngine, type NativeLivePreviewParams } from "@/lib/native-live-preview";
+import { useFullscreenContext } from "@/lib/fullscreen-context";
+import { useControlsSync } from "@/lib/use-controls-sync";
+import { useLoopbackAudio } from "@/lib/use-loopback-audio";
+import { LoopbackAudioPanel } from "@/components/kaleidomo/LoopbackAudioPanel";
 
 const promptForImageRelocation = async (
   originalPath: string
@@ -372,8 +376,25 @@ function migrateVideoSettings(incoming: unknown): Partial<Settings> {
   return migrated;
 }
 
-function Kaleidomo() {
+// When `controlsOnly` is true the component renders only the sidebar and
+// suppresses the canvas, engines, and all canvas-related hooks. This is used
+// by the floating controls window that opens alongside the fullscreen canvas.
+function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   const { isUnlocked, licenseType } = useLicense();
+  const { isFullscreen, toggleFullscreen } = useFullscreenContext();
+
+  const loopback = useLoopbackAudio();
+
+  // "file" = use the imported audio file for peak data (existing behaviour).
+  // "loopback" = use system audio loopback peak from the OS.
+  // The loopback peak is polled by useLoopbackAudio and written into
+  // loopbackPeakRef each animation frame, then substituted for normalizedAudioPeaksRef
+  // when building peaks for the live engines.
+  const [audioSourceMode, setAudioSourceMode] = useState<"file" | "loopback">("file");
+  // Single-element Float32Array used as a stand-in peaks array when in loopback mode.
+  // The live engines index into this by frame; when it has only one element they
+  // always get the current peak regardless of frame index.
+  const loopbackPeakArrayRef = useRef<Float32Array>(new Float32Array(1));
   const {
     mode: wedgePickerMode,
     setMode: setWedgePickerMode,
@@ -401,6 +422,11 @@ function Kaleidomo() {
     isRendering,
     setIsRendering,
   } = useKaleidomoSession();
+
+  // Sync settings bidirectionally with the floating controls window.
+  // When controlsOnly=true this instance IS the controls window (role: "controls").
+  // When controlsOnly=false this is the main canvas window (role: "main").
+  useControlsSync({ role: controlsOnly ? "controls" : "main", settings, setSettings });
 
   // ---------------------------------------------------------------------------
   // WASM live preview engine refs and audio state
@@ -547,7 +573,10 @@ function Kaleidomo() {
     );
     // Hard cap on live preview render size. Cap the OUTPUT dimensions directly
     // after aspect-ratio math so rounding never pushes either dimension over the limit.
-    const NATIVE_PREVIEW_MAX_PX = nativePreviewRes;
+    // In fullscreen we use settings.resolution directly (no cap) because the user
+    // has explicitly opted into a high-quality presentation view. The IPC bandwidth
+    // concern that motivates the cap (70–130 MB/s on macOS) is accepted as a tradeoff.
+    const NATIVE_PREVIEW_MAX_PX = isFullscreen ? Math.max(1, settings.resolution) : nativePreviewRes;
     const dims = (() => {
       const short = Math.min(Math.max(1, settings.resolution), NATIVE_PREVIEW_MAX_PX);
       const num = Math.max(1, settings.ratio_num);
@@ -617,9 +646,27 @@ function Kaleidomo() {
       audioReorientationAmount: settings.audioReorientationAmount,
       orientationPeakMultiplier: settings.orientationPeakMultiplier,
     };
-  }, [settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode, nativePreviewRes]);
+  }, [settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode, nativePreviewRes, isFullscreen]);
 
   /** Start (or restart) the native Metal-backed live preview loop. */
+  // Called by LoopbackAudioPanel at ~30fps when loopback capture is active.
+  // Updates the single-element peaks array and pushes it to whichever engine is running.
+  // Only active when audioSourceMode === "loopback".
+  const onLoopbackPeak = useCallback((peak: number) => {
+    if (audioSourceMode !== "loopback") return;
+    loopbackPeakArrayRef.current[0] = peak;
+    // Native engine: update peaks ref directly
+    if (nativeEngineRef.current) {
+      nativeEngineRef.current.setPeaks(loopbackPeakArrayRef.current);
+    }
+    // WASM engine: call set_audio_peaks if the engine is live
+    if (engineRef.current) {
+      try {
+        engineRef.current.set_audio_peaks(loopbackPeakArrayRef.current);
+      } catch (_) { /* engine may not be started yet */ }
+    }
+  }, [audioSourceMode]);
+
   const startNativeLiveEngine = useCallback(() => {
     // Stop any existing native engine.
     if (nativeEngineRef.current) {
@@ -708,8 +755,9 @@ function Kaleidomo() {
       // stays at its hardcoded 1920x1080 attributes regardless of ratio_num/
       // ratio_den, so the live preview frames a different aspect ratio than
       // the final video.
+      // In fullscreen the cap is lifted so the canvas renders at settings.resolution.
       {
-        const NATIVE_PREVIEW_MAX_PX = nativePreviewRes;
+        const NATIVE_PREVIEW_MAX_PX = isFullscreen ? Math.max(1, settings.resolution) : nativePreviewRes;
         const num = Math.max(1, settings.ratio_num);
         const den = Math.max(1, settings.ratio_den);
         let w: number, h: number;
@@ -827,7 +875,7 @@ function Kaleidomo() {
       setLivePreviewError(message);
       console.error("startLiveEngine failed", e);
     }
-  }, [imageSrc, imagePath, startNativeLiveEngine, settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode, nativePreviewRes]);
+  }, [imageSrc, imagePath, startNativeLiveEngine, settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode, nativePreviewRes, isFullscreen]);
 
   // Sync settings changes to engine (no restart)
   useEffect(() => {
@@ -1757,7 +1805,9 @@ function Kaleidomo() {
     <div className="flex h-full w-full overflow-hidden bg-background text-foreground">
       <Toaster richColors position="top-right" />
 
-      <aside className="w-72 border-r flex flex-col bg-card h-full overflow-hidden">
+      {/* Sidebar is hidden in fullscreen so the canvas fills the entire window.
+          In controlsOnly mode the sidebar is always shown — it IS the whole window. */}
+      <aside className={`${controlsOnly ? "w-full" : "w-72"} border-r flex flex-col bg-card h-full overflow-hidden${!controlsOnly && isFullscreen ? " hidden" : ""}`}>
         {/* Top actions — always visible */}
         <div className="shrink-0 p-4 border-b space-y-2">
           <div className="space-y-1">
@@ -1961,32 +2011,64 @@ function Kaleidomo() {
                 </div>
               )}
 
+              {/* Audio source mode toggle — switches between imported file and system loopback */}
               <div className="space-y-2">
-                <p className="text-xs text-muted-foreground">{audioFileName ? `Loaded: ${audioFileName}` : "No audio loaded"}</p>
-                {audioError && <p className="text-xs text-red-500">{audioError}</p>}
-                <div className="flex gap-2 flex-wrap">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Audio Source</p>
+                <div className="flex gap-1">
                   <button
                     type="button"
-                    className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent cursor-pointer"
-                    onClick={() => void handleAudioFileChange()}
+                    className={`flex-1 text-xs px-2 py-1.5 rounded border transition-colors ${audioSourceMode === "file" ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background hover:bg-accent"}`}
+                    onClick={() => setAudioSourceMode("file")}
                   >
-                    Import Audio
+                    File
                   </button>
-                  {audioFileName && (
-                    <>
-                      <button type="button" className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent" onClick={handleToggleAudioPlayback}>
-                        {audioPlaying ? "⏸ Pause" : "▶ Play"}
-                      </button>
-                      <button type="button" className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent" onClick={handleClearAudio}>
-                        Clear
-                      </button>
-                    </>
-                  )}
+                  <button
+                    type="button"
+                    className={`flex-1 text-xs px-2 py-1.5 rounded border transition-colors ${audioSourceMode === "loopback" ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background hover:bg-accent"}`}
+                    onClick={() => setAudioSourceMode("loopback")}
+                  >
+                    System Audio
+                  </button>
                 </div>
-                <Button variant="outline" size="sm" className="w-full" onClick={handleRestartLivePreview}>
-                  ↺ Restart (sync audio + video)
-                </Button>
+                <p className="text-xs text-muted-foreground opacity-70">
+                  {audioSourceMode === "file"
+                    ? "Peaks are extracted from the imported audio file."
+                    : "Peaks are sampled live from system audio (WASAPI loopback on Windows, ScreenCaptureKit on macOS, PipeWire on Linux)."}
+                </p>
               </div>
+
+              {audioSourceMode === "file" ? (
+                /* ── File mode — existing import/play/clear controls ── */
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">{audioFileName ? `Loaded: ${audioFileName}` : "No audio loaded"}</p>
+                  {audioError && <p className="text-xs text-red-500">{audioError}</p>}
+                  <div className="flex gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent cursor-pointer"
+                      onClick={() => void handleAudioFileChange()}
+                    >
+                      Import Audio
+                    </button>
+                    {audioFileName && (
+                      <>
+                        <button type="button" className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent" onClick={handleToggleAudioPlayback}>
+                          {audioPlaying ? "⏸ Pause" : "▶ Play"}
+                        </button>
+                        <button type="button" className="text-xs px-2 py-1 rounded border border-border bg-background hover:bg-accent" onClick={handleClearAudio}>
+                          Clear
+                        </button>
+                      </>
+                    )}
+                  </div>
+                  <Button variant="outline" size="sm" className="w-full" onClick={handleRestartLivePreview}>
+                    ↺ Restart (sync audio + video)
+                  </Button>
+                </div>
+              ) : (
+                /* ── Loopback mode — system audio source picker ── */
+                <LoopbackAudioPanel loopback={loopback} onPeak={onLoopbackPeak} />
+              )}
 
               <hr className="opacity-20" />
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reactive Settings</p>
@@ -2049,47 +2131,84 @@ function Kaleidomo() {
           </Tabs>
         </aside>
 
-        <main className="flex-1 min-h-0 flex flex-col p-4 gap-4 overflow-y-auto bg-muted/20">
-          <div className="h-[70vh] min-h-0 shrink-0 flex flex-col items-center justify-center border rounded-xl bg-background p-8 relative shadow-sm overflow-hidden">
-            <h3 className="absolute top-4 left-4 text-xs font-bold uppercase opacity-30">
-              1. Source Picker
-            </h3>
-            {imagePath ? (
-              <WedgePicker
-                imagePath={imagePath}
-                count={count}
-                settings={settings}
-                onUpdate={setSettings}
-                sourceRadiusPx={effectiveZoomState.sourceRadiusPx}
-              />
-            ) : (
-              <p className="text-muted-foreground italic">
-                Select an image to begin.
-              </p>
-            )}
-          </div>
+        {/* The canvas, panels, and engine are only rendered in the main window.
+            The controls window (controlsOnly=true) has no canvas — it only
+            shows the sidebar above, which syncs settings back to the main window
+            via useControlsSync. */}
+        {!controlsOnly && (
+        <main className={`flex-1 min-h-0 flex flex-col bg-black${isFullscreen ? "" : " gap-4 overflow-y-auto bg-muted/20 p-4"}`}>
+          {/* Source Picker and Kaleidoscope Render panels are hidden in fullscreen —
+              only the live preview canvas is shown, filling the entire window. */}
+          {!isFullscreen && (
+            <>
+              <div className="h-[70vh] min-h-0 shrink-0 flex flex-col items-center justify-center border rounded-xl bg-background p-8 relative shadow-sm overflow-hidden">
+                <h3 className="absolute top-4 left-4 text-xs font-bold uppercase opacity-30">
+                  1. Source Picker
+                </h3>
+                {imagePath ? (
+                  <WedgePicker
+                    imagePath={imagePath}
+                    count={count}
+                    settings={settings}
+                    onUpdate={setSettings}
+                    sourceRadiusPx={effectiveZoomState.sourceRadiusPx}
+                  />
+                ) : (
+                  <p className="text-muted-foreground italic">
+                    Select an image to begin.
+                  </p>
+                )}
+              </div>
 
-          <div className="h-[70vh] min-h-0 shrink-0 flex flex-col items-center justify-center border rounded-xl bg-background p-8 relative shadow-sm overflow-hidden">
-            <h3 className="absolute top-4 left-4 text-xs font-bold uppercase opacity-30">
-              2. Kaleidoscope Render
-            </h3>
-            {outputSrc ? (
-              <img
-                src={outputSrc}
-                className="block max-w-full max-h-full object-contain shadow-2xl rounded-lg"
-              />
-            ) : (
-              <p className="text-muted-foreground italic">
-                Select an image or load a preset to begin.
-              </p>
-            )}
-          </div>
+              <div className="h-[70vh] min-h-0 shrink-0 flex flex-col items-center justify-center border rounded-xl bg-background p-8 relative shadow-sm overflow-hidden">
+                <h3 className="absolute top-4 left-4 text-xs font-bold uppercase opacity-30">
+                  2. Kaleidoscope Render
+                </h3>
+                {outputSrc ? (
+                  <img
+                    src={outputSrc}
+                    className="block max-w-full max-h-full object-contain shadow-2xl rounded-lg"
+                  />
+                ) : (
+                  <p className="text-muted-foreground italic">
+                    Select an image or load a preset to begin.
+                  </p>
+                )}
+              </div>
+            </>
+          )}
 
-          <div className="h-[70vh] min-h-0 shrink-0 flex flex-col items-center justify-center border rounded-xl bg-background p-8 relative shadow-sm overflow-hidden">
-            <h3 className="absolute top-4 left-4 text-xs font-bold uppercase opacity-30">
-              3. Live Preview {isTauriMacOS() ? "(Metal / Native)" : "(WebGPU)"}
-            </h3>
-            <div className="flex flex-col items-center gap-4 w-full h-full justify-center">
+          {/* Live Preview panel — always rendered so the canvas element is never
+              unmounted (unmounting would destroy the WebGPU/Metal surface and
+              require a full engine restart when exiting fullscreen).
+              In fullscreen: fills the entire window with black letterboxing.
+              In normal mode: fixed 70vh card with the button row below. */}
+          <div className={`relative overflow-hidden${isFullscreen ? " flex-1 bg-black flex items-center justify-center" : " h-[70vh] min-h-0 shrink-0 flex flex-col items-center justify-center border rounded-xl bg-background p-8 shadow-sm"}`}>
+            {/* Panel label — hidden in fullscreen */}
+            {!isFullscreen && (
+              <h3 className="absolute top-4 left-4 text-xs font-bold uppercase opacity-30">
+                3. Live Preview {isTauriMacOS() ? "(Metal / Native)" : "(WebGPU)"}
+              </h3>
+            )}
+            {/* Fullscreen toggle — only shown when NOT in fullscreen, anchored to
+                top-right corner. There is intentionally no "exit fullscreen"
+                button: while in fullscreen, clicking anywhere on the canvas
+                (via the mousedown listener in use-fullscreen.ts) or pressing
+                Escape is the only way out. */}
+            {!isFullscreen && (
+              <button
+                type="button"
+                title="Fullscreen (F11)"
+                className="absolute top-2 right-2 z-10 rounded border transition-opacity p-1.5 text-xs bg-background/70 hover:bg-background border-border opacity-60 hover:opacity-100"
+                onClick={() => void toggleFullscreen()}
+              >
+                ⛶
+              </button>
+            )}
+
+            {/* Canvas wrapper — in fullscreen the canvas is the only child of the
+                black flex container, object-contain letterboxes it to any screen ratio */}
+            <div className={`flex flex-col items-center gap-4 w-full h-full justify-center`}>
               {isTauriMacOS() ? (
                 /* Native Metal path: engine draws RGBA directly into this canvas.
                    Canvas pixel dimensions are set by drawRgbaToCanvas on first frame.
@@ -2099,7 +2218,7 @@ function Kaleidomo() {
                   width={512}
                   height={288}
                   className="block max-w-full max-h-full object-contain shadow-2xl rounded-lg"
-                  style={{ background: "#000", width: "100%", height: "100%" }}
+                  style={{ background: "#000", width: "100%", height: isFullscreen ? "100vh" : "100%" }}
                 />
               ) : (
                 /* WASM WebGPU path: render directly into a <canvas> */
@@ -2107,44 +2226,56 @@ function Kaleidomo() {
                   ref={liveCanvasRef}
                   width={1920}
                   height={1080}
-                  className="block max-w-full max-h-full object-contain shadow-2xl rounded-lg"
-                  style={{ background: "#000" }}
+                  className="block max-w-full max-h-full object-contain"
+                  style={{ background: "#000", ...(isFullscreen ? { width: "100%", height: "100vh" } : {}) }}
                 />
               )}
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  className="text-xs px-3 py-1 rounded border border-border bg-background hover:bg-accent"
-                  onClick={() => void startLiveEngine()}
-                >
-                  Start Live Preview
-                </button>
-                <button
-                  type="button"
-                  className="text-xs px-3 py-1 rounded border border-border bg-background hover:bg-accent"
-                  onClick={handleRestartLivePreview}
-                >
-                  ↺ Restart
-                </button>
-                <button
-                  type="button"
-                  className="text-xs px-3 py-1 rounded border border-border bg-background hover:bg-accent"
-                  onClick={() => {
-                    if (engineRef.current) {
-                      try { engineRef.current.stop_animation(); } catch (_) { /* ignored */ }
-                      try { engineRef.current.free?.(); } catch (_) { /* ignored */ }
-                      engineRef.current = null;
-                    }
-                    if (nativeEngineRef.current) {
-                      nativeEngineRef.current.stop();
-                      nativeEngineRef.current = null;
-                    }
-                    setLivePreviewError(null);
-                  }}
-                >
-                  Stop
-                </button>
-              </div>
+              {/* Button row — hidden in fullscreen; press any key to exit */}
+              {!isFullscreen && (
+                <div className="flex gap-2 flex-wrap justify-center">
+                  <button
+                    type="button"
+                    className="text-xs px-3 py-1 rounded border border-border bg-background hover:bg-accent"
+                    onClick={() => void startLiveEngine()}
+                  >
+                    Start Live Preview
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs px-3 py-1 rounded border border-border bg-background hover:bg-accent"
+                    onClick={handleRestartLivePreview}
+                  >
+                    ↺ Restart
+                  </button>
+                  <button
+                    type="button"
+                    className="text-xs px-3 py-1 rounded border border-border bg-background hover:bg-accent"
+                    onClick={() => {
+                      if (engineRef.current) {
+                        try { engineRef.current.stop_animation(); } catch (_) { /* ignored */ }
+                        try { engineRef.current.free?.(); } catch (_) { /* ignored */ }
+                        engineRef.current = null;
+                      }
+                      if (nativeEngineRef.current) {
+                        nativeEngineRef.current.stop();
+                        nativeEngineRef.current = null;
+                      }
+                      setLivePreviewError(null);
+                    }}
+                  >
+                    Stop
+                  </button>
+                  {/* Fullscreen button — in the bottom row so it's easy to find */}
+                  <button
+                    type="button"
+                    title="Fullscreen (F11)"
+                    className="text-xs px-3 py-1 rounded border border-border bg-background hover:bg-accent"
+                    onClick={() => void toggleFullscreen()}
+                  >
+                    ⛶ Fullscreen
+                  </button>
+                </div>
+              )}
               {livePreviewError ? (
                 <p className="max-w-xl rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-center text-xs text-destructive">
                   {livePreviewError}
@@ -2153,10 +2284,14 @@ function Kaleidomo() {
             </div>
           </div>
 
-          <div className="text-center text-sm text-muted-foreground">
-            <p>Brought to you by Altered Brain Chemistry</p>
-          </div>
+          {/* Footer — hidden in fullscreen */}
+          {!isFullscreen && (
+            <div className="text-center text-sm text-muted-foreground">
+              <p>Brought to you by Altered Brain Chemistry</p>
+            </div>
+          )}
         </main>
+        )} {/* end !controlsOnly */}
     </div>
   );
 }

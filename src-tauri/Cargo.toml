@@ -43,13 +43,37 @@ serde_json = "1"
 tokio = "1.50.0"
 sha1 = "0.10"
 
-# Cross-platform audio capture (mic, line-in, and WASAPI loopback on Windows).
-# On macOS, system audio loopback goes through ScreenCaptureKit instead;
-# cpal is still used here for CoreAudio input devices (mic, USB audio).
-cpal = "0.15"
+# ── Audio loopback — platform-gated ──────────────────────────────────────────
+#
+# cpal is used on Windows (WASAPI loopback + input devices) and Linux
+# (PipeWire/ALSA monitor sources + input devices).
+#
+# On macOS, system audio goes through ScreenCaptureKit (see below).
+# cpal is still needed on macOS for CoreAudio *input* devices (mic, USB
+# audio interfaces), but those share the same cpal dependency block.
+#
+# Windows: no extra system packages needed — WASAPI is in-box.
+# macOS:   no extra system packages needed — CoreAudio is in-box.
+# Linux:   requires libasound2-dev:
+#            sudo apt install libasound2-dev          # Debian/Ubuntu/WSL
+#            sudo dnf install alsa-lib-devel          # Fedora
+#            sudo pacman -S alsa-lib                  # Arch
 
-# macOS system audio loopback via ScreenCaptureKit (macOS 12.3+).
-# Requires the com.apple.security.screen-capture entitlement in
-# src-tauri/entitlements.plist (see note below).
+# Windows — WASAPI loopback via cpal.
+# The `wasapi` feature is required for cpal::HostId::Wasapi (loopback capture).
+# Without it, host_from_id(Wasapi) fails and falls back to the default non-loopback host.
+[target.'cfg(target_os = "windows")'.dependencies]
+cpal = { version = "0.15" }
+
+# macOS — CoreAudio input devices via cpal; system loopback via ScreenCaptureKit
 [target.'cfg(target_os = "macos")'.dependencies]
+cpal = "0.15"
+# ScreenCaptureKit (macOS 12.3+). Requires the screen-capture entitlement in
+# src-tauri/entitlements.plist. The entitlements.plist must be referenced in
+# tauri.conf.json: "bundle": { "macOS": { "entitlements": "./entitlements.plist" } }
 screencapturekit = "0.3"
+
+# Linux — PipeWire monitor sources + ALSA input devices via cpal.
+# Build requirement: sudo apt install libasound2-dev
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = "0.15"

@@ -1,4 +1,5 @@
 import { Menu, MenuItem, Submenu, PredefinedMenuItem } from "@tauri-apps/api/menu";
+import { Window } from "@tauri-apps/api/window";
 
 export type AppMenuHandles = {
   loadImagePreset: MenuItem;
@@ -91,7 +92,12 @@ export async function setupAppMenu(): Promise<AppMenuHandles> {
     items: [appSubmenu, fileSubmenu, editSubmenu],
   });
 
-  await menu.setAsAppMenu();
+  const controlsWindow = await Window.getByLabel("controls");
+  if (!controlsWindow) {
+    throw new Error('The "controls" window was not found while installing its menu.');
+  }
+
+  await menu.setAsWindowMenu(controlsWindow);
 
   return {
     loadImagePreset,

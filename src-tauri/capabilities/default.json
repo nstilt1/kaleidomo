@@ -3,13 +3,15 @@
   "identifier": "default",
   "description": "Capability for the main window",
   "windows": [
-    "main"
+    "main",
+    "controls"
   ],
   "permissions": [
     "core:default",
     "core:app:default",
     "core:image:default",
     "core:menu:default",
+    "core:window:allow-set-fullscreen",
     "dialog:default",
     "fs:default",
     "fs:allow-read-text-file",

@@ -24,13 +24,36 @@
 // │             Per-app: PipeWire node graph allows routing but is           │
 // │             complex; for now we capture the sink monitor (all audio).    │
 // └──────────────────────────────────────────────────────────────────────────┘
+//
+// ── Why streams are built inside the keepalive thread ────────────────────────
+//
+// cpal::Stream (and SCStream on macOS) intentionally does NOT implement Send.
+// The stream contains raw driver pointers that are only valid on the thread
+// that created them. This means we cannot:
+//   - move a built stream into thread::spawn  (requires Send)
+//   - build the stream then send it through a channel  (requires Send)
+//
+// The solution: build the stream *inside* the spawned thread so the !Send
+// value never crosses a thread boundary. We pass only Send-safe values into
+// the closure (Arc handles, device-name strings, config). A oneshot-style
+// mpsc channel sends the Result<(), String> back to the calling thread so
+// start_capture() can still surface errors to the frontend.
+//
+//   calling thread                      audio thread
+//   ─────────────                       ────────────
+//   spawn(move || {                 →   receive Send-safe args
+//     build stream (locally)            stream lives here, never moves
+//     if Ok: play, loop on stop flag    blocks until stop set
+//     if Err: send Err back             stream drops here when done
+//   })
+//   recv result_rx → propagate Err
 
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
     Arc, Mutex,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 // ── Shared state ─────────────────────────────────────────────────────────────
 
@@ -105,6 +128,8 @@ mod platform {
 
         // Enumerate WASAPI audio sessions to offer per-app capture.
         // Uses the `windows` crate COM bindings.
+        // Requires the `wasapi_sessions` feature and the `windows` crate with
+        // the `Win32_Media_Audio` feature enabled in Cargo.toml.
         #[cfg(feature = "wasapi_sessions")]
         {
             if let Ok(sessions) = enumerate_wasapi_sessions() {
@@ -133,108 +158,160 @@ mod platform {
         sources
     }
 
+    /// Enumerate per-application WASAPI audio sessions.
+    ///
+    /// This function is only compiled when the `wasapi_sessions` feature is
+    /// enabled. It requires adding the `windows` crate to Cargo.toml with:
+    ///   windows = { version = "0.58", features = ["Win32_Media_Audio"] }
+    ///
+    /// Without that feature the function is still present (returning an empty
+    /// vec) so the `cfg(feature = "wasapi_sessions")` block in list_sources
+    /// always compiles cleanly.
+    #[cfg(feature = "wasapi_sessions")]
+    fn enumerate_wasapi_sessions() -> Result<Vec<AudioSource>, String> {
+        // TODO: implement IAudioSessionManager2 enumeration via the `windows`
+        // crate once the `wasapi_sessions` feature is enabled.
+        // For now, return an empty list so the feature compiles without
+        // requiring the COM implementation to be written first.
+        Ok(Vec::new())
+    }
+
     /// Start capturing the selected source and forwarding peak values.
     /// Returns a `LoopbackSession` whose `stop` flag kills the stream.
+    ///
+    /// The stream is built *inside* the keepalive thread — see the module-level
+    /// comment for why this is required (cpal::Stream is !Send).
     pub fn start_capture(
         source_id: &str,
         peak: PeakHandle,
-        app: AppHandle,
+        _app: AppHandle,
     ) -> Result<LoopbackSession, String> {
         let stop = Arc::new(AtomicBool::new(false));
+        // stop_ret is kept on the calling thread for the LoopbackSession return value.
+        // stop_clone is what we hand to the data callback (innermost closure).
+        // The keepalive loop inside each spawn branch gets its own Arc::clone too,
+        // so the original `stop` is never moved — only cloned into each closure.
+        let stop_ret   = Arc::clone(&stop);
+        let stop_clone = Arc::clone(&stop);
+
+        // Oneshot channel: the audio thread sends Ok(()) on successful stream
+        // start, or Err(msg) if construction or play() fails. The calling
+        // thread blocks on result_rx.recv() before returning to the frontend.
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<(), String>>();
 
         if source_id == "system_loopback" {
             // WASAPI loopback: open the default *output* device as an input.
             // cpal exposes this via `build_input_stream` on the output device
             // when the host is WASAPI — it creates a loopback stream automatically.
-            let host = cpal::host_from_id(cpal::HostId::Wasapi)
-                .map_err(|e| format!("WASAPI host unavailable: {e}"))?;
-            let device = host
-                .default_output_device()
-                .ok_or("no default output device")?;
-            let config = device
-                .default_output_config()
-                .map_err(|e| format!("output config error: {e}"))?;
-
-            let stop_clone = Arc::clone(&stop);
             let peak_clone = Arc::clone(&peak);
-            let mut smoothed = 0f32;
+            // stop_loop is a separate clone for the keepalive while-loop so
+            // that stop_clone remains available for the data callback closure.
+            let stop_loop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                // All cpal calls happen here — stream never leaves this thread.
+                let host = match cpal::host_from_id(cpal::HostId::Wasapi) {
+                    Ok(h) => h,
+                    Err(e) => { let _ = result_tx.send(Err(format!("WASAPI host unavailable: {e}"))); return; }
+                };
+                let device = match host.default_output_device() {
+                    Some(d) => d,
+                    None => { let _ = result_tx.send(Err("no default output device".into())); return; }
+                };
+                let config = match device.default_output_config() {
+                    Ok(c) => c,
+                    Err(e) => { let _ = result_tx.send(Err(format!("output config error: {e}"))); return; }
+                };
 
-            let stream = device
-                .build_input_stream(
+                let mut smoothed = 0f32;
+                let stream = match device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _| {
-                        if stop_clone.load(Ordering::Relaxed) {
-                            return;
-                        }
+                        if stop_clone.load(Ordering::Relaxed) { return; }
                         // RMS of the block, exponentially smoothed.
                         let rms = (data.iter().map(|&s| s * s).sum::<f32>()
-                            / data.len().max(1) as f32)
-                            .sqrt();
+                            / data.len().max(1) as f32).sqrt();
                         smoothed = smoothed * 0.9 + rms * 0.1;
                         store_peak(&peak_clone, smoothed * 2.0);
                     },
                     |err| eprintln!("[loopback] stream error: {err}"),
                     None,
-                )
-                .map_err(|e| format!("build_input_stream error: {e}"))?;
-            stream.play().map_err(|e| format!("stream.play() error: {e}"))?;
+                ) {
+                    Ok(s) => s,
+                    Err(e) => { let _ = result_tx.send(Err(format!("build_input_stream error: {e}"))); return; }
+                };
 
-            let stop_ret = Arc::clone(&stop);
-            // Keep the stream alive on a background thread.
-            std::thread::spawn(move || {
-                let _stream = stream;
-                while !stop.load(Ordering::Relaxed) {
+                if let Err(e) = stream.play() {
+                    let _ = result_tx.send(Err(format!("stream.play() error: {e}")));
+                    return;
+                }
+
+                // Signal the calling thread that capture started successfully.
+                let _ = result_tx.send(Ok(()));
+
+                // Block here — stream stays alive and !Send constraint is satisfied
+                // because it never left this thread.
+                while !stop_loop.load(Ordering::Relaxed) {
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
+                // stream drops here, on the thread that created it.
             });
-
-            Ok(LoopbackSession { stop: stop_ret, pid: None })
         } else {
-            // Fall back to treating source_id as a named input device.
-            capture_named_input(source_id, peak, stop)
-        }
-    }
+            // Named input device (microphone, line-in, etc.)
+            // Strip the "input:" prefix that list_sources adds as a namespace.
+            let device_name = source_id.strip_prefix("input:").unwrap_or(source_id).to_owned();
+            let peak_clone = Arc::clone(&peak);
+            let stop_loop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let host = cpal::default_host();
+                let device = match host.input_devices()
+                    .map_err(|e| e.to_string())
+                    .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
+                        .ok_or_else(|| format!("device '{}' not found", device_name)))
+                {
+                    Ok(d) => d,
+                    Err(e) => { let _ = result_tx.send(Err(e)); return; }
+                };
+                let config = match device.default_input_config() {
+                    Ok(c) => c,
+                    Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+                };
 
-    fn capture_named_input(
-        name: &str,
-        peak: PeakHandle,
-        stop: Arc<AtomicBool>,
-    ) -> Result<LoopbackSession, String> {
-        let trimmed = name.strip_prefix("input:").unwrap_or(name);
-        let host = cpal::default_host();
-        let device = host
-            .input_devices()
-            .map_err(|e| e.to_string())?
-            .find(|d| d.name().map(|n| n == trimmed).unwrap_or(false))
-            .ok_or_else(|| format!("device '{}' not found", trimmed))?;
-        let config = device
-            .default_input_config()
-            .map_err(|e| e.to_string())?;
-        let stop_clone = Arc::clone(&stop);
-        let peak_clone = Arc::clone(&peak);
-        let mut smoothed = 0f32;
-        let stream = device
-            .build_input_stream(
-                &config.into(),
-                move |data: &[f32], _| {
-                    if stop_clone.load(Ordering::Relaxed) { return; }
-                    let rms = (data.iter().map(|&s| s * s).sum::<f32>()
-                        / data.len().max(1) as f32).sqrt();
-                    smoothed = smoothed * 0.9 + rms * 0.1;
-                    store_peak(&peak_clone, smoothed * 2.0);
-                },
-                |err| eprintln!("[loopback/input] error: {err}"),
-                None,
-            )
-            .map_err(|e| e.to_string())?;
-        stream.play().map_err(|e| e.to_string())?;
-        let stop_ret = Arc::clone(&stop);
-        std::thread::spawn(move || {
-            let _stream = stream;
-            while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        });
+                let mut smoothed = 0f32;
+                let stream = match device.build_input_stream(
+                    &config.into(),
+                    move |data: &[f32], _| {
+                        if stop_clone.load(Ordering::Relaxed) { return; }
+                        let rms = (data.iter().map(|&s| s * s).sum::<f32>()
+                            / data.len().max(1) as f32).sqrt();
+                        smoothed = smoothed * 0.9 + rms * 0.1;
+                        store_peak(&peak_clone, smoothed * 2.0);
+                    },
+                    |err| eprintln!("[loopback/input] error: {err}"),
+                    None,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+                };
+
+                if let Err(e) = stream.play() {
+                    let _ = result_tx.send(Err(e.to_string()));
+                    return;
+                }
+
+                let _ = result_tx.send(Ok(()));
+
+                // Block here — stream stays on this thread.
+                while !stop_loop.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                // stream drops here, on the thread that created it.
+            });
+        }
+
+        // Block until the audio thread reports success or failure.
+        result_rx.recv()
+            .map_err(|_| "audio thread exited before signalling".to_string())??;
+
         Ok(LoopbackSession { stop: stop_ret, pid: None })
     }
 }
@@ -311,6 +388,9 @@ mod platform {
     }
 
     /// Start capturing audio from the chosen source.
+    ///
+    /// The stream is built *inside* the keepalive thread — see the module-level
+    /// comment for why this is required (cpal::Stream and SCStream are !Send).
     pub fn start_capture(
         source_id: &str,
         peak: PeakHandle,
@@ -375,9 +455,9 @@ mod platform {
         config.width = 2;
         config.height = 2;
 
-        let peak_for_handler = Arc::clone(&peak);
-        let stop_for_handler = Arc::clone(&stop);
-
+        // AudioHandler is constructed inside this function and passed to
+        // SCStream::new(). It is not !Send itself (all fields are Arc/Mutex),
+        // so the SCStream — which holds it — is what's !Send.
         struct AudioHandler {
             peak: PeakHandle,
             stop: Arc<AtomicBool>,
@@ -414,38 +494,49 @@ mod platform {
             }
         }
 
-        let handler = AudioHandler {
-            peak: peak_for_handler,
-            stop: stop_for_handler,
-            smoothed: Mutex::new(0.0),
-        };
+        // Oneshot channel for startup result.
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let stop_clone = Arc::clone(&stop);
+        let peak_clone = Arc::clone(&peak);
 
-        let mut stream = SCStream::new(filter, config, handler);
-        stream
-            .add_output(AudioHandler {
-                peak: Arc::clone(&peak),
-                stop: Arc::clone(&stop),
+        // SCStream is !Send, so it must be built and destroyed on the same
+        // thread. We spawn, build inside, report result back, then block.
+        std::thread::spawn(move || {
+            let handler = AudioHandler {
+                peak: Arc::clone(&peak_clone),
+                stop: Arc::clone(&stop_clone),
+                smoothed: Mutex::new(0.0),
+            };
+
+            let mut stream = SCStream::new(filter, config, handler);
+            stream.add_output(AudioHandler {
+                peak: peak_clone,
+                stop: Arc::clone(&stop_clone),
                 smoothed: Mutex::new(0.0),
             }, StreamType::Audio);
-        stream.start_capture().map_err(|e| {
-            format!(
-                "SCStream capture failed: {e:?}. \
-                 Grant Screen Recording permission in \
-                 System Settings → Privacy & Security → Screen & System Audio Recording."
-            )
-        })?;
 
-        let stop_ret = Arc::clone(&stop);
-        // Keep the stream alive until stopped.
-        std::thread::spawn(move || {
-            let _stream = stream;
-            while !stop.load(Ordering::Relaxed) {
+            if let Err(e) = stream.start_capture() {
+                let _ = result_tx.send(Err(format!(
+                    "SCStream capture failed: {e:?}. \
+                     Grant Screen Recording permission in \
+                     System Settings → Privacy & Security → Screen & System Audio Recording."
+                )));
+                return;
+            }
+
+            let _ = result_tx.send(Ok(()));
+
+            // Block here — SCStream stays on this thread until stop fires.
+            while !stop_clone.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            // _stream drops here, stopping the capture.
+            // stream drops here, stopping the SCStream capture.
         });
 
-        Ok(LoopbackSession { stop: stop_ret, pid })
+        result_rx.recv()
+            .map_err(|_| "SCStream thread exited before signalling".to_string())??;
+
+        Ok(LoopbackSession { stop, pid })
     }
 
     fn start_coreaudio_input(
@@ -453,19 +544,34 @@ mod platform {
         peak: PeakHandle,
         stop: Arc<AtomicBool>,
     ) -> Result<LoopbackSession, String> {
-        let name = source_id.strip_prefix("coreaudio:").unwrap_or(source_id);
-        let host = cpal::default_host();
-        let device = host
-            .input_devices()
-            .map_err(|e| e.to_string())?
-            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
-            .ok_or_else(|| format!("CoreAudio device '{}' not found", name))?;
-        let config = device.default_input_config().map_err(|e| e.to_string())?;
+        let device_name = source_id.strip_prefix("coreaudio:").unwrap_or(source_id).to_owned();
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        // stop_clone goes into the data callback closure.
+        // stop_loop goes into the keepalive while-loop inside the spawn.
+        // stop is kept here for the LoopbackSession return value.
         let stop_clone = Arc::clone(&stop);
+        let stop_loop  = Arc::clone(&stop);
         let peak_clone = Arc::clone(&peak);
-        let mut smoothed = 0f32;
-        let stream = device
-            .build_input_stream(
+
+        // cpal::Stream is !Send — build it inside the thread that will own it.
+        std::thread::spawn(move || {
+            let host = cpal::default_host();
+            let device = match host.input_devices()
+                .map_err(|e| e.to_string())
+                .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
+                    .ok_or_else(|| format!("CoreAudio device '{}' not found", device_name)))
+            {
+                Ok(d) => d,
+                Err(e) => { let _ = result_tx.send(Err(e)); return; }
+            };
+            let config = match device.default_input_config() {
+                Ok(c) => c,
+                Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+            };
+
+            let mut smoothed = 0f32;
+            let stream = match device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
                     if stop_clone.load(Ordering::Relaxed) { return; }
@@ -476,17 +582,29 @@ mod platform {
                 },
                 |err| eprintln!("[coreaudio/input] error: {err}"),
                 None,
-            )
-            .map_err(|e| e.to_string())?;
-        stream.play().map_err(|e| e.to_string())?;
-        let stop_ret = Arc::clone(&stop);
-        std::thread::spawn(move || {
-            let _stream = stream;
-            while !stop.load(Ordering::Relaxed) {
+            ) {
+                Ok(s) => s,
+                Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+            };
+
+            if let Err(e) = stream.play() {
+                let _ = result_tx.send(Err(e.to_string()));
+                return;
+            }
+
+            let _ = result_tx.send(Ok(()));
+
+            // Block here — stream stays on this thread.
+            while !stop_loop.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
+            // stream drops here, on the thread that created it.
         });
-        Ok(LoopbackSession { stop: stop_ret, pid: None })
+
+        result_rx.recv()
+            .map_err(|_| "CoreAudio thread exited before signalling".to_string())??;
+
+        Ok(LoopbackSession { stop, pid: None })
     }
 }
 
@@ -541,6 +659,10 @@ mod platform {
         sources
     }
 
+    /// Start capturing the selected ALSA/PipeWire source.
+    ///
+    /// The stream is built *inside* the keepalive thread — see the module-level
+    /// comment for why this is required (cpal::Stream is !Send).
     pub fn start_capture(
         source_id: &str,
         peak: PeakHandle,
@@ -549,20 +671,37 @@ mod platform {
         if source_id == "pipewire_unavailable" {
             return Err("PipeWire is not available. Install pipewire and pipewire-alsa.".into());
         }
-        let name = source_id.strip_prefix("alsa:").unwrap_or(source_id);
-        let host = cpal::default_host();
-        let device = host
-            .input_devices()
-            .map_err(|e| e.to_string())?
-            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
-            .ok_or_else(|| format!("ALSA device '{}' not found", name))?;
-        let config = device.default_input_config().map_err(|e| e.to_string())?;
+
+        let device_name = source_id.strip_prefix("alsa:").unwrap_or(source_id).to_owned();
         let stop = Arc::new(AtomicBool::new(false));
+        // stop_ret is kept here for the LoopbackSession return value.
+        // stop_clone goes into the data callback closure.
+        // stop_loop goes into the keepalive while-loop inside the spawn.
+        let stop_ret   = Arc::clone(&stop);
         let stop_clone = Arc::clone(&stop);
+        let stop_loop  = Arc::clone(&stop);
         let peak_clone = Arc::clone(&peak);
-        let mut smoothed = 0f32;
-        let stream = device
-            .build_input_stream(
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+
+        // cpal::Stream is !Send — build it inside the thread that will own it.
+        std::thread::spawn(move || {
+            let host = cpal::default_host();
+            let device = match host.input_devices()
+                .map_err(|e| e.to_string())
+                .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
+                    .ok_or_else(|| format!("ALSA device '{}' not found", device_name)))
+            {
+                Ok(d) => d,
+                Err(e) => { let _ = result_tx.send(Err(e)); return; }
+            };
+            let config = match device.default_input_config() {
+                Ok(c) => c,
+                Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+            };
+
+            let mut smoothed = 0f32;
+            let stream = match device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
                     if stop_clone.load(Ordering::Relaxed) { return; }
@@ -573,16 +712,28 @@ mod platform {
                 },
                 |err| eprintln!("[pipewire/alsa] error: {err}"),
                 None,
-            )
-            .map_err(|e| e.to_string())?;
-        stream.play().map_err(|e| e.to_string())?;
-        let stop_ret = Arc::clone(&stop);
-        std::thread::spawn(move || {
-            let _stream = stream;
-            while !stop.load(Ordering::Relaxed) {
+            ) {
+                Ok(s) => s,
+                Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+            };
+
+            if let Err(e) = stream.play() {
+                let _ = result_tx.send(Err(e.to_string()));
+                return;
+            }
+
+            let _ = result_tx.send(Ok(()));
+
+            // Block here — stream stays on this thread.
+            while !stop_loop.load(Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
+            // stream drops here, on the thread that created it.
         });
+
+        result_rx.recv()
+            .map_err(|_| "ALSA thread exited before signalling".to_string())??;
+
         Ok(LoopbackSession { stop: stop_ret, pid: None })
     }
 }
