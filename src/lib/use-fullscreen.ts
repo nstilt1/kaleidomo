@@ -36,9 +36,10 @@ export function useFullscreen(
 
   const enterFullscreen = useCallback(async () => {
     try {
+      // The Rust command enters fullscreen and shows/focuses the controls
+      // window as one atomic transition.
       await invoke("set_fullscreen", { fullscreen: true });
       setIsFullscreen(true);
-      await invoke("open_controls_window");
     } catch (error) {
       console.error("Failed to enter fullscreen:", error);
       await syncState();

@@ -31,6 +31,32 @@ function kindLabel(kind: AudioSource["kind"]): string {
   }
 }
 
+function statusLabel(status: LoopbackStatus): string {
+  switch (status) {
+    case "idle":
+      return "Idle";
+    case "loading":
+      return "Scanning";
+    case "active":
+      return "Live";
+    case "error":
+      return "Error";
+  }
+}
+
+function statusClassName(status: LoopbackStatus): string {
+  switch (status) {
+    case "active":
+      return "border-green-500/40 bg-green-500/10 text-green-500";
+    case "loading":
+      return "border-amber-500/40 bg-amber-500/10 text-amber-500";
+    case "error":
+      return "border-destructive/40 bg-destructive/10 text-destructive";
+    case "idle":
+      return "border-border bg-muted text-muted-foreground";
+  }
+}
+
 export function LoopbackAudioPanel({ loopback, onPeak }: LoopbackAudioPanelProps) {
   const { status, error, sources, selectedId, peakRef, listSources, startCapture, stopCapture } = loopback;
 
@@ -65,12 +91,16 @@ export function LoopbackAudioPanel({ loopback, onPeak }: LoopbackAudioPanelProps
         <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           Live System Audio
         </p>
-        {status === "active" && (
-          <span className="text-xs text-green-500 flex items-center gap-1">
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-            Live
-          </span>
-        )}
+        <span
+          className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium ${statusClassName(status)}`}
+          role="status"
+          aria-live="polite"
+        >
+          {status === "active" && (
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-current animate-pulse" />
+          )}
+          {statusLabel(status)}
+        </span>
       </div>
 
       {/* macOS note — ScreenCaptureKit requires the user to grant permission */}

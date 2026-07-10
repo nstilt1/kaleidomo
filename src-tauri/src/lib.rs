@@ -185,21 +185,43 @@ pub struct AppState {
     // Nesting it inside AppState would make it inaccessible to those commands.
 }
 
-/// Show the pre-created floating controls window.
-///
-/// The controls webview is declared in `tauri.conf.json` and starts hidden.
-/// Do not create a WebviewWindowBuilder from a synchronous command on Windows:
-/// WebView2 can deadlock the Tauri runtime, leaving the new window blank and
-/// preventing subsequent commands (including fullscreen exit) from running.
+fn ensure_controls_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(controls) = app.get_webview_window("controls") {
+        return Ok(controls);
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "controls",
+        tauri::WebviewUrl::App("index.html?window=controls".into()),
+    )
+    .title("Kaleidomo Controls")
+    .inner_size(320.0, 900.0)
+    .min_inner_size(280.0, 400.0)
+    .resizable(true)
+    .always_on_top(true)
+    .decorations(true)
+    .visible(false)
+    .build()
+    .map_err(|e| format!("failed to create controls window: {e}"))
+}
+
+/// Show the floating controls window, recreating it if it was previously
+/// destroyed rather than hidden. This is an async command so WebView2 creation
+/// does not block Tauri's synchronous IPC dispatcher on Windows.
 #[tauri::command]
 async fn open_controls_window(app: tauri::AppHandle) -> Result<(), String> {
-    let controls = app
-        .get_webview_window("controls")
-        .ok_or_else(|| "controls window not found".to_string())?;
+    let controls = ensure_controls_window(&app)?;
 
+    controls
+        .unminimize()
+        .map_err(|e| format!("unminimize controls window error: {e}"))?;
     controls
         .show()
         .map_err(|e| format!("show controls window error: {e}"))?;
+    controls
+        .set_focus()
+        .map_err(|e| format!("focus controls window error: {e}"))?;
 
     Ok(())
 }
@@ -250,10 +272,23 @@ async fn set_fullscreen(app: tauri::AppHandle, fullscreen: bool) -> Result<(), S
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
 
+    // Fullscreen must never fail merely because the optional controls window
+    // was not instantiated. The setup hook creates it as a fallback, but this
+    // command remains tolerant so the main window can always enter fullscreen.
     main
         .set_fullscreen(true)
         .map_err(|e| format!("set_fullscreen(true) error: {e}"))?;
-    let _ = main.set_focus();
+
+    let controls = ensure_controls_window(&app)?;
+    controls
+        .unminimize()
+        .map_err(|e| format!("unminimize controls window error: {e}"))?;
+    controls
+        .show()
+        .map_err(|e| format!("show controls window error: {e}"))?;
+    controls
+        .set_focus()
+        .map_err(|e| format!("focus controls window error: {e}"))?;
 
     Ok(())
 }
@@ -1007,6 +1042,30 @@ pub fn run() {
                 eprintln!("remove_menu failed (non-fatal): {e}");
             }
 
+            // Some Tauri development configurations do not instantiate a
+            // hidden secondary window from tauri.conf.json. Create the controls
+            // webview here, during application setup, rather than from an IPC
+            // command. Creating WebView2 from a synchronous command can block
+            // the Windows event loop and leave the controls window blank.
+            if app.get_webview_window("controls").is_none() {
+                tauri::WebviewWindowBuilder::new(
+                    app,
+                    "controls",
+                    tauri::WebviewUrl::App("index.html?window=controls".into()),
+                )
+                .title("Kaleidomo Controls")
+                .inner_size(320.0, 900.0)
+                .min_inner_size(280.0, 400.0)
+                .resizable(true)
+                .always_on_top(true)
+                .decorations(true)
+                .visible(false)
+                .build()
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("failed to create controls window during setup: {e}").into()
+                })?;
+            }
+
             #[cfg(feature = "logging")]
             {
                 let window = app.get_webview_window("main").unwrap();
@@ -1014,6 +1073,21 @@ pub fn run() {
             }
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != "controls" {
+                return;
+            }
+
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Keep the pre-created WebView2 alive. The title-bar X behaves
+                // like "hide controls" so the same window can be shown the
+                // next time fullscreen is entered.
+                api.prevent_close();
+                if let Err(e) = window.hide() {
+                    eprintln!("failed to hide controls window: {e}");
+                }
+            }
         })
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
