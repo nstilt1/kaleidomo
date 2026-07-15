@@ -39,6 +39,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Derive version and slug from tauri.conf.json
         shell: bash
@@ -349,6 +351,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Derive version and slug from tauri.conf.json
         run: |
