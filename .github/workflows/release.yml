@@ -53,7 +53,6 @@ jobs:
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2025-11-07
           targets: x86_64-pc-windows-msvc
 
       # Cache the compiled binary so re-runs skip the ~5 min cargo install.
@@ -364,7 +363,6 @@ jobs:
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2025-11-07
           targets: aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Install Bun
