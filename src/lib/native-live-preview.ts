@@ -65,28 +65,38 @@ export interface NativeLivePreviewParams {
   hueRotation: number;
   imgWidth: number;
   imgHeight: number;
-  // Animation
-  animationDuration: number;
+  // Animation — rates in cycles per second (replaces cycles + animationDuration)
   fps: number;
   rotationRange: number;
-  rotationCycles: number;
+  // Rotation cycles per second
+  rotationCps: number;
   rotationStartOffset: number;
   rotationFn: string;
   hueRange: number;
-  hueCycles: number;
+  // Hue cycles per second
+  hueCps: number;
   hueStartOffset: number;
   hueFn: string;
   zoomMax: number;
   zoomMin: number;
   zoomFn: string;
   zoomStartOffset: number;
-  numZoomLoops: number;
-  // Orientation
+  // Zoom cycles per second
+  zoomCps: number;
+  // Orientation / hero circle
   orientationBaseSpeed: number;
   heroCircleLeftX: number;
   heroCircleRightX: number;
   heroCircleY: number;
   heroDesiredLeftRotation: number;
+  // Starting position on the hero circle in degrees (0° = leftmost point, clockwise).
+  // Converted to a [0, 1) circle fraction internally.
+  orientationPhase: number;
+  // Arc range in degrees: how much of the circle the point traverses per cycle.
+  // 360° means a full loop (with the chosen waveform applied).
+  orientationArcRange: number;
+  // Waveform applied to the arc traversal (sawtooth / sin / triangle / etc.)
+  orientationArcFn: string;
   // Audio-reactive
   audioReactiveEnabled: boolean;
   audioPeakSmoothing: number;
@@ -142,20 +152,17 @@ function modulateByTime(
   return minValue + range * t;
 }
 
+// modulateHue mirrors modulateByTime exactly — uses hueCps directly, no animationDuration.
+// Frame-snapping removed: the hue modulation is now continuous and jumpless.
 function modulateHue(
   elapsedSeconds: number,
-  animationDuration: number,
-  fps: number,
   hueRange: number,
-  hueCycles: number,
+  hueCps: number,
   hueStartOffset: number,
   hueFn: string,
   baseHue: number,
 ): number {
-  const frame = Math.floor(elapsedSeconds * Math.max(1, fps));
-  const elapsed = frame / Math.max(1, fps);
-  const phaseBase = elapsed / Math.max(0.001, animationDuration);
-  const phase = phaseBase * hueCycles + hueStartOffset;
+  const phase = elapsedSeconds * hueCps + hueStartOffset;
   const p = ((phase % 1) + 1) % 1;
   let t: number;
   switch (hueFn.toLowerCase()) {
@@ -439,20 +446,22 @@ export class NativeLivePreviewEngine {
   }
 
   private _buildFrame(base: NativeLivePreviewParams, animElapsed: number): FrameParams {
-    const animDur = Math.max(0.001, base.animationDuration);
-
     // ── standard animation modulation ─────────────────────────────────────
+    // All three modulators now take cycles-per-second directly.
+    // Phase = elapsed * cps + startOffset — never depends on animationDuration,
+    // so changing a rate slider mid-animation continues from the current phase
+    // rather than jumping.
     const zoomFactor = modulateByTime(
       animElapsed, base.zoomMax - base.zoomMin, base.zoomMin,
-      base.numZoomLoops / animDur, base.zoomStartOffset, base.zoomFn,
+      base.zoomCps, base.zoomStartOffset, base.zoomFn,
     );
     const rotOffset = modulateByTime(
       animElapsed, base.rotationRange * (Math.PI / 180), 0,
-      base.rotationCycles / animDur, base.rotationStartOffset, base.rotationFn,
+      base.rotationCps, base.rotationStartOffset, base.rotationFn,
     );
     const hueRotation = modulateHue(
-      animElapsed, animDur, base.fps,
-      base.hueRange, base.hueCycles, base.hueStartOffset, base.hueFn,
+      animElapsed,
+      base.hueRange, base.hueCps, base.hueStartOffset, base.hueFn,
       base.hueRotation,
     );
 
@@ -493,13 +502,45 @@ export class NativeLivePreviewEngine {
     // Convert to circle-fractions: circleSpeedCyclesPerSec = px/s / (2π * radius)
     const heroRadius = Math.max(1, (base.heroCircleRightX - base.heroCircleLeftX) * 0.5);
     const baseSpeedCycles = base.orientationBaseSpeed / (2 * Math.PI * heroRadius);
+
+    // orientationPhase is the user-set starting position in degrees.
+    // Convert to a [0, 1) circle fraction so it adds cleanly into the accumulator.
+    const phaseOffsetFraction = ((base.orientationPhase % 360) + 360) % 360 / 360;
+
+    // Arc-constrained orientation:
+    // Instead of the point freely lapping the full circle, we apply the arc waveform
+    // to the range [0, arcRangeFraction), then add the phase offset.
+    // This is equivalent to modulateByTime but for the orientation value.
+    //
+    // arcRangeFraction = orientationArcRange / 360 (converts degrees to circle fraction)
+    // The waveform t ∈ [0, 1] is mapped to [0, arcRangeFraction].
+    // With sawtooth at 360°: t increments 0→1 each cycle = full continuous loop.
+    // With sin at 90°: oscillates from phaseOffset to phaseOffset + 0.25 and back.
+    const arcRangeFraction = base.orientationArcRange / 360;
+    const continuousPhase = animElapsed * baseSpeedCycles;
+    const arcCyclePhase = continuousPhase + 0; // start offset could be added here if needed
+    const arcP = ((arcCyclePhase % 1) + 1) % 1;
+    let arcT: number;
+    switch (base.orientationArcFn.toLowerCase()) {
+      case "linear": case "saw": case "sawtooth": arcT = arcP; break;
+      case "triangle": arcT = arcP < 0.5 ? arcP * 2 : 2 - arcP * 2; break;
+      case "sin":  arcT = Math.sin(arcCyclePhase * TAU) * 0.5 + 0.5; break;
+      case "sin2": arcT = Math.sin(arcCyclePhase * TAU) ** 2; break;
+      case "-cos": case "negcos": arcT = 0.5 - 0.5 * Math.cos(arcCyclePhase * TAU); break;
+      case "cos":  arcT = (Math.cos(arcCyclePhase * TAU) + 1) * 0.5; break;
+      default: arcT = arcP;
+    }
+    // arcT ∈ [0, 1] → position within the arc range, then offset by phase
     const rawOrientationValue =
-      (animElapsed * baseSpeedCycles) % 1
+      phaseOffsetFraction
+      + arcT * arcRangeFraction
       + this._accumulatedOrientationOffset;
-    const orientationValue = rawOrientationValue % 1;
+    const orientationValue = ((rawOrientationValue % 1) + 1) % 1;
 
     const useOrientation =
       base.orientationBaseSpeed !== 0 ||
+      base.orientationPhase !== 0 ||
+      base.orientationArcRange !== 360 ||
       (base.audioReactiveEnabled && this._accumulatedOrientationOffset !== 0);
 
     let x = base.x, y = base.y;

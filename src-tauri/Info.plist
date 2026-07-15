@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>Kaleidomo captures system audio so audio levels can animate visual effects.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Kaleidomo uses microphone and audio-input levels to animate visual effects when you select an input device.</string>
+</dict>
+</plist>

@@ -22,6 +22,9 @@ default = ["cert_check"]
 #default = ["logging"]
 cert_check = []
 logging = ["log", "tauri/devtools"]
+# Enable to get per-app WASAPI session enumeration on Windows.
+# Requires the `windows` crate's IAudioSessionManager2 bindings.
+wasapi_sessions = []
 
 [dependencies]
 base64 = "0.21"
@@ -39,3 +42,53 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = "1.50.0"
 sha1 = "0.10"
+
+# ── Audio loopback — platform-gated ──────────────────────────────────────────
+#
+# cpal is used on Windows (WASAPI loopback + input devices) and Linux
+# (PipeWire/ALSA monitor sources + input devices).
+#
+# On macOS, system audio goes through ScreenCaptureKit (see below).
+# cpal is still needed on macOS for CoreAudio *input* devices (mic, USB
+# audio interfaces), but those share the same cpal dependency block.
+#
+# Windows: no extra system packages needed — WASAPI is in-box.
+# macOS:   no extra system packages needed — CoreAudio is in-box.
+# Linux:   requires libasound2-dev:
+#            sudo apt install libasound2-dev          # Debian/Ubuntu/WSL
+#            sudo dnf install alsa-lib-devel          # Fedora
+#            sudo pacman -S alsa-lib                  # Arch
+
+# Windows — WASAPI loopback via cpal.
+# The `wasapi` feature is required for cpal::HostId::Wasapi (loopback capture).
+# Without it, host_from_id(Wasapi) fails and falls back to the default non-loopback host.
+[target.'cfg(target_os = "windows")'.dependencies]
+cpal = { version = "0.15" }
+
+# macOS — CoreAudio input devices via cpal; system loopback via ScreenCaptureKit
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = "0.15"
+dispatch2 = "0.3"
+# Direct generated Objective-C bindings to ScreenCaptureKit. System-audio
+# capture requires macOS 13+ at runtime and does not pull in the Swift-based
+# `apple-metal` dependency used by the higher-level `screencapturekit` crate.
+objc2 = "0.6.4"
+block2 = "0.6.2"
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSError", "NSObject", "NSString"] }
+objc2-core-foundation = "0.3.2"
+objc2-core-media = { version = "0.3.2", features = ["CMSampleBuffer", "CMBlockBuffer", "objc2-core-audio"] }
+objc2-core-audio-types = { version = "0.3.2", features = ["CoreAudioBaseTypes"] }
+objc2-screen-capture-kit = { version = "0.3.2", features = [
+    "block2",
+    "dispatch2",
+    "libc",
+    "objc2-core-foundation",
+    "objc2-core-media",
+    "SCShareableContent",
+    "SCStream",
+] }
+
+# Linux — PipeWire monitor sources + ALSA input devices via cpal.
+# Build requirement: sudo apt install libasound2-dev
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = "0.15"

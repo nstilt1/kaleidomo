@@ -24,6 +24,15 @@ pub use live_preview::render_live_preview_frame;
 
 mod preview_server;
 
+mod audio_loopback;
+pub use audio_loopback::{
+    LoopbackState,
+    list_loopback_sources,
+    start_loopback_capture,
+    stop_loopback_capture,
+    get_loopback_peak,
+};
+
 use tokio::sync::Mutex as AsyncMutex;
 
 use std::fs::File;
@@ -170,6 +179,135 @@ pub struct AppState {
     pub license_sync_cooldown: AsyncMutex<licensing::cooldown::LicenseSyncCooldownState>,
     pub loaded_gpu_image_path: Mutex<Option<String>>,
     pub last_version_fetch: AsyncMutex<Option<u64>>,
+    // Note: LoopbackState is NOT a field here. It is registered separately via
+    // app.manage(LoopbackState::new()) in run() so that tauri::State<'_, LoopbackState>
+    // resolves correctly in start_loopback_capture / stop_loopback_capture / get_loopback_peak.
+    // Nesting it inside AppState would make it inaccessible to those commands.
+}
+
+fn ensure_controls_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(controls) = app.get_webview_window("controls") {
+        return Ok(controls);
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "controls",
+        tauri::WebviewUrl::App("index.html?window=controls".into()),
+    )
+    .title("Kaleidomo Controls")
+    .inner_size(320.0, 900.0)
+    .min_inner_size(280.0, 400.0)
+    .resizable(true)
+    .always_on_top(true)
+    .decorations(true)
+    .visible(false)
+    .build()
+    .map_err(|e| format!("failed to create controls window: {e}"))
+}
+
+/// Show the floating controls window, recreating it if it was previously
+/// destroyed rather than hidden. This is an async command so WebView2 creation
+/// does not block Tauri's synchronous IPC dispatcher on Windows.
+#[tauri::command]
+async fn open_controls_window(app: tauri::AppHandle) -> Result<(), String> {
+    let controls = ensure_controls_window(&app)?;
+
+    controls
+        .unminimize()
+        .map_err(|e| format!("unminimize controls window error: {e}"))?;
+    controls
+        .show()
+        .map_err(|e| format!("show controls window error: {e}"))?;
+    controls
+        .set_focus()
+        .map_err(|e| format!("focus controls window error: {e}"))?;
+
+    Ok(())
+}
+
+/// Hide the floating controls window without destroying its WebView.
+/// Keeping it alive avoids recreating WebView2 while the app is running.
+#[tauri::command]
+async fn close_controls_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(controls) = app.get_webview_window("controls") {
+        controls
+            .hide()
+            .map_err(|e| format!("hide controls window error: {e}"))?;
+    }
+
+    Ok(())
+}
+
+fn exit_fullscreen_impl(app: &tauri::AppHandle) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    // Native fullscreen already handles the Windows frame. Do not mutate
+    // decorations before or after fullscreen; doing so can leave a borderless
+    // window that visually appears to remain fullscreen.
+    main
+        .set_fullscreen(false)
+        .map_err(|e| format!("set_fullscreen(false) error: {e}"))?;
+
+    let _ = main.unminimize();
+    let _ = main.show();
+    let _ = main.set_focus();
+
+    if let Some(controls) = app.get_webview_window("controls") {
+        let _ = controls.hide();
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_fullscreen(app: tauri::AppHandle, fullscreen: bool) -> Result<(), String> {
+    if !fullscreen {
+        return exit_fullscreen_impl(&app);
+    }
+
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    // Fullscreen must never fail merely because the optional controls window
+    // was not instantiated. The setup hook creates it as a fallback, but this
+    // command remains tolerant so the main window can always enter fullscreen.
+    main
+        .set_fullscreen(true)
+        .map_err(|e| format!("set_fullscreen(true) error: {e}"))?;
+
+    let controls = ensure_controls_window(&app)?;
+    controls
+        .unminimize()
+        .map_err(|e| format!("unminimize controls window error: {e}"))?;
+    controls
+        .show()
+        .map_err(|e| format!("show controls window error: {e}"))?;
+    controls
+        .set_focus()
+        .map_err(|e| format!("focus controls window error: {e}"))?;
+
+    Ok(())
+}
+
+/// Explicit exit command used by Escape handlers in either webview.
+#[tauri::command]
+async fn exit_fullscreen(app: tauri::AppHandle) -> Result<(), String> {
+    exit_fullscreen_impl(&app)
+}
+
+#[tauri::command]
+fn get_fullscreen(app: tauri::AppHandle) -> Result<bool, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    window
+        .is_fullscreen()
+        .map_err(|e| format!("is_fullscreen error: {e}"))
 }
 
 fn round_to_nearest_multiple(value: u32, multiple: u32) -> u32 {
@@ -891,7 +1029,43 @@ pub fn run() {
                 loaded_gpu_image_path: Mutex::new(None),
                 last_version_fetch: AsyncMutex::new(ts),
             });
-            
+            // LoopbackState is managed independently so that tauri::State<'_, LoopbackState>
+            // resolves in start_loopback_capture / stop_loopback_capture / get_loopback_peak.
+            app.manage(LoopbackState::new());
+
+            // Remove the default Tauri menu ("App / File / Edit").
+            // On Windows this native menu bar sits above the WebView and would
+            // remain visible even in fullscreen unless explicitly removed here.
+            // On macOS the OS always shows a menu bar so this only removes the
+            // Tauri-generated items; the bar itself remains but stays empty.
+            if let Err(e) = app.remove_menu() {
+                eprintln!("remove_menu failed (non-fatal): {e}");
+            }
+
+            // Some Tauri development configurations do not instantiate a
+            // hidden secondary window from tauri.conf.json. Create the controls
+            // webview here, during application setup, rather than from an IPC
+            // command. Creating WebView2 from a synchronous command can block
+            // the Windows event loop and leave the controls window blank.
+            if app.get_webview_window("controls").is_none() {
+                tauri::WebviewWindowBuilder::new(
+                    app,
+                    "controls",
+                    tauri::WebviewUrl::App("index.html?window=controls".into()),
+                )
+                .title("Kaleidomo Controls")
+                .inner_size(320.0, 900.0)
+                .min_inner_size(280.0, 400.0)
+                .resizable(true)
+                .always_on_top(true)
+                .decorations(true)
+                .visible(false)
+                .build()
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("failed to create controls window during setup: {e}").into()
+                })?;
+            }
+
             #[cfg(feature = "logging")]
             {
                 let window = app.get_webview_window("main").unwrap();
@@ -899,6 +1073,21 @@ pub fn run() {
             }
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != "controls" {
+                return;
+            }
+
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Keep the pre-created WebView2 alive. The title-bar X behaves
+                // like "hide controls" so the same window can be shown the
+                // next time fullscreen is entered.
+                api.prevent_close();
+                if let Err(e) = window.hide() {
+                    eprintln!("failed to hide controls window: {e}");
+                }
+            }
         })
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -944,6 +1133,18 @@ pub fn run() {
             store_page_url,
             accept_eula,
             get_eula_status,
+            // Fullscreen
+            set_fullscreen,
+            exit_fullscreen,
+            get_fullscreen,
+            // Controls window
+            open_controls_window,
+            close_controls_window,
+            // System audio loopback
+            list_loopback_sources,
+            start_loopback_capture,
+            stop_loopback_capture,
+            get_loopback_peak,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

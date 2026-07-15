@@ -1,5 +1,5 @@
 import {
-  BrowserRouter,
+  HashRouter,
   Routes,
   Route,
   Navigate,
@@ -15,12 +15,14 @@ import { PerformanceModeCard } from "@/components/PerformanceModeCard";
 import { LicenseProvider, useLicense } from "@/lib/license-context";
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { KaleidomoProvider } from "@/lib/kaleidomo-session-context";
 import { setupAppMenu, type AppMenuHandles } from "@/lib/app-menu";
 import {
   SettingsProvider,
   useSettings,
 } from "@/lib/settings-context";
+import { FullscreenProvider, useFullscreenContext } from "@/lib/fullscreen-context";
 import {
   Select,
   SelectContent,
@@ -74,6 +76,7 @@ function AppLayout() {
   }, [location.pathname]);
 
   const { isUnlocked, licenseType } = useLicense();
+  const { isFullscreen } = useFullscreenContext();
 
   const [needsUpdate, setNeedsUpdate] = React.useState(false);
 
@@ -88,7 +91,8 @@ function AppLayout() {
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
-      <header className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/75">
+      {/* Header is hidden in fullscreen so the canvas occupies the entire window */}
+      <header className={`sticky top-0 z-50 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/75${isFullscreen ? " hidden" : ""}`}>
         <div className="flex h-14 items-center justify-between gap-4 px-4">
           <nav className="flex items-center gap-1 overflow-x-auto">
             <NavLink
@@ -261,25 +265,65 @@ function CreatePage() {
   );
 }
 
+// Rendered in the floating controls window (label "controls") that opens
+// alongside the fullscreen canvas. Wraps Kaleidomo with controlsOnly=true
+// so only the sidebar is shown — no canvas, no engine initialisation.
+// useControlsSync inside Kaleidomo handles bidirectional settings sync with
+// the main window via Tauri events.
+function ControlsPage() {
+  const { exitFullscreen } = useFullscreenContext();
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <button
+        type="button"
+        className="shrink-0 border-b px-4 py-3 text-left font-semibold hover:bg-accent"
+        onClick={() => void exitFullscreen()}
+      >
+        Exit Fullscreen (Esc)
+      </button>
+      <div className="min-h-0 flex-1">
+        <Kaleidomo controlsOnly={true} />
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const isControlsWindow = getCurrentWindow().label === "controls";
+
+  const providers = (children: React.ReactNode) => (
+    <LicenseProvider>
+      <KaleidomoProvider>
+        <SettingsProvider>
+          <FullscreenProvider disablePointerExit={isControlsWindow}>
+            {children}
+          </FullscreenProvider>
+        </SettingsProvider>
+      </KaleidomoProvider>
+    </LicenseProvider>
+  );
+
+  // The controls webview is a dedicated native window. Render its content
+  // directly instead of routing it through AppLayout or EulaGate.
+  if (isControlsWindow) {
+    return providers(<ControlsPage />);
+  }
+
   return (
     <EulaGate>
-      <LicenseProvider>
-        <KaleidomoProvider>
-          <SettingsProvider>
-            <BrowserRouter>
-              <Routes>
-                <Route path="/" element={<AppLayout />}>
-                  <Route index element={<Navigate to="/create" replace />} />
-                  <Route path="create" element={<CreatePage />} />
-                  <Route path="license" element={<LicensePage />} />
-                  <Route path="settings" element={<SettingsPage />} />
-                </Route>
-              </Routes>
-            </BrowserRouter>
-          </SettingsProvider>
-        </KaleidomoProvider>
-      </LicenseProvider>
+      {providers(
+        <HashRouter>
+          <Routes>
+            <Route path="/" element={<AppLayout />}>
+              <Route index element={<Navigate to="/create" replace />} />
+              <Route path="create" element={<CreatePage />} />
+              <Route path="license" element={<LicensePage />} />
+              <Route path="settings" element={<SettingsPage />} />
+            </Route>
+          </Routes>
+        </HashRouter>,
+      )}
     </EulaGate>
   );
 }

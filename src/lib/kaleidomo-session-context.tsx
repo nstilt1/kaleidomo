@@ -1,5 +1,7 @@
 import React from "react";
 
+export type ExportDurationMode = "audio" | "seconds" | "infinite";
+
 export type Settings = {
   x: number;
   y: number;
@@ -20,16 +22,24 @@ export type Settings = {
   zoom_min: number;
   zoom_fn: string;
   zoom_start_offset: number;
-  num_zoom_loops: number;
-  animation_duration: number;
+  // Cycles per second — replaces num_zoom_loops / animation_duration
+  zoom_cps: number;
+  // Rotation modulation
   rotation_range: number;
-  rotation_cycles: number;
   rotation_start_offset: number;
   rotation_fn: string;
+  // Cycles per second — replaces rotation_cycles / animation_duration
+  rotation_cps: number;
+  // Hue modulation
   hue_range: number;
-  hue_cycles: number;
   hue_start_offset: number;
   hue_fn: string;
+  // Cycles per second — replaces hue_cycles / animation_duration
+  hue_cps: number;
+  // Export duration — controls video length only, not live preview
+  exportDurationMode: ExportDurationMode;
+  // Used when exportDurationMode === "seconds"
+  export_duration_s: number;
   // Audio-reactive settings
   audioReactiveEnabled: boolean;
   audioOrientationAmount: number;
@@ -50,7 +60,15 @@ export type Settings = {
   heroCircleLeftX: number;
   heroCircleRightX: number;
   heroCircleY: number;
+  // Starting angle on the hero circle in degrees (0° = leftmost point, clockwise).
+  // Also passed to the WASM engine as orientation_start_offset (converted to [0,1) fraction).
   orientationPhase: number;
+  // Arc range in degrees. Controls how much of the circle the point traverses each cycle.
+  // 360° = full circle (with back-and-forth for non-sawtooth functions).
+  // e.g. 90° with sin: oscillates over a 90° arc, starting from orientationPhase.
+  orientationArcRange: number;
+  // Waveform applied to the arc traversal. Sawtooth = continuous loop; sin/triangle = back-and-forth.
+  orientationArcFn: string;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -73,16 +91,17 @@ export const DEFAULT_SETTINGS: Settings = {
   zoom_min: 1.0,
   zoom_fn: "sin",
   zoom_start_offset: 0.0,
-  num_zoom_loops: 1,
-  animation_duration: 12,
+  zoom_cps: 0.0,
   rotation_range: 360,
-  rotation_cycles: 1,
   rotation_start_offset: 0,
   rotation_fn: "sin",
+  rotation_cps: 0.0,
   hue_range: 360,
-  hue_cycles: 1,
   hue_start_offset: 0,
   hue_fn: "sawtooth",
+  hue_cps: 0.0,
+  exportDurationMode: "seconds",
+  export_duration_s: 12,
   audioReactiveEnabled: false,
   audioOrientationAmount: 0.15,
   audioReorientationAmount: 0.05,
@@ -98,6 +117,8 @@ export const DEFAULT_SETTINGS: Settings = {
   heroCircleRightX: 1547.0,
   heroCircleY: 755.3734001945962,
   orientationPhase: 0.0,
+  orientationArcRange: 360.0,
+  orientationArcFn: "sawtooth",
 };
 
 type KaleidomoSessionContextValue = {

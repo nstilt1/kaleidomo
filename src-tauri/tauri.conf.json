@@ -1,7 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Kaleidomo",
+<<<<<<< HEAD
+  "version": "1.1.0",
+=======
   "version": "1.0.7",
+>>>>>>> origin/main
   "identifier": "com.kaleidomo.app",
   "build": {
     "beforeDevCommand": "bun run dev",
@@ -12,17 +16,36 @@
   "app": {
     "windows": [
       {
-        "title": "Kaliedomo", 
+        "label": "main",
+        "title": "Kaleidomo",
         "width": 800,
         "height": 600
+      },
+      {
+        "label": "controls",
+        "create": true,
+        "title": "Kaleidomo Controls",
+        "url": "index.html?window=controls",
+        "width": 320,
+        "height": 900,
+        "minWidth": 280,
+        "minHeight": 400,
+        "resizable": true,
+        "alwaysOnTop": true,
+        "decorations": true,
+        "focus": false,
+        "visible": false
       }
     ],
     "security": {
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "**"
+        ]
       },
-      "csp": "default-src 'self' tauri: tauri://localhost ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost https://asset.localhost blob: data: filesystem:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:* ws://localhost:* tauri: tauri://localhost ipc: http://ipc.localhost http://tauri.localhost http://asset.localhost https://asset.localhost; script-src 'self' 'wasm-unsafe-eval'; media-src 'self' asset: http://asset.localhost https://asset.localhost blob: data: filesystem:;"    }
+      "csp": "default-src 'self' tauri: tauri://localhost ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost https://asset.localhost blob: data: filesystem:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:* ws://localhost:* tauri: tauri://localhost ipc: http://ipc.localhost http://tauri.localhost http://asset.localhost https://asset.localhost; script-src 'self' 'wasm-unsafe-eval'; media-src 'self' asset: http://asset.localhost https://asset.localhost blob: data: filesystem:;"
+    }
   },
   "bundle": {
     "active": true,
