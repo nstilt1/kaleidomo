@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { invoke } from "@tauri-apps/api/core";
+import { emit, listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { WedgePicker } from "@/components/WedgePicker";
 import { readFile, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
@@ -30,6 +31,9 @@ import { useFullscreenContext } from "@/lib/fullscreen-context";
 import { useControlsSync } from "@/lib/use-controls-sync";
 import { useLoopbackAudio } from "@/lib/use-loopback-audio";
 import { LoopbackAudioPanel } from "@/components/kaleidomo/LoopbackAudioPanel";
+
+const LOOPBACK_PEAK_EVENT = "kd://loopback-peak";
+const AUDIO_SOURCE_MODE_EVENT = "kd://audio-source-mode";
 
 const promptForImageRelocation = async (
   originalPath: string
@@ -426,7 +430,23 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   // Sync settings bidirectionally with the floating controls window.
   // When controlsOnly=true this instance IS the controls window (role: "controls").
   // When controlsOnly=false this is the main canvas window (role: "main").
-  useControlsSync({ role: controlsOnly ? "controls" : "main", settings, setSettings });
+  useControlsSync({
+    role: controlsOnly ? "controls" : "main",
+    settings,
+    count,
+    kaleidoType,
+    imagePath,
+    imageSrc,
+    imgWidth,
+    imgHeight,
+    setSettings,
+    setCount,
+    setKaleidoType,
+    setImagePath,
+    setImageSrc,
+    setImgWidth,
+    setImgHeight,
+  });
 
   // ---------------------------------------------------------------------------
   // WASM live preview engine refs and audio state
@@ -563,14 +583,6 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
 
   /** Build the params object the native engine needs from current state. */
   const buildNativeParams = useCallback((): NativeLivePreviewParams => {
-    const { effectiveZoom } = getEffectiveZoomAndSourceRadius(
-      settings.zoom,
-      settings.resolution,
-      imgWidth,
-      imgHeight,
-      settings.tile_count,
-      wedgePickerMode
-    );
     // Hard cap on live preview render size. Cap the OUTPUT dimensions directly
     // after aspect-ratio math so rounding never pushes either dimension over the limit.
     // In fullscreen we use settings.resolution directly (no cap) because the user
@@ -602,8 +614,14 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       outputSizeH: dims.h,
       offsetX: settings.offset_x,
       offsetY: settings.offset_y,
-      // Base (unanimated) zoom — engine multiplies by animated zoom factor
-      zoom: effectiveZoom,
+      // Per user decision: the base "Zoom" slider should have zero effect on
+      // the live preview / fullscreen native engine — only zoomMin/zoomMax
+      // (below) drive what's shown here. 1 is this engine's multiplicative
+      // identity, since it multiplies this value by the animated zoom factor
+      // computed from zoomMin/zoomMax/zoomFn/zoomCps. Zoom still fully applies
+      // to the editor canvas and exported video via syncVideoSettingsToEngine,
+      // which is untouched.
+      zoom: 1,
       tileCount: settings.tile_count,
       x: settings.x,
       y: settings.y,
@@ -649,23 +667,89 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   }, [settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode, nativePreviewRes, isFullscreen]);
 
   /** Start (or restart) the native Metal-backed live preview loop. */
-  // Called by LoopbackAudioPanel at ~30fps when loopback capture is active.
-  // Updates the single-element peaks array and pushes it to whichever engine is running.
-  // Only active when audioSourceMode === "loopback".
-  const onLoopbackPeak = useCallback((peak: number) => {
-    if (audioSourceMode !== "loopback") return;
-    loopbackPeakArrayRef.current[0] = peak;
-    // Native engine: update peaks ref directly
+  const applyLoopbackPeak = useCallback((peak: number) => {
+    const finitePeak = Number.isFinite(peak) ? Math.max(0, peak) : 0;
+    const floor = Math.max(0, settings.audioPeakFloor);
+    const ceiling = Math.max(floor + 0.0001, settings.audioPeakCeiling);
+    const normalizedPeak = Math.min(
+      1,
+      Math.max(0, (finitePeak - floor) / (ceiling - floor)),
+    );
+
+    loopbackPeakArrayRef.current[0] = normalizedPeak;
+
     if (nativeEngineRef.current) {
       nativeEngineRef.current.setPeaks(loopbackPeakArrayRef.current);
     }
-    // WASM engine: call set_audio_peaks if the engine is live
+
     if (engineRef.current) {
       try {
         engineRef.current.set_audio_peaks(loopbackPeakArrayRef.current);
-      } catch (_) { /* engine may not be started yet */ }
+      } catch (_) {
+        // The WASM engine may not be started yet.
+      }
     }
-  }, [audioSourceMode]);
+  }, [settings.audioPeakCeiling, settings.audioPeakFloor]);
+
+  // The controls and main windows have separate JavaScript heaps. Peaks captured
+  // in the controls window must be forwarded to the main window that owns the
+  // live-preview engine.
+  useEffect(() => {
+    if (controlsOnly) return;
+
+    let unlistenPeak: (() => void) | undefined;
+    let unlistenMode: (() => void) | undefined;
+
+    void listen<{ peak: number }>(LOOPBACK_PEAK_EVENT, (event) => {
+      applyLoopbackPeak(event.payload.peak);
+    }).then((fn) => {
+      unlistenPeak = fn;
+    }).catch(console.error);
+
+    void listen<{ mode: "file" | "loopback" }>(AUDIO_SOURCE_MODE_EVENT, (event) => {
+      const mode = event.payload.mode;
+      setAudioSourceMode(mode);
+
+      if (mode === "file") {
+        const filePeaks = normalizedAudioPeaksRef.current;
+        if (filePeaks) {
+          nativeEngineRef.current?.setPeaks(filePeaks);
+          try {
+            engineRef.current?.set_audio_peaks(filePeaks);
+          } catch (_) {
+            // The WASM engine may not be started yet.
+          }
+        } else {
+          applyLoopbackPeak(0);
+        }
+      }
+    }).then((fn) => {
+      unlistenMode = fn;
+    }).catch(console.error);
+
+    return () => {
+      unlistenPeak?.();
+      unlistenMode?.();
+    };
+  }, [applyLoopbackPeak, controlsOnly]);
+
+  // Keep the main window's audio-source mode aligned with the controls window.
+  useEffect(() => {
+    if (!controlsOnly) return;
+    void emit(AUDIO_SOURCE_MODE_EVENT, { mode: audioSourceMode });
+  }, [audioSourceMode, controlsOnly]);
+
+  // Called by LoopbackAudioPanel at the controls-window render cadence.
+  const onLoopbackPeak = useCallback((peak: number) => {
+    if (audioSourceMode !== "loopback" && peak !== 0) return;
+
+    if (controlsOnly) {
+      void emit(LOOPBACK_PEAK_EVENT, { peak });
+      return;
+    }
+
+    applyLoopbackPeak(peak);
+  }, [applyLoopbackPeak, audioSourceMode, controlsOnly]);
 
   const startNativeLiveEngine = useCallback(() => {
     // Stop any existing native engine.

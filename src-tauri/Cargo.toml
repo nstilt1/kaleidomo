@@ -68,10 +68,25 @@ cpal = { version = "0.15" }
 # macOS — CoreAudio input devices via cpal; system loopback via ScreenCaptureKit
 [target.'cfg(target_os = "macos")'.dependencies]
 cpal = "0.15"
-# ScreenCaptureKit (macOS 12.3+). Requires the screen-capture entitlement in
-# src-tauri/entitlements.plist. The entitlements.plist must be referenced in
-# tauri.conf.json: "bundle": { "macOS": { "entitlements": "./entitlements.plist" } }
-screencapturekit = "0.3"
+dispatch2 = "0.3"
+# Direct generated Objective-C bindings to ScreenCaptureKit. System-audio
+# capture requires macOS 13+ at runtime and does not pull in the Swift-based
+# `apple-metal` dependency used by the higher-level `screencapturekit` crate.
+objc2 = "0.6.4"
+block2 = "0.6.2"
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSError", "NSObject", "NSString"] }
+objc2-core-foundation = "0.3.2"
+objc2-core-media = { version = "0.3.2", features = ["CMSampleBuffer", "CMBlockBuffer", "objc2-core-audio"] }
+objc2-core-audio-types = { version = "0.3.2", features = ["CoreAudioBaseTypes"] }
+objc2-screen-capture-kit = { version = "0.3.2", features = [
+    "block2",
+    "dispatch2",
+    "libc",
+    "objc2-core-foundation",
+    "objc2-core-media",
+    "SCShareableContent",
+    "SCStream",
+] }
 
 # Linux — PipeWire monitor sources + ALSA input devices via cpal.
 # Build requirement: sudo apt install libasound2-dev

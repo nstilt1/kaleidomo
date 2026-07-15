@@ -14,7 +14,7 @@
 // parent can feed them into the existing audio-reactive render path without
 // re-rendering on every frame.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AudioSource, LoopbackStatus, UseLoopbackAudioReturn } from "@/lib/use-loopback-audio";
 
 interface LoopbackAudioPanelProps {
@@ -59,6 +59,7 @@ function statusClassName(status: LoopbackStatus): string {
 
 export function LoopbackAudioPanel({ loopback, onPeak }: LoopbackAudioPanelProps) {
   const { status, error, sources, selectedId, peakRef, listSources, startCapture, stopCapture } = loopback;
+  const [displayPeak, setDisplayPeak] = useState(0);
 
   // Forward peaks to the parent every animation frame while active.
   // Using rAF rather than interval ties us to the render cadence.
@@ -69,10 +70,14 @@ export function LoopbackAudioPanel({ loopback, onPeak }: LoopbackAudioPanelProps
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
       }
+      onPeak(0);
+      setDisplayPeak(0);
       return;
     }
     const tick = () => {
-      onPeak(peakRef.current);
+      const peak = peakRef.current;
+      onPeak(peak);
+      setDisplayPeak(peak);
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
@@ -184,6 +189,19 @@ export function LoopbackAudioPanel({ loopback, onPeak }: LoopbackAudioPanelProps
           ))}
         </div>
       )}
+
+      <div className="space-y-1" aria-label="Live system audio peak">
+        <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+          <span>Input peak</span>
+          <span className="font-mono">{displayPeak.toFixed(3)}</span>
+        </div>
+        <div className="h-2 overflow-hidden rounded bg-muted">
+          <div
+            className="h-full bg-primary transition-[width] duration-75"
+            style={{ width: `${Math.min(100, Math.max(0, displayPeak * 100))}%` }}
+          />
+        </div>
+      </div>
 
       {/* Action buttons */}
       <div className="flex gap-2">

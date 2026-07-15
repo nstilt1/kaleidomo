@@ -4,7 +4,8 @@ export APPLE_ID="somedooby@gmail.com"
 export APPLE_PASSWORD=$(security find-generic-password -a "$USER" -s "notaryPassword" -w)
 export APPLE_TEAM_ID="WK272386LM"
 
-bun run tauri:build -- --target universal-apple-darwin
+#bun run tauri:build -- --target universal-apple-darwin
+bun run tauri:build
 
 #bun run tauri build -- --target universal-apple-darwin --no-sign
 

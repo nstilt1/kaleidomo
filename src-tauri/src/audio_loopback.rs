@@ -12,12 +12,10 @@
 // │             `windows` crate) to enumerate sessions; we pick one and      │
 // │             route only its stream by process ID filtering the peaks.     │
 // │                                                                          │
-// │  macOS    — ScreenCaptureKit (macOS 12.3+). Requires the                │
-// │             com.apple.security.screen-capture entitlement (added to      │
-// │             entitlements.plist). The OS shows a one-time permission      │
-// │             dialog. Per-app capture is the native mode of the API:       │
-// │             we pass an SCContentFilter scoped to one SCRunningApp.       │
-// │             The `screencapturekit` crate wraps the Objective-C API.      │
+// │  macOS    — ScreenCaptureKit through objc2 bindings. System-audio       │
+// │             capture requires macOS 13+ and Screen & System Audio         │
+// │             Recording permission. Per-app capture uses an               │
+// │             SCContentFilter scoped to one SCRunningApplication.          │
 // │                                                                          │
 // │  Linux    — PipeWire monitor sources. cpal sees these as regular input   │
 // │             devices named "Monitor of …". No permission required.        │
@@ -322,60 +320,498 @@ mod platform {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
-    use screencapturekit::{
-        cm_sample_buffer::CMSampleBuffer,
-        sc_content_filter::{InitParams, SCContentFilter},
-        sc_error_handler::StreamErrorHandler,
-        sc_output_handler::{SCStreamOutput, StreamType},
-        sc_shareable_content::SCShareableContent,
-        sc_stream::SCStream,
-        sc_stream_configuration::SCStreamConfiguration,
-    };
+    use block2::{DynBlock, RcBlock};
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use dispatch2::{DispatchQueue, DispatchQueueAttr};
+    use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
+    use objc2::{define_class, msg_send, AnyThread, DefinedClass};
+    use objc2_core_audio_types::{AudioBuffer, AudioBufferList, AudioStreamBasicDescription};
+    use objc2_core_foundation::CFRetained;
+    use objc2_core_media::{
+        CMBlockBuffer, CMSampleBuffer, CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer,
+    };
+    use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
+    use objc2_screen_capture_kit::{
+        SCContentFilter, SCRunningApplication, SCShareableContent, SCStream,
+        SCStreamConfiguration, SCStreamOutput, SCStreamOutputType, SCWindow,
+    };
+    use std::ffi::c_void;
+    use std::mem::{size_of, MaybeUninit};
+    use std::ptr;
+    use std::ptr::NonNull;
+    use std::slice;
+    use std::time::{Duration, Instant};
+    use tauri::Emitter;
 
-    /// List available audio sources on macOS.
+    const SCREEN_CAPTURE_PERMISSION_HINT: &str =
+        "Grant Kaleidomo access in System Settings → Privacy & Security → Screen & System Audio Recording, then restart the app.";
+
+    // Apps launched via Finder/double-click have no terminal attached, so plain
+    // `eprintln!` output goes nowhere and never shows up in Console.app — only
+    // messages sent through the unified logging system (NSLog, os_log, etc.) do.
+    // This helper sends our diagnostic lines through NSLog so they're visible in
+    // Console.app (filter by process name) *and* keeps the eprintln! for anyone
+    // running the binary directly from Terminal.
+    unsafe extern "C" {
+        fn NSLog(format: &NSString, ...);
+    }
+
+    fn dbg_log(message: &str) {
+        eprintln!("{message}");
+        let ns_message = NSString::from_str(message);
+        // SAFETY: NSLog is called with exactly the fixed `format` argument and no
+        // variadic arguments, which is a valid call per the C calling convention.
+        unsafe { NSLog(&ns_message) };
+    }
+
+    #[derive(Debug)]
+    struct AudioOutputIvars {
+        app: AppHandle,
+        peak: PeakHandle,
+        stop: Arc<AtomicBool>,
+        smoothed: Mutex<f32>,
+        last_emit: Mutex<Instant>,
+        logged_first_buffer: AtomicBool,
+        logged_first_nonzero_peak: AtomicBool,
+    }
+
+    define_class!(
+        // SAFETY: NSObject has no additional subclassing requirements and this
+        // class owns only Send + Sync Rust ivars.
+        #[unsafe(super = NSObject)]
+        #[name = "KaleidomoScreenCaptureAudioOutput"]
+        #[ivars = AudioOutputIvars]
+        struct AudioOutput;
+
+        // SAFETY: NSObjectProtocol adds no extra invariants.
+        unsafe impl NSObjectProtocol for AudioOutput {}
+
+        // SAFETY: The selector and parameter types match SCStreamOutput.
+        unsafe impl SCStreamOutput for AudioOutput {
+            #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
+            #[allow(non_snake_case)]
+            unsafe fn stream_didOutputSampleBuffer_ofType(
+                &self,
+                _stream: &SCStream,
+                sample_buffer: &CMSampleBuffer,
+                output_type: SCStreamOutputType,
+            ) {
+                if output_type != SCStreamOutputType::Audio
+                    || self.ivars().stop.load(Ordering::Relaxed)
+                {
+                    return;
+                }
+
+                let Some(rms) = sample_buffer_rms(sample_buffer) else {
+                    return;
+                };
+
+                if !self.ivars().logged_first_buffer.swap(true, Ordering::Relaxed) {
+                    dbg_log(&format!("[sck] received first decodable audio buffer; rms={rms:.6}"));
+                }
+                if rms > 0.000_001
+                    && !self
+                        .ivars()
+                        .logged_first_nonzero_peak
+                        .swap(true, Ordering::Relaxed)
+                {
+                    dbg_log(&format!("[sck] received first nonzero system-audio peak; rms={rms:.6}"));
+                }
+
+                if let Ok(mut smoothed) = self.ivars().smoothed.lock() {
+                    *smoothed = *smoothed * 0.82 + rms * 0.18;
+                    let peak = (*smoothed * 4.0).clamp(0.0, 1.0);
+                    store_peak(&self.ivars().peak, peak);
+
+                    // Emit directly from the native capture callback. This avoids
+                    // depending on a visible controls webview, JavaScript polling,
+                    // or requestAnimationFrame to move the peak into the main window.
+                    if let Ok(mut last_emit) = self.ivars().last_emit.lock() {
+                        if last_emit.elapsed() >= Duration::from_millis(30) {
+                            *last_emit = Instant::now();
+                            let _ = self.ivars().app.emit(
+                                "kd://loopback-peak",
+                                serde_json::json!({ "peak": peak }),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    );
+
+    impl AudioOutput {
+        fn new(app: AppHandle, peak: PeakHandle, stop: Arc<AtomicBool>) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(AudioOutputIvars {
+                app,
+                peak,
+                stop,
+                smoothed: Mutex::new(0.0),
+                last_emit: Mutex::new(Instant::now() - Duration::from_secs(1)),
+                logged_first_buffer: AtomicBool::new(false),
+                logged_first_nonzero_peak: AtomicBool::new(false),
+            });
+            // SAFETY: NSObject's init signature is correct.
+            unsafe { msg_send![super(this), init] }
+        }
+    }
+
+    // Core Media exposes these C functions, but the generated objc2 bindings use
+    // a mix of free functions and methods depending on crate version. Declaring
+    // the two stable C symbols locally keeps this parser compatible with
+    // objc2-core-media 0.3.x while still using objc2's strongly typed structs.
+    unsafe extern "C" {
+        fn CMSampleBufferGetFormatDescription(
+            sample_buffer: *const CMSampleBuffer,
+        ) -> *const c_void;
+
+        fn CMAudioFormatDescriptionGetStreamBasicDescription(
+            format_description: *const c_void,
+        ) -> *const AudioStreamBasicDescription;
+    }
+
+    const AUDIO_FORMAT_LINEAR_PCM: u32 = u32::from_be_bytes(*b"lpcm");
+    const AUDIO_FORMAT_FLAG_IS_FLOAT: u32 = 1 << 0;
+    const AUDIO_FORMAT_FLAG_IS_BIG_ENDIAN: u32 = 1 << 1;
+    const AUDIO_FORMAT_FLAG_IS_SIGNED_INTEGER: u32 = 1 << 2;
+    const AUDIO_FORMAT_FLAG_IS_ALIGNED_HIGH: u32 = 1 << 4;
+
+    /// Decode one ScreenCaptureKit audio sample buffer and return its RMS level.
     ///
-    /// Returns:
-    ///   - "System Audio (all apps)" via ScreenCaptureKit display capture
-    ///   - One entry per running application that has an audio session
-    ///   - Regular CoreAudio input devices (microphone, line-in)
-    pub fn list_sources() -> Vec<AudioSource> {
-        let mut sources = Vec::new();
+    /// ScreenCaptureKit normally emits native-endian Float32 PCM, but Core Media
+    /// does not guarantee that every device/OS combination uses that exact layout.
+    /// Reading the AudioStreamBasicDescription prevents integer or Float64 buffers
+    /// from being misinterpreted as Float32, which previously left the peak at zero.
+    fn sample_buffer_rms(sample_buffer: &CMSampleBuffer) -> Option<f32> {
+        let asbd = unsafe {
+            let description = CMSampleBufferGetFormatDescription(sample_buffer);
+            if description.is_null() {
+                return None;
+            }
 
-        // ScreenCaptureKit sources — requires screen-capture permission.
-        // We offer "System Audio" plus per-app entries.
-        sources.push(AudioSource {
+            let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description);
+            asbd.as_ref()?
+        };
+
+        if asbd.mFormatID != AUDIO_FORMAT_LINEAR_PCM {
+            dbg_log(&format!(
+                "[sck] unsupported audio format id=0x{:08x}",
+                asbd.mFormatID,
+            ));
+            return None;
+        }
+
+        let mut needed = 0usize;
+
+        // `blockBufferOut` (the last parameter) is a *required* out-parameter for
+        // this "WithRetainedBlockBuffer" variant of the API — Core Media returns
+        // OSStatus -12731 (kCMSampleBufferError_RequiredParameterMissing) if it's
+        // NULL, even on this size-only query call. We don't need the block buffer
+        // from this call, so release it immediately if the OS hands one back.
+        let mut size_query_block_buffer: *mut CMBlockBuffer = ptr::null_mut();
+        unsafe {
+            let _ = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                sample_buffer,
+                &mut needed,
+                ptr::null_mut(),
+                0,
+                None,
+                None,
+                0,
+                &mut size_query_block_buffer,
+            );
+        }
+        if !size_query_block_buffer.is_null() {
+            // SAFETY: a non-null pointer here is a +1 retained CMBlockBuffer;
+            // wrapping it in CFRetained releases it as soon as it drops.
+            unsafe {
+                drop(CFRetained::from_raw(NonNull::new_unchecked(
+                    size_query_block_buffer,
+                )));
+            }
+        }
+
+        if needed < size_of::<AudioBufferList>() {
+            needed = size_of::<AudioBufferList>();
+        }
+
+        // Use usize storage so the variable-length AudioBufferList is pointer-aligned.
+        let words = needed.div_ceil(size_of::<usize>());
+        let mut storage = vec![MaybeUninit::<usize>::uninit(); words];
+        let list = storage.as_mut_ptr().cast::<AudioBufferList>();
+
+        // Same requirement as above: this out-parameter must point at valid
+        // storage or the call fails with -12731 before it ever touches `list`.
+        let mut block_buffer: *mut CMBlockBuffer = ptr::null_mut();
+        let status = unsafe {
+            CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                sample_buffer,
+                &mut needed,
+                list,
+                words * size_of::<usize>(),
+                None,
+                None,
+                0,
+                &mut block_buffer,
+            )
+        };
+        if status != 0 {
+            dbg_log(&format!("[sck] failed to get AudioBufferList: OSStatus {status}"));
+            return None;
+        }
+
+        // SAFETY: `status == 0` guarantees a +1 retained CMBlockBuffer was written
+        // into `block_buffer`. The AudioBuffer.mData pointers inside `list` point
+        // into memory owned by that block buffer, so it must stay alive for as
+        // long as we're reading `list` below. Keeping it bound here (rather than
+        // releasing it right away) is what actually keeps the sample data valid;
+        // it's dropped — and the buffer released — at the end of this function.
+        let _retained_block_buffer = if block_buffer.is_null() {
+            None
+        } else {
+            Some(unsafe { CFRetained::from_raw(NonNull::new_unchecked(block_buffer)) })
+        };
+
+        let count = unsafe { (*list).mNumberBuffers as usize };
+        if count == 0 {
+            return None;
+        }
+
+        let first: *const AudioBuffer = unsafe { (*list).mBuffers.as_ptr() };
+        let buffers = unsafe { slice::from_raw_parts(first, count) };
+
+        let flags = asbd.mFormatFlags;
+        let bits = asbd.mBitsPerChannel as usize;
+        let is_float = flags & AUDIO_FORMAT_FLAG_IS_FLOAT != 0;
+        let is_signed_integer = flags & AUDIO_FORMAT_FLAG_IS_SIGNED_INTEGER != 0;
+        let is_big_endian = flags & AUDIO_FORMAT_FLAG_IS_BIG_ENDIAN != 0;
+        let is_aligned_high = flags & AUDIO_FORMAT_FLAG_IS_ALIGNED_HIGH != 0;
+
+        let bytes_per_sample = bits.div_ceil(8);
+        if bytes_per_sample == 0 {
+            return None;
+        }
+
+        let mut sum_squares = 0.0f64;
+        let mut sample_count = 0usize;
+
+        for buffer in buffers {
+            if buffer.mData.is_null() || buffer.mDataByteSize == 0 {
+                continue;
+            }
+
+            let bytes = unsafe {
+                slice::from_raw_parts(
+                    buffer.mData.cast::<u8>(),
+                    buffer.mDataByteSize as usize,
+                )
+            };
+
+            for chunk in bytes.chunks_exact(bytes_per_sample) {
+                let sample = if is_float {
+                    decode_float_sample(chunk, bits, is_big_endian)
+                } else if is_signed_integer {
+                    decode_signed_integer_sample(
+                        chunk,
+                        bits,
+                        is_big_endian,
+                        is_aligned_high,
+                    )
+                } else {
+                    None
+                };
+
+                if let Some(sample) = sample.filter(|value| value.is_finite()) {
+                    let sample = sample.clamp(-1.0, 1.0) as f64;
+                    sum_squares += sample * sample;
+                    sample_count += 1;
+                }
+            }
+        }
+
+        if sample_count == 0 {
+            return None;
+        }
+
+        Some((sum_squares / sample_count as f64).sqrt() as f32)
+    }
+
+    fn decode_float_sample(bytes: &[u8], bits: usize, big_endian: bool) -> Option<f32> {
+        match bits {
+            32 if bytes.len() >= 4 => {
+                let raw = [bytes[0], bytes[1], bytes[2], bytes[3]];
+                Some(if big_endian {
+                    f32::from_bits(u32::from_be_bytes(raw))
+                } else {
+                    f32::from_bits(u32::from_le_bytes(raw))
+                })
+            }
+            64 if bytes.len() >= 8 => {
+                let raw = [
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7],
+                ];
+                let value = if big_endian {
+                    f64::from_bits(u64::from_be_bytes(raw))
+                } else {
+                    f64::from_bits(u64::from_le_bytes(raw))
+                };
+                Some(value as f32)
+            }
+            _ => None,
+        }
+    }
+
+    fn decode_signed_integer_sample(
+        bytes: &[u8],
+        bits: usize,
+        big_endian: bool,
+        aligned_high: bool,
+    ) -> Option<f32> {
+        if bits == 0 || bits > 32 || bytes.is_empty() || bytes.len() > 4 {
+            return None;
+        }
+
+        let mut raw = 0u32;
+        if big_endian {
+            for &byte in bytes {
+                raw = (raw << 8) | byte as u32;
+            }
+        } else {
+            for (index, &byte) in bytes.iter().enumerate() {
+                raw |= (byte as u32) << (index * 8);
+            }
+        }
+
+        let storage_bits = bytes.len() * 8;
+        if aligned_high && storage_bits > bits {
+            raw >>= storage_bits - bits;
+        }
+
+        let sign_bit = 1u32 << (bits - 1);
+        let mask = if bits == 32 { u32::MAX } else { (1u32 << bits) - 1 };
+        raw &= mask;
+
+        let signed = if raw & sign_bit != 0 {
+            (raw as i64) - (1i64 << bits)
+        } else {
+            raw as i64
+        };
+
+        let scale = sign_bit as f32;
+        Some((signed as f32 / scale).clamp(-1.0, 1.0))
+    }
+
+    fn error_string(error: *mut NSError) -> String {
+        if error.is_null() {
+            return String::new();
+        }
+        unsafe { (&*error).localizedDescription().to_string() }
+    }
+
+    /// Convert ScreenCaptureKit's callback-based content enumeration into a
+    /// blocking operation. The callback retains the object before transferring
+    /// its raw pointer through the channel, and the receiving thread assumes
+    /// that +1 retain count with Retained::from_raw.
+    fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<usize, String>>(1);
+        let block = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
+            if !error.is_null() {
+                let _ = tx.send(Err(error_string(error)));
+                return;
+            }
+            if content.is_null() {
+                let _ = tx.send(Err("ScreenCaptureKit returned no shareable content".into()));
+                return;
+            }
+
+            // SAFETY: `content` is valid for the duration of the callback. Retain
+            // it before sending the address to the waiting thread.
+            let retained = unsafe { Retained::retain(content) };
+            match retained {
+                Some(retained) => {
+                    let raw = Retained::into_raw(retained) as usize;
+                    let _ = tx.send(Ok(raw));
+                }
+                None => {
+                    let _ = tx.send(Err("failed to retain SCShareableContent".into()));
+                }
+            }
+        });
+
+        unsafe {
+            SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
+                false,
+                false,
+                &block,
+            );
+        }
+
+        let raw = rx
+            .recv_timeout(Duration::from_secs(20))
+            .map_err(|_| format!("ScreenCaptureKit content request timed out. {SCREEN_CAPTURE_PERMISSION_HINT}"))??;
+
+        // SAFETY: The callback transferred a +1 retain count with into_raw.
+        unsafe { Retained::from_raw(raw as *mut SCShareableContent) }
+            .ok_or_else(|| "invalid SCShareableContent pointer".to_string())
+    }
+
+    fn wait_for_capture_completion(
+        invoke: impl FnOnce(&DynBlock<dyn Fn(*mut NSError)>),
+        operation: &str,
+    ) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let completion = RcBlock::new(move |error: *mut NSError| {
+            let result = if error.is_null() {
+                Ok(())
+            } else {
+                Err(error_string(error))
+            };
+            let _ = tx.send(result);
+        });
+
+        invoke(&completion);
+        rx.recv_timeout(Duration::from_secs(20))
+            .map_err(|_| format!("ScreenCaptureKit {operation} timed out"))?
+    }
+
+    pub fn list_sources() -> Vec<AudioSource> {
+        let mut sources = vec![AudioSource {
             id: "sck:system".into(),
             label: "System Audio (all apps)".into(),
             pid: None,
             kind: AudioSourceKind::SystemLoopback,
-        });
+        }];
 
-        // Enumerate running apps via SCShareableContent.
-        // This call returns quickly if permission is already granted;
-        // if not, it returns an empty list and the UI prompts the user
-        // to grant Screen Recording permission in System Settings.
-        if let Ok(content) = SCShareableContent::get() {
-            for app in content.applications {
-                let name = app.application_name.clone();
-                let pid = app.process_id as u32;
-                if name.is_empty() { continue; }
-                sources.push(AudioSource {
-                    id: format!("sck:app:{}", pid),
-                    label: name,
-                    pid: Some(pid),
-                    kind: AudioSourceKind::Application,
-                });
+        match shareable_content() {
+            Ok(content) => unsafe {
+                let applications = content.applications();
+                for app in applications.to_vec() {
+                    let name = app.applicationName().to_string();
+                    let pid = app.processID() as u32;
+                    if name.trim().is_empty() {
+                        continue;
+                    }
+                    sources.push(AudioSource {
+                        id: format!("sck:app:{pid}"),
+                        label: name,
+                        pid: Some(pid),
+                        kind: AudioSourceKind::Application,
+                    });
+                }
+            },
+            Err(error) => {
+                dbg_log(&format!("[sck] unable to enumerate applications: {error}"));
             }
         }
 
-        // CoreAudio input devices (microphone, line-in, USB audio).
         let host = cpal::default_host();
         if let Ok(devices) = host.input_devices() {
-            for d in devices {
-                if let Ok(name) = d.name() {
+            for device in devices {
+                if let Ok(name) = device.name() {
                     sources.push(AudioSource {
-                        id: format!("coreaudio:{}", name),
+                        id: format!("coreaudio:{name}"),
                         label: name,
                         pid: None,
                         kind: AudioSourceKind::InputDevice,
@@ -387,21 +823,15 @@ mod platform {
         sources
     }
 
-    /// Start capturing audio from the chosen source.
-    ///
-    /// The stream is built *inside* the keepalive thread — see the module-level
-    /// comment for why this is required (cpal::Stream and SCStream are !Send).
     pub fn start_capture(
         source_id: &str,
         peak: PeakHandle,
-        _app: AppHandle,
+        app: AppHandle,
     ) -> Result<LoopbackSession, String> {
         let stop = Arc::new(AtomicBool::new(false));
-
         if source_id.starts_with("sck:") {
-            start_sck_capture(source_id, peak, stop)
+            start_sck_capture(source_id, peak, stop, app)
         } else {
-            // CoreAudio input device path (mic, line-in, USB).
             start_coreaudio_input(source_id, peak, stop)
         }
     }
@@ -410,131 +840,146 @@ mod platform {
         source_id: &str,
         peak: PeakHandle,
         stop: Arc<AtomicBool>,
+        app: AppHandle,
     ) -> Result<LoopbackSession, String> {
-        let pid: Option<u32> = if source_id.starts_with("sck:app:") {
-            source_id
-                .strip_prefix("sck:app:")
-                .and_then(|s| s.parse().ok())
-        } else {
-            None // "sck:system" — capture all
-        };
+        let pid = source_id
+            .strip_prefix("sck:app:")
+            .and_then(|value| value.parse::<u32>().ok());
 
-        // Build the SCContentFilter.
-        // For system audio we use DesktopIndependentWindow (captures audio
-        // from all processes without needing a specific window).
-        // For per-app we filter to the matching SCRunningApplication.
-        let content = SCShareableContent::get()
-            .map_err(|e| format!("SCShareableContent::get() failed: {e:?}. Grant Screen Recording permission in System Settings → Privacy & Security."))?;
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let stop_thread = Arc::clone(&stop);
+        let peak_thread = Arc::clone(&peak);
+        let app_thread = app.clone();
 
-        let filter = if let Some(target_pid) = pid {
-            let app = content
-                .applications
-                .iter()
-                .find(|a| a.process_id as u32 == target_pid)
-                .ok_or_else(|| format!("app with pid {} not found", target_pid))?;
-            SCContentFilter::new(InitParams::Application(app.clone()))
-        } else {
-            // Capture audio from the first available display (covers all apps).
-            let display = content
-                .displays
-                .into_iter()
-                .next()
-                .ok_or("no displays found")?;
-            SCContentFilter::new(InitParams::Display(display))
-        };
-
-        // Configure for audio-only capture at 48 kHz stereo.
-        // Setting captures_audio=true and setting a minimal frame rate keeps
-        // CPU use low — we don't need video frames.
-        let mut config = SCStreamConfiguration::default();
-        config.captures_audio = true;
-        config.sample_rate = 48000;
-        config.channel_count = 2;
-        // Minimal video capture to satisfy SCStream (1x1 px, 1 fps).
-        // Without any video, SCStream errors on some macOS versions.
-        config.width = 2;
-        config.height = 2;
-
-        // AudioHandler is constructed inside this function and passed to
-        // SCStream::new(). It is not !Send itself (all fields are Arc/Mutex),
-        // so the SCStream — which holds it — is what's !Send.
-        struct AudioHandler {
-            peak: PeakHandle,
-            stop: Arc<AtomicBool>,
-            smoothed: Mutex<f32>,
-        }
-
-        impl SCStreamOutput for AudioHandler {
-            fn did_output_sample_buffer(
-                &self,
-                sample: CMSampleBuffer,
-                of_type: StreamType,
-            ) {
-                if of_type != StreamType::Audio { return; }
-                if self.stop.load(Ordering::Relaxed) { return; }
-
-                // Extract PCM samples from the CMSampleBuffer.
-                // CMSampleBuffer::get_audio_buffer_list returns interleaved f32 samples.
-                let samples: Vec<f32> = match sample.get_audio_buffer_list() {
-                    Ok(list) => list,
-                    Err(_) => return,
-                };
-                if samples.is_empty() { return; }
-                let rms = (samples.iter().map(|&s| s * s).sum::<f32>()
-                    / samples.len() as f32).sqrt();
-                let mut s = self.smoothed.lock().unwrap();
-                *s = *s * 0.9 + rms * 0.1;
-                store_peak(&self.peak, *s * 2.0);
-            }
-        }
-
-        impl StreamErrorHandler for AudioHandler {
-            fn on_error(&self) {
-                eprintln!("[sck] stream error");
-            }
-        }
-
-        // Oneshot channel for startup result.
-        let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-        let stop_clone = Arc::clone(&stop);
-        let peak_clone = Arc::clone(&peak);
-
-        // SCStream is !Send, so it must be built and destroyed on the same
-        // thread. We spawn, build inside, report result back, then block.
         std::thread::spawn(move || {
-            let handler = AudioHandler {
-                peak: Arc::clone(&peak_clone),
-                stop: Arc::clone(&stop_clone),
-                smoothed: Mutex::new(0.0),
-            };
+            let result = (|| -> Result<(), String> {
+                let content = shareable_content().map_err(|error| {
+                    format!("Unable to access ScreenCaptureKit: {error}. {SCREEN_CAPTURE_PERMISSION_HINT}")
+                })?;
+                dbg_log(&format!(
+                    "[sck] shareable content resolved; capture mode={}",
+                    pid.map(|p| format!("app pid={p}")).unwrap_or_else(|| "system".to_string())
+                ));
 
-            let mut stream = SCStream::new(filter, config, handler);
-            stream.add_output(AudioHandler {
-                peak: peak_clone,
-                stop: Arc::clone(&stop_clone),
-                smoothed: Mutex::new(0.0),
-            }, StreamType::Audio);
+                let displays = unsafe { content.displays() };
+                let display = displays
+                    .firstObject()
+                    .ok_or_else(|| "ScreenCaptureKit reported no displays".to_string())?;
+                let empty_windows = NSArray::<SCWindow>::new();
 
-            if let Err(e) = stream.start_capture() {
-                let _ = result_tx.send(Err(format!(
-                    "SCStream capture failed: {e:?}. \
-                     Grant Screen Recording permission in \
-                     System Settings → Privacy & Security → Screen & System Audio Recording."
-                )));
-                return;
+                let filter = if let Some(target_pid) = pid {
+                    let applications = unsafe { content.applications() };
+                    let application = applications
+                        .to_vec()
+                        .into_iter()
+                        .find(|app| unsafe { app.processID() as u32 == target_pid })
+                        .ok_or_else(|| format!("application with pid {target_pid} is no longer available"))?;
+                    let included = NSArray::<SCRunningApplication>::from_retained_slice(&[
+                        application,
+                    ]);
+                    unsafe {
+                        SCContentFilter::initWithDisplay_includingApplications_exceptingWindows(
+                            SCContentFilter::alloc(),
+                            &display,
+                            &included,
+                            &empty_windows,
+                        )
+                    }
+                } else {
+                    unsafe {
+                        SCContentFilter::initWithDisplay_excludingWindows(
+                            SCContentFilter::alloc(),
+                            &display,
+                            &empty_windows,
+                        )
+                    }
+                };
+
+                let configuration = unsafe { SCStreamConfiguration::new() };
+                unsafe {
+                    configuration.setCapturesAudio(true);
+                    configuration.setSampleRate(48_000);
+                    configuration.setChannelCount(2);
+                    configuration.setExcludesCurrentProcessAudio(true);
+                    configuration.setWidth(2);
+                    configuration.setHeight(2);
+                    configuration.setShowsCursor(false);
+                    configuration.setQueueDepth(3);
+                }
+
+                let output = AudioOutput::new(
+                    app_thread,
+                    peak_thread,
+                    Arc::clone(&stop_thread),
+                );
+                let stream = unsafe {
+                    SCStream::initWithFilter_configuration_delegate(
+                        SCStream::alloc(),
+                        &filter,
+                        &configuration,
+                        None,
+                    )
+                };
+                let output_protocol: &ProtocolObject<dyn SCStreamOutput> =
+                    ProtocolObject::from_ref(&*output);
+
+                // Every known-working Apple sample (and every third-party example
+                // we could find) hands addStreamOutput an explicit serial dispatch
+                // queue for the audio sample handler rather than passing `nil`/None.
+                // This queue must outlive the stream, so it's kept in this local
+                // binding for the duration of the capture loop below (same pattern
+                // as `output`, which is dropped only once capture has stopped).
+                let sample_handler_queue =
+                    DispatchQueue::new("com.kaleidomo.app.sck-audio", DispatchQueueAttr::SERIAL);
+
+                unsafe {
+                    stream
+                        .addStreamOutput_type_sampleHandlerQueue_error(
+                            output_protocol,
+                            SCStreamOutputType::Audio,
+                            Some(&sample_handler_queue),
+                        )
+                        .map_err(|error| error.localizedDescription().to_string())?;
+                }
+                dbg_log("[sck] audio stream output registered; starting capture");
+
+                wait_for_capture_completion(
+                    |completion| unsafe {
+                        stream.startCaptureWithCompletionHandler(Some(completion));
+                    },
+                    "start",
+                )
+                .map_err(|error| format!("ScreenCaptureKit capture failed: {error}. {SCREEN_CAPTURE_PERMISSION_HINT}"))?;
+                dbg_log("[sck] startCapture completed successfully; waiting for sample buffers");
+
+                result_tx
+                    .send(Ok(()))
+                    .map_err(|_| "capture caller disconnected".to_string())?;
+
+                while !stop_thread.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+
+                let _ = wait_for_capture_completion(
+                    |completion| unsafe {
+                        stream.stopCaptureWithCompletionHandler(Some(completion));
+                    },
+                    "stop",
+                );
+
+                // Keep the delegate alive until capture is stopped.
+                drop(output);
+                Ok(())
+            })();
+
+            if let Err(error) = result {
+                let _ = result_tx.send(Err(error));
             }
-
-            let _ = result_tx.send(Ok(()));
-
-            // Block here — SCStream stays on this thread until stop fires.
-            while !stop_clone.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            // stream drops here, stopping the SCStream capture.
         });
 
-        result_rx.recv()
-            .map_err(|_| "SCStream thread exited before signalling".to_string())??;
+        result_rx
+            .recv_timeout(Duration::from_secs(25))
+            .map_err(|_| "ScreenCaptureKit thread exited before signalling".to_string())??;
 
         Ok(LoopbackSession { stop, pid })
     }
@@ -544,64 +989,81 @@ mod platform {
         peak: PeakHandle,
         stop: Arc<AtomicBool>,
     ) -> Result<LoopbackSession, String> {
-        let device_name = source_id.strip_prefix("coreaudio:").unwrap_or(source_id).to_owned();
+        let device_name = source_id
+            .strip_prefix("coreaudio:")
+            .unwrap_or(source_id)
+            .to_owned();
 
         let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-        // stop_clone goes into the data callback closure.
-        // stop_loop goes into the keepalive while-loop inside the spawn.
-        // stop is kept here for the LoopbackSession return value.
         let stop_clone = Arc::clone(&stop);
-        let stop_loop  = Arc::clone(&stop);
+        let stop_loop = Arc::clone(&stop);
         let peak_clone = Arc::clone(&peak);
 
-        // cpal::Stream is !Send — build it inside the thread that will own it.
         std::thread::spawn(move || {
             let host = cpal::default_host();
-            let device = match host.input_devices()
-                .map_err(|e| e.to_string())
-                .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
-                    .ok_or_else(|| format!("CoreAudio device '{}' not found", device_name)))
-            {
-                Ok(d) => d,
-                Err(e) => { let _ = result_tx.send(Err(e)); return; }
+            let device = match host
+                .input_devices()
+                .map_err(|error| error.to_string())
+                .and_then(|mut devices| {
+                    devices
+                        .find(|device| {
+                            device
+                                .name()
+                                .map(|name| name == device_name)
+                                .unwrap_or(false)
+                        })
+                        .ok_or_else(|| format!("CoreAudio device '{device_name}' not found"))
+                }) {
+                Ok(device) => device,
+                Err(error) => {
+                    let _ = result_tx.send(Err(error));
+                    return;
+                }
             };
             let config = match device.default_input_config() {
-                Ok(c) => c,
-                Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+                Ok(config) => config,
+                Err(error) => {
+                    let _ = result_tx.send(Err(error.to_string()));
+                    return;
+                }
             };
 
             let mut smoothed = 0f32;
             let stream = match device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
-                    if stop_clone.load(Ordering::Relaxed) { return; }
-                    let rms = (data.iter().map(|&s| s * s).sum::<f32>()
-                        / data.len().max(1) as f32).sqrt();
+                    if stop_clone.load(Ordering::Relaxed) || data.is_empty() {
+                        return;
+                    }
+                    let rms = (data.iter().map(|&sample| sample * sample).sum::<f32>()
+                        / data.len() as f32)
+                        .sqrt();
                     smoothed = smoothed * 0.9 + rms * 0.1;
                     store_peak(&peak_clone, smoothed * 2.0);
                 },
-                |err| eprintln!("[coreaudio/input] error: {err}"),
+                |error| eprintln!("[coreaudio/input] error: {error}"),
                 None,
             ) {
-                Ok(s) => s,
-                Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+                Ok(stream) => stream,
+                Err(error) => {
+                    let _ = result_tx.send(Err(error.to_string()));
+                    return;
+                }
             };
 
-            if let Err(e) = stream.play() {
-                let _ = result_tx.send(Err(e.to_string()));
+            if let Err(error) = stream.play() {
+                let _ = result_tx.send(Err(error.to_string()));
                 return;
             }
-
             let _ = result_tx.send(Ok(()));
 
-            // Block here — stream stays on this thread.
             while !stop_loop.load(Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(50));
             }
-            // stream drops here, on the thread that created it.
         });
 
-        result_rx.recv()
+        result_rx
+            .recv()
             .map_err(|_| "CoreAudio thread exited before signalling".to_string())??;
 
         Ok(LoopbackSession { stop, pid: None })
