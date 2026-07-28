@@ -5,7 +5,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 export interface UseFullscreenReturn {
   isFullscreen: boolean;
   toggleFullscreen: () => Promise<void>;
-  enterFullscreen: () => Promise<void>;
+  /** Pass `true` to enter "kiosk" fullscreen (main window only, controls window never shown). */
+  enterFullscreen: (kiosk?: boolean) => Promise<void>;
   exitFullscreen: () => Promise<void>;
 }
 
@@ -34,11 +35,17 @@ export function useFullscreen(
     }
   }, []);
 
-  const enterFullscreen = useCallback(async () => {
+  const enterFullscreen = useCallback(async (kiosk: boolean = false) => {
     try {
-      // The Rust command enters fullscreen and shows/focuses the controls
-      // window as one atomic transition.
-      await invoke("set_fullscreen", { fullscreen: true });
+      if (kiosk) {
+        // Used for CLI/preset launches: enters fullscreen on the main window
+        // only, and never creates/shows/focuses the controls window.
+        await invoke("set_fullscreen_kiosk");
+      } else {
+        // The Rust command enters fullscreen and shows/focuses the controls
+        // window as one atomic transition.
+        await invoke("set_fullscreen", { fullscreen: true });
+      }
       setIsFullscreen(true);
     } catch (error) {
       console.error("Failed to enter fullscreen:", error);

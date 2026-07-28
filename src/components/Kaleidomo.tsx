@@ -183,6 +183,9 @@ const IMAGE_SETTING_KEYS = [
   "offset_x",
   "offset_y",
   "aspect_ratio_mode",
+  "dimension_mode",
+  "output_width",
+  "output_height",
 ] as const satisfies readonly (keyof Settings)[];
 
 const VIDEO_SETTING_KEYS = [
@@ -385,7 +388,7 @@ function migrateVideoSettings(incoming: unknown): Partial<Settings> {
 // by the floating controls window that opens alongside the fullscreen canvas.
 function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   const { isUnlocked, licenseType } = useLicense();
-  const { isFullscreen, toggleFullscreen } = useFullscreenContext();
+  const { isFullscreen, toggleFullscreen, enterFullscreen } = useFullscreenContext();
 
   const loopback = useLoopbackAudio();
 
@@ -1205,6 +1208,43 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
     console.log(imageSrc);
   }, []);
 
+  // CLI / kiosk launch: if the app was started with a path to a preset
+  // ("project") file on the command line (e.g. `Kaleidomo.exe "C:\my.kmo.json"`
+  // on Windows), load it and enter fullscreen "kiosk" mode — the controls
+  // window is never shown. Only the main canvas window instance does this;
+  // the controlsOnly (floating controls) instance skips it entirely.
+  useEffect(() => {
+    if (controlsOnly) return;
+
+    let cancelled = false;
+
+    void (async () => {
+      let presetPath: string | null = null;
+      try {
+        presetPath = await invoke<string | null>("get_cli_preset_path");
+      } catch (err) {
+        console.error("Failed to read CLI preset path", err);
+        return;
+      }
+
+      if (cancelled || typeof presetPath !== "string" || presetPath.trim() === "") {
+        return;
+      }
+
+      await loadProjectFromPath(presetPath);
+      if (cancelled) return;
+
+      await enterFullscreen(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally runs once on mount — this only ever applies to the
+    // initial CLI launch, not to subsequent preset loads from the UI.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [controlsOnly]);
+
   useEffect(() => {
     initGpuSetting();
   }, []);
@@ -1252,7 +1292,29 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   }, []);
 
   const calculateDimensions = useCallback(
-    (currentSettings: Pick<Settings, "resolution" | "ratio_num" | "ratio_den">) => {
+    (
+      currentSettings: Pick<
+        Settings,
+        "resolution" | "ratio_num" | "ratio_den" | "dimension_mode" | "output_width" | "output_height"
+      >
+    ) => {
+      // Exact mode: use the user-specified output dimensions as-is. No
+      // multiple-of-8 rounding is needed here — the GPU backend pads its
+      // internal copy-buffer row stride to wgpu's alignment requirement and
+      // strips that padding back out on readback (see readback_into_output
+      // in gpu.rs), so the final image is always exactly width x height
+      // regardless of divisibility. Note `resolution` is NOT used here — it
+      // continues to drive zoom/tile math elsewhere.
+      if (currentSettings.dimension_mode === "exact") {
+        const width = Math.max(1, Math.round(currentSettings.output_width));
+        const height = Math.max(1, Math.round(currentSettings.output_height));
+
+        return {
+          width,
+          height,
+        };
+      }
+
       const short = Math.max(1, currentSettings.resolution);
       const num = Math.max(1, currentSettings.ratio_num);
       const den = Math.max(1, currentSettings.ratio_den);
@@ -1662,15 +1724,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
     }
   };
 
-  const loadProject = async () => {
-    const selected = await open({
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-
-    if (typeof selected !== "string" || selected.trim() === "") {
-      return;
-    }
-
+  const loadProjectFromPath = async (selected: string) => {
     try {
       const content = await readTextFile(selected);
       const parsed: unknown = JSON.parse(content);
@@ -1745,6 +1799,18 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
     } catch (err) {
       console.error("Failed to load project file", err);
     }
+  };
+
+  const loadProject = async () => {
+    const selected = await open({
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+
+    if (typeof selected !== "string" || selected.trim() === "") {
+      return;
+    }
+
+    await loadProjectFromPath(selected);
   };
 
   const saveProject = async () => {
@@ -1942,7 +2008,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
 
                 <NumberSliderInput label="Tile Count" value={settings.tile_count} shouldLimit={!isUnlocked} limitedCap={3.5} min={0.1} max={64.0} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, tile_count: v }))} unit="tiles" roundToInteger={false} />
                 <NumberSliderInput label="Slices" value={count} shouldLimit={!isUnlocked} limitedCap={12} min={3} max={64} step={1} onChange={(v) => setCount(v)} roundToInteger={true} />
-                <NumberSliderInput label="Zoom" value={settings.zoom} shouldLimit={!isUnlocked} limitedMin={0.8} limitedCap={3.0} min={0.001} max={32.0} step={0.0001} unit="x" onChange={(v) => setSettings((s) => ({ ...s, zoom: v }))} roundToInteger={false} sliderScale="splitLog" sliderMidpointValue={1.0} sliderMidpointPercent={zoomSliderMidpointPercent} setExternalValue={(v) => setSettings((s) => ({ ...s, zoom_min: v }))} setExternalValue2={(v) => setSettings((s) => ({ ...s, zoom_max: v }))} externalValueName="Min Zoom" externalValue2Name="Max Zoom" />
+                <NumberSliderInput label="Zoom" value={settings.zoom} shouldLimit={!isUnlocked} limitedMin={0.1} limitedCap={3.0} min={0.001} max={32.0} step={0.0001} unit="x" onChange={(v) => setSettings((s) => ({ ...s, zoom: v }))} roundToInteger={false} sliderScale="splitLog" sliderMidpointValue={1.0} sliderMidpointPercent={zoomSliderMidpointPercent} setExternalValue={(v) => setSettings((s) => ({ ...s, zoom_min: v }))} setExternalValue2={(v) => setSettings((s) => ({ ...s, zoom_max: v }))} externalValueName="Min Zoom" externalValue2Name="Max Zoom" />
                 <NumberSliderInput label="Rotation" value={settings.rotation} min={0.0} max={2 * Math.PI} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, rotation: v }))} unit="radians" roundToInteger={false} />
 
                 <Card className="p-4">
@@ -1958,7 +2024,49 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
                 </Card>
 
                 <NumberSliderInput label="Output Resolution" value={settings.resolution} min={8} shouldLimit={!isUnlocked} limitedCap={720} max={8192} step={8} onChange={(v) => setSettings((s) => ({ ...s, resolution: v }))} unit="px" roundToInteger={false} roundToMultipleOf={8} presetValues={[480, 540, 720, 1080, 1440, 2160, 4320]} />
-                <AspectRatioPicker numerator={settings.ratio_num} denominator={settings.ratio_den} mode={settings.aspect_ratio_mode} onModeChange={(mode) => setSettings((s) => ({ ...s, aspect_ratio_mode: mode }))} onChange={(num, den) => setSettings((s) => ({ ...s, ratio_num: num, ratio_den: den }))} />
+
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <label className="text-sm font-medium">Output Dimensions</label>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSettings((s) => ({ ...s, dimension_mode: "resolution" }))}
+                      className={[
+                        "rounded-md border px-3 py-1.5 text-sm transition-colors",
+                        settings.dimension_mode !== "exact"
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border bg-background hover:bg-muted",
+                      ].join(" ")}
+                      aria-pressed={settings.dimension_mode !== "exact"}
+                    >
+                      Resolution + Ratio
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSettings((s) => ({ ...s, dimension_mode: "exact" }))}
+                      className={[
+                        "rounded-md border px-3 py-1.5 text-sm transition-colors",
+                        settings.dimension_mode === "exact"
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border bg-background hover:bg-muted",
+                      ].join(" ")}
+                      aria-pressed={settings.dimension_mode === "exact"}
+                    >
+                      Exact Dimensions
+                    </button>
+                  </div>
+                </div>
+
+                {settings.dimension_mode === "exact" ? (
+                  <>
+                    <NumberSliderInput label="Output Width" value={settings.output_width} min={1} max={8192} step={1} onChange={(v) => setSettings((s) => ({ ...s, output_width: v }))} unit="px" roundToInteger={true} presetValues={[1280, 1920, 2560, 3840]} />
+                    <NumberSliderInput label="Output Height" value={settings.output_height} min={1} max={8192} step={1} onChange={(v) => setSettings((s) => ({ ...s, output_height: v }))} unit="px" roundToInteger={true} presetValues={[720, 1080, 1440, 2160]} />
+                  </>
+                ) : (
+                  <AspectRatioPicker numerator={settings.ratio_num} denominator={settings.ratio_den} mode={settings.aspect_ratio_mode} onModeChange={(mode) => setSettings((s) => ({ ...s, aspect_ratio_mode: mode }))} onChange={(num, den) => setSettings((s) => ({ ...s, ratio_num: num, ratio_den: den }))} />
+                )}
                 <NumberSliderInput label="Color Shift" value={settings.hue_rotate} min={0} max={360} step={1} onChange={(v) => setSettings((s) => ({ ...s, hue_rotate: v }))} unit="°" roundToInteger={true} />
               </div>
 
@@ -2041,8 +2149,8 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
 
               <hr className="opacity-20" />
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Zoom</p>
-              <NumberSliderInput label="Max Zoom" value={settings.zoom_max} shouldLimit={!isUnlocked} limitedCap={3.0} limitedMin={0.8} min={0.001} max={32.0} step={0.0001} onChange={(v) => setSettings((s) => ({ ...s, zoom_max: v }))} unit="x" roundToInteger={false} sliderScale="splitLog" sliderMidpointValue={1.0} sliderMidpointPercent={zoomSliderMidpointPercent} />
-              <NumberSliderInput label="Min Zoom" value={settings.zoom_min} shouldLimit={!isUnlocked} limitedCap={3.0} limitedMin={0.8} min={0.001} max={32.0} step={0.0001} onChange={(v) => setSettings((s) => ({ ...s, zoom_min: v }))} unit="x" roundToInteger={false} sliderScale="splitLog" sliderMidpointValue={1.0} sliderMidpointPercent={zoomSliderMidpointPercent} />
+              <NumberSliderInput label="Max Zoom" value={settings.zoom_max} shouldLimit={!isUnlocked} limitedCap={3.0} limitedMin={0.1} min={0.001} max={32.0} step={0.0001} onChange={(v) => setSettings((s) => ({ ...s, zoom_max: v }))} unit="x" roundToInteger={false} sliderScale="splitLog" sliderMidpointValue={1.0} sliderMidpointPercent={zoomSliderMidpointPercent} />
+              <NumberSliderInput label="Min Zoom" value={settings.zoom_min} shouldLimit={!isUnlocked} limitedCap={3.0} limitedMin={0.1} min={0.001} max={32.0} step={0.0001} onChange={(v) => setSettings((s) => ({ ...s, zoom_min: v }))} unit="x" roundToInteger={false} sliderScale="splitLog" sliderMidpointValue={1.0} sliderMidpointPercent={zoomSliderMidpointPercent} />
               <Select onValueChange={(v) => setSettings((s) => ({ ...s, zoom_fn: v }))} value={settings.zoom_fn}>
                 <SelectTrigger className="w-full"><SelectValue placeholder="Zoom function" /></SelectTrigger>
                 <SelectContent>

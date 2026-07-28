@@ -15,6 +15,16 @@ export type Settings = {
   offset_x: number;
   offset_y: number;
   aspect_ratio_mode: string;
+  // Controls how final output dimensions (export image/video + editor canvas
+  // preview) are derived. "resolution" = short-side resolution + aspect ratio
+  // (existing behavior). "exact" = output_width/output_height are used as-is.
+  // Note: `resolution` still always drives the kaleidoscope zoom/tile math
+  // (see getEffectiveZoomAndSourceRadius) regardless of dimension_mode — it is
+  // only the *output pixel size* that this mode affects.
+  dimension_mode: "resolution" | "exact";
+  // Used when dimension_mode === "exact"
+  output_width: number;
+  output_height: number;
   still_frame_ending: number;
   fps: number;
   quality: number;
@@ -84,6 +94,9 @@ export const DEFAULT_SETTINGS: Settings = {
   offset_x: 0,
   offset_y: 0,
   aspect_ratio_mode: "preset",
+  dimension_mode: "resolution",
+  output_width: 1920,
+  output_height: 1080,
   still_frame_ending: 0,
   fps: 30,
   quality: 0.1,
