@@ -4,6 +4,7 @@ const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/downloads/kaleid
 const VERSION_URL: &str = "https://hephaestus.alteredbrainchemistry.com/downloads/kaleidomo-version.txt";
 
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_fs::FsExt;
 use tauri_plugin_shell::ShellExt;
 
 use std::{collections::HashMap, sync::{Arc, Mutex}};
@@ -179,10 +180,61 @@ pub struct AppState {
     pub license_sync_cooldown: AsyncMutex<licensing::cooldown::LicenseSyncCooldownState>,
     pub loaded_gpu_image_path: Mutex<Option<String>>,
     pub last_version_fetch: AsyncMutex<Option<u64>>,
+    /// Path to a preset/project file (.json) passed on the command line, e.g.
+    /// `kaleidomo.exe C:\presets\my-preset.kmo.json`. When present, the
+    /// frontend loads it on startup and enters fullscreen "kiosk" mode
+    /// (main window fullscreen, controls window never shown) instead of the
+    /// normal windowed UI. `None` for a regular double-click/dev launch.
+    pub cli_preset_path: Option<String>,
     // Note: LoopbackState is NOT a field here. It is registered separately via
     // app.manage(LoopbackState::new()) in run() so that tauri::State<'_, LoopbackState>
     // resolves correctly in start_loopback_capture / stop_loopback_capture / get_loopback_peak.
     // Nesting it inside AppState would make it inaccessible to those commands.
+}
+
+/// Looks for a preset/project file path passed as a command-line argument,
+/// e.g. `Kaleidomo.exe "C:\presets\my-preset.kmo.json"`. Skips flags
+/// (anything starting with "-") and only accepts a path that actually exists
+/// on disk, so a normal double-click launch (no args) or dev-tooling flags
+/// are never misinterpreted as a preset path.
+fn parse_cli_preset_path() -> Option<String> {
+    std::env::args()
+        .skip(1)
+        .find(|arg| !arg.starts_with('-') && std::path::Path::new(arg).is_file())
+}
+
+/// Returns the preset/project file path (if any) that this instance of the
+/// app was launched with on the command line. The frontend calls this once
+/// on startup to decide whether to auto-load a preset and enter kiosk-mode
+/// fullscreen instead of showing the normal windowed UI.
+#[tauri::command]
+fn get_cli_preset_path(state: State<'_, AppState>) -> Option<String> {
+    state.cli_preset_path.clone()
+}
+
+/// Enters fullscreen on the main window WITHOUT creating, showing, or
+/// focusing the controls window. Used for CLI/kiosk launches where a preset
+/// path is supplied and the controls window should never be visible.
+/// Contrast with `set_fullscreen`, which always shows the controls window.
+#[tauri::command]
+async fn set_fullscreen_kiosk(app: tauri::AppHandle) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+
+    main.set_fullscreen(true)
+        .map_err(|e| format!("set_fullscreen(true) error: {e}"))?;
+
+    // In kiosk launches the main window starts hidden (see .setup()) to avoid
+    // a flash of the normal windowed UI before the preset loads, so it must
+    // be explicitly shown here.
+    main.show()
+        .map_err(|e| format!("show main window error: {e}"))?;
+
+    main.set_focus()
+        .map_err(|e| format!("focus main window error: {e}"))?;
+
+    Ok(())
 }
 
 fn ensure_controls_window(app: &tauri::AppHandle) -> Result<tauri::WebviewWindow, String> {
@@ -346,7 +398,7 @@ fn adjust_path(path: &String) -> String {
 /// Limiting the license using a macro since it copies all of the code 
 /// at compile time.
 macro_rules! limit_license {
-    ($state:expr, $output_size_w:expr, $output_size_h:expr, $offset_x:expr, $offset_y:expr, $zoom:expr, $tile_count:expr) => {
+    ($state:expr, $output_size_w:expr, $output_size_h:expr, $offset_x:expr, $offset_y:expr, $zoom:expr, $tile_count:expr, $is_exporting:expr) => {
         let (unlocked, _license_type) = match $state.license_status.check_license(true).await {
             Ok(v) => {
                 //$license_data = v.1.clone();
@@ -358,7 +410,7 @@ macro_rules! limit_license {
                 (false, "".to_string())
             }
         };
-        if !unlocked {
+        if !unlocked && $is_exporting {
             if $output_size_h > 1280 || $output_size_w > 1280 {
                 let ratio = $output_size_w as f32 / $output_size_h as f32;
                 if ratio > 1.0 {
@@ -529,7 +581,8 @@ async fn export_kaleidoscope(
     img_width: u32,
     img_height: u32,
 ) -> Result<String, String> {
-    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count);
+    let is_exporting = true;
+    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count, is_exporting);
 
     // 1. Open the Save Dialog first (don't render if they hit cancel)
     let file_path = app.dialog()
@@ -641,7 +694,8 @@ async fn generate_kaleidoscope(
 ) -> Result<String, String> {
     let mut _offset_x = 0;
     let mut _offset_y = 0;
-    limit_license!(state, output_size_w, output_size_h, _offset_x, _offset_y, zoom, tile_count);
+    let is_exporting = false;
+    limit_license!(state, output_size_w, output_size_h, _offset_x, _offset_y, zoom, tile_count, is_exporting);
 
     let path = adjust_path(&path);
     // 1. Load the image from the absolute path
@@ -761,9 +815,10 @@ async fn generate_video(
     hero_circle_right_x: f32,
     hero_circle_y: f32,
 ) -> Result<String, String> {
-    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count);
-    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_max, tile_count);
-    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_min, tile_count);
+    let is_exporting = true;
+    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count, is_exporting);
+    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_max, tile_count, is_exporting);
+    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_min, tile_count, is_exporting);
     let file_path = app.dialog()
         .file()
         .add_filter("MP4 Video", &["mp4"])
@@ -983,6 +1038,11 @@ pub fn run() {
 
     let gpu_available_b = gpu_backend.is_some();
 
+    // Parsed once here (rather than inside .setup()) since std::env::args()
+    // reflects the process's original invocation regardless of where it's read.
+    let cli_preset_path = parse_cli_preset_path();
+    let is_cli_kiosk_launch = cli_preset_path.is_some();
+
     // Create the Arc before the Builder so it can be cloned into both the
     // kframe:// scheme handler and AppState.
     let gpu_arc_init = Arc::new(Mutex::new(gpu_backend));
@@ -1028,10 +1088,23 @@ pub fn run() {
                 license_sync_cooldown: AsyncMutex::new(cooldown_state),
                 loaded_gpu_image_path: Mutex::new(None),
                 last_version_fetch: AsyncMutex::new(ts),
+                cli_preset_path: cli_preset_path.clone(),
             });
             // LoopbackState is managed independently so that tauri::State<'_, LoopbackState>
             // resolves in start_loopback_capture / stop_loopback_capture / get_loopback_peak.
             app.manage(LoopbackState::new());
+
+            // Paths chosen through the Tauri dialog plugin are automatically
+            // added to the fs plugin scope. A preset supplied on the command
+            // line bypasses that dialog, so explicitly allow only that exact
+            // preset file before the frontend calls readTextFile().
+            if let Some(preset_path) = cli_preset_path.as_deref() {
+                app.fs_scope()
+                    .allow_file(preset_path)
+                    .map_err(|e| -> Box<dyn std::error::Error> {
+                        format!("failed to allow CLI preset path '{preset_path}': {e}").into()
+                    })?;
+            }
 
             // Remove the default Tauri menu ("App / File / Edit").
             // On Windows this native menu bar sits above the WebView and would
@@ -1072,20 +1145,40 @@ pub fn run() {
                 window.open_devtools();
             }
 
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            if window.label() != "controls" {
-                return;
+            // Kiosk launch: hide the main window immediately so the user never
+            // sees the normal windowed UI. The frontend (via get_cli_preset_path)
+            // loads the preset and then calls set_fullscreen_kiosk, which shows
+            // the window again already in fullscreen.
+            if cli_preset_path.is_some() {
+                if let Some(main) = app.get_webview_window("main") {
+                    if let Err(e) = main.hide() {
+                        eprintln!("failed to hide main window for kiosk launch: {e}");
+                    }
+                }
             }
 
+            Ok(())
+        })
+        .on_window_event(move |window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Keep the pre-created WebView2 alive. The title-bar X behaves
-                // like "hide controls" so the same window can be shown the
-                // next time fullscreen is entered.
-                api.prevent_close();
-                if let Err(e) = window.hide() {
-                    eprintln!("failed to hide controls window: {e}");
+                // A CLI/kiosk launch keeps the controls WebView hidden. If the
+                // main window is closed without exiting the app, that hidden
+                // controls window keeps the Tauri event loop (and kaleidomo.exe)
+                // alive, which also locks target/release/deps/kaleidomo.exe on
+                // Windows and causes LNK1104 on the next build.
+                if is_cli_kiosk_launch && window.label() == "main" {
+                    window.app_handle().exit(0);
+                    return;
+                }
+
+                if window.label() == "controls" {
+                    // Keep the pre-created WebView2 alive during a normal app
+                    // session. The title-bar X behaves like "hide controls" so
+                    // the same window can be shown next time fullscreen is entered.
+                    api.prevent_close();
+                    if let Err(e) = window.hide() {
+                        eprintln!("failed to hide controls window: {e}");
+                    }
                 }
             }
         })
@@ -1135,8 +1228,11 @@ pub fn run() {
             get_eula_status,
             // Fullscreen
             set_fullscreen,
+            set_fullscreen_kiosk,
             exit_fullscreen,
             get_fullscreen,
+            // CLI / kiosk launch
+            get_cli_preset_path,
             // Controls window
             open_controls_window,
             close_controls_window,
