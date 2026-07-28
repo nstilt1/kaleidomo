@@ -4,6 +4,7 @@ const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/downloads/kaleid
 const VERSION_URL: &str = "https://hephaestus.alteredbrainchemistry.com/downloads/kaleidomo-version.txt";
 
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_fs::FsExt;
 use tauri_plugin_shell::ShellExt;
 
 use std::{collections::HashMap, sync::{Arc, Mutex}};
@@ -1040,6 +1041,7 @@ pub fn run() {
     // Parsed once here (rather than inside .setup()) since std::env::args()
     // reflects the process's original invocation regardless of where it's read.
     let cli_preset_path = parse_cli_preset_path();
+    let is_cli_kiosk_launch = cli_preset_path.is_some();
 
     // Create the Arc before the Builder so it can be cloned into both the
     // kframe:// scheme handler and AppState.
@@ -1091,6 +1093,18 @@ pub fn run() {
             // LoopbackState is managed independently so that tauri::State<'_, LoopbackState>
             // resolves in start_loopback_capture / stop_loopback_capture / get_loopback_peak.
             app.manage(LoopbackState::new());
+
+            // Paths chosen through the Tauri dialog plugin are automatically
+            // added to the fs plugin scope. A preset supplied on the command
+            // line bypasses that dialog, so explicitly allow only that exact
+            // preset file before the frontend calls readTextFile().
+            if let Some(preset_path) = cli_preset_path.as_deref() {
+                app.fs_scope()
+                    .allow_file(preset_path)
+                    .map_err(|e| -> Box<dyn std::error::Error> {
+                        format!("failed to allow CLI preset path '{preset_path}': {e}").into()
+                    })?;
+            }
 
             // Remove the default Tauri menu ("App / File / Edit").
             // On Windows this native menu bar sits above the WebView and would
@@ -1145,18 +1159,26 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if window.label() != "controls" {
-                return;
-            }
-
+        .on_window_event(move |window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Keep the pre-created WebView2 alive. The title-bar X behaves
-                // like "hide controls" so the same window can be shown the
-                // next time fullscreen is entered.
-                api.prevent_close();
-                if let Err(e) = window.hide() {
-                    eprintln!("failed to hide controls window: {e}");
+                // A CLI/kiosk launch keeps the controls WebView hidden. If the
+                // main window is closed without exiting the app, that hidden
+                // controls window keeps the Tauri event loop (and kaleidomo.exe)
+                // alive, which also locks target/release/deps/kaleidomo.exe on
+                // Windows and causes LNK1104 on the next build.
+                if is_cli_kiosk_launch && window.label() == "main" {
+                    window.app_handle().exit(0);
+                    return;
+                }
+
+                if window.label() == "controls" {
+                    // Keep the pre-created WebView2 alive during a normal app
+                    // session. The title-bar X behaves like "hide controls" so
+                    // the same window can be shown next time fullscreen is entered.
+                    api.prevent_close();
+                    if let Err(e) = window.hide() {
+                        eprintln!("failed to hide controls window: {e}");
+                    }
                 }
             }
         })

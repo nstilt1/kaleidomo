@@ -191,6 +191,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -237,6 +239,7 @@ jobs:
           import urllib.error
           import urllib.request
           from urllib.parse import urlsplit
+          from datetime import datetime, timezone
 
           import botocore.auth
           import botocore.awsrequest
@@ -253,6 +256,9 @@ jobs:
           sha256 = os.environ["FILE_SHA256"]
           aws_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
 
+          release_date = datetime.now(timezone.utc).date().isoformat()
+          with open("changelog.md", "r", encoding="utf-8") as changelog_file:
+              changelog = changelog_file.read()
           session = botocore.session.get_session()
           creds = session.get_credentials()
           if creds is None:
@@ -340,6 +346,8 @@ jobs:
               "new_key": presign["key"],
               "new_url": presign["publicUrl"],
               "sha256": sha256,
+              "release_date": release_date,
+              "changelog": changelog,
           })
           print("content/downloads update complete:", json.dumps(confirm, indent=2))
           PYEOF
@@ -478,6 +486,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+      
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -524,6 +534,7 @@ jobs:
           import urllib.error
           import urllib.request
           from urllib.parse import urlsplit
+          from datetime import datetime, timezone
 
           import botocore.auth
           import botocore.awsrequest
@@ -540,6 +551,10 @@ jobs:
           sha256 = os.environ["FILE_SHA256"]
           aws_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
 
+          release_date = datetime.now(timezone.utc).date().isoformat()
+
+          with open("changelog.md", "r", encoding="utf-8") as changelog_file:
+              changelog = changelog_file.read()
           session = botocore.session.get_session()
           creds = session.get_credentials()
           if creds is None:
@@ -603,6 +618,8 @@ jobs:
           confirm = signed_post_json("api/release-upload/confirm", {
               "slug": slug, "version": version, "platform": platform,
               "new_key": presign["key"], "new_url": presign["publicUrl"], "sha256": sha256,
+              "release_date": release_date,
+              "changelog": changelog,
           })
           print("content/downloads update complete:", json.dumps(confirm, indent=2))
           PYEOF

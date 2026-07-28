@@ -470,6 +470,11 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   // 720 is the safe default (70 MB/s at 20fps with reusable ImageData).
   const [nativePreviewRes, setNativePreviewRes] = useState<512 | 720 | 1080>(720);
   const [audioPlaying, setAudioPlaying] = useState(false);
+  // CLI/kiosk launches load project state asynchronously, then enter fullscreen.
+  // Track that startup path so the live preview can be started exactly once after
+  // React has committed both the loaded image state and the fullscreen canvas.
+  const cliKioskLaunchRef = useRef(false);
+  const cliKioskPreviewStartedRef = useRef(false);
 
   // Rebuild normalized peaks and send them to WASM engine
   const rebuildAndSendPeaks = useCallback((floor: number, ceiling: number, lowpassHz?: number, lowpassSlope?: number) => {
@@ -793,7 +798,19 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   // Start the WASM live preview engine
   const startLiveEngine = useCallback(async () => {
     const canvas = liveCanvasRef.current;
-    if (!imageSrc) return;
+
+    console.log("[LIVE] startLiveEngine called:", {
+      imagePath,
+      imageSrc,
+      canvas,
+      isFullscreen,
+      platform: isTauriMacOS() ? "macOS-native" : "WebGPU",
+    });
+
+    if (!imageSrc) {
+      console.error("[LIVE] cannot start: imageSrc is empty");
+      return;
+    }
 
     // ── macOS Tauri: use native wgpu/Metal path ──────────────────────────────
     if (isTauriMacOS()) {
@@ -812,7 +829,10 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
     }
 
     // ── All other platforms: WASM WebGPU path ────────────────────────────────
-    if (!canvas) return;
+    if (!canvas) {
+      console.error("[LIVE] cannot start: liveCanvasRef.current is null");
+      return;
+    }
 
     setLivePreviewError(null);
 
@@ -1222,6 +1242,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       let presetPath: string | null = null;
       try {
         presetPath = await invoke<string | null>("get_cli_preset_path");
+        console.log("[CLI] preset path:", presetPath);
       } catch (err) {
         console.error("Failed to read CLI preset path", err);
         return;
@@ -1230,6 +1251,13 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       if (cancelled || typeof presetPath !== "string" || presetPath.trim() === "") {
         return;
       }
+
+      // Mark this as a kiosk launch before loading. loadProjectFromPath updates
+      // React state (imageSrc/settings/etc.), and those updates are not guaranteed
+      // to be committed by the time its async work resolves. A separate effect
+      // below waits for the committed state + fullscreen canvas before starting
+      // the live preview.
+      cliKioskLaunchRef.current = true;
 
       await loadProjectFromPath(presetPath);
       if (cancelled) return;
@@ -1244,6 +1272,51 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
     // initial CLI launch, not to subsequent preset loads from the UI.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controlsOnly]);
+
+  useEffect(() => {
+    if (controlsOnly) return;
+    if (!cliKioskLaunchRef.current || cliKioskPreviewStartedRef.current) return;
+    if (!isFullscreen || !imageSrc || !imagePath || imgWidth <= 0 || imgHeight <= 0) return;
+
+    // set_fullscreen_kiosk() has shown the native window by this point, but give
+    // the WebView one paint to lay out the fullscreen canvas before WebGPU/wgpu
+    // creates or attaches its rendering surface. This avoids a black surface on
+    // command-line kiosk startup, especially on Windows/WebView2.
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        if (cliKioskPreviewStartedRef.current) return;
+
+        console.log("[CLI] starting fullscreen live preview:", {
+          isFullscreen,
+          imagePath,
+          imageSrc,
+          imgWidth,
+          imgHeight,
+          canvas: liveCanvasRef.current,
+        });
+
+        cliKioskPreviewStartedRef.current = true;
+
+        void startLiveEngine().catch((err) => {
+          console.error("[CLI] startLiveEngine failed:", err);
+        });
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+    };
+  }, [
+    controlsOnly,
+    isFullscreen,
+    imageSrc,
+    imagePath,
+    imgWidth,
+    imgHeight,
+    startLiveEngine,
+  ]);
 
   useEffect(() => {
     initGpuSetting();
@@ -1725,6 +1798,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   };
 
   const loadProjectFromPath = async (selected: string) => {
+    console.log("[PROJECT] loading:", selected);
     try {
       const content = await readTextFile(selected);
       const parsed: unknown = JSON.parse(content);
@@ -1735,6 +1809,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
 
       const nextImagePath =
         typeof parsed.imagePath === "string" ? parsed.imagePath : "";
+      console.log("[PROJECT] image path from preset:", nextImagePath);
 
       const nextCount =
         typeof parsed.count === "number" && Number.isFinite(parsed.count)
@@ -1776,6 +1851,12 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
           const loadedImage = await loadImageFromPath(nextImagePath);
 
           if (loadedImage) {
+            console.log("[PROJECT] image loaded:", {
+              imagePath: loadedImage.imagePath,
+              imageSrc: loadedImage.imageSrc,
+              width: loadedImage.width,
+              height: loadedImage.height,
+            });
             setImagePath(loadedImage.imagePath);
             setImageSrc(loadedImage.imageSrc);
             setImgWidth(loadedImage.width);
