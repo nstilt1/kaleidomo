@@ -80,6 +80,12 @@ export class LiveKaleidoscopeEngine {
      * * `base_settings_js` — a JS object matching `KaleidoSettings` (count, offset_x/y, zoom,
      *   tile_count, triangle_center_x/y, triangle_rotation_rad, kaleido_type_idx, hue_rotation)
      * * `video_settings` — a `WasmVideoSettings` instance
+     * * `anti_alias` — enables bilinear texture filtering when sampling the source image
+     *   instead of nearest-neighbor. Default/disabled value: `false`.
+     * * `super_sample` — internal supersampling factor (`1` = disabled/native resolution,
+     *   `2`-`4` render larger internally and box-downsample). Default/disabled value: `1`.
+     * * `aspect_correct` — corrects the kaleidoscope pattern so it isn't visually stretched
+     *   into an ellipse when the canvas is non-square. Default/disabled value: `false`.
      * @param {number} count
      * @param {number} offset_x
      * @param {number} offset_y
@@ -91,12 +97,15 @@ export class LiveKaleidoscopeEngine {
      * @param {number} kaleido_type_idx
      * @param {number} hue_rotation
      * @param {WasmVideoSettings} video_settings
+     * @param {boolean} anti_alias
+     * @param {number} super_sample
+     * @param {boolean} aspect_correct
      */
-    start_animation(count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, video_settings) {
+    start_animation(count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, video_settings, anti_alias, super_sample, aspect_correct) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             _assertClass(video_settings, WasmVideoSettings);
-            wasm.livekaleidoscopeengine_start_animation(retptr, this.__wbg_ptr, count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, video_settings.__wbg_ptr);
+            wasm.livekaleidoscopeengine_start_animation(retptr, this.__wbg_ptr, count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, video_settings.__wbg_ptr, anti_alias, super_sample, aspect_correct);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             if (r1) {
@@ -113,6 +122,9 @@ export class LiveKaleidoscopeEngine {
         wasm.livekaleidoscopeengine_stop_animation(this.__wbg_ptr);
     }
     /**
+     * * `anti_alias` — bilinear texture filtering instead of nearest-neighbor. Default: `false`.
+     * * `super_sample` — internal supersampling factor, `1`-`4` (`1` disables it). Default: `1`.
+     * * `aspect_correct` — corrects stretching on non-square canvases. Default: `false`.
      * @param {number} count
      * @param {number} offset_x
      * @param {number} offset_y
@@ -124,12 +136,15 @@ export class LiveKaleidoscopeEngine {
      * @param {number} kaleido_type_idx
      * @param {number} hue_rotation
      * @param {WasmVideoSettings} video_settings
+     * @param {boolean} anti_alias
+     * @param {number} super_sample
+     * @param {boolean} aspect_correct
      */
-    update_animation_settings(count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, video_settings) {
+    update_animation_settings(count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, video_settings, anti_alias, super_sample, aspect_correct) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             _assertClass(video_settings, WasmVideoSettings);
-            wasm.livekaleidoscopeengine_update_animation_settings(retptr, this.__wbg_ptr, count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, video_settings.__wbg_ptr);
+            wasm.livekaleidoscopeengine_update_animation_settings(retptr, this.__wbg_ptr, count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, video_settings.__wbg_ptr, anti_alias, super_sample, aspect_correct);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             if (r1) {
@@ -1048,7 +1063,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_2164(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_2160(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -1707,13 +1722,13 @@ function __wbg_get_imports() {
             getObject(arg0).writeTexture(getObject(arg1), getArrayU8FromWasm0(arg2, arg3), getObject(arg4), getObject(arg5));
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 110, function: Function { arguments: [Externref], shim_idx: 111, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_1562, __wasm_bindgen_func_elem_1564);
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 109, function: Function { arguments: [Externref], shim_idx: 110, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_1559, __wasm_bindgen_func_elem_1561);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { dtor_idx: 2, function: Function { arguments: [F64], shim_idx: 11, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_420, __wasm_bindgen_func_elem_423);
+            const ret = makeMutClosure(arg0, arg1, wasm.__wasm_bindgen_func_elem_419, __wasm_bindgen_func_elem_422);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0) {
@@ -1740,16 +1755,16 @@ function __wbg_get_imports() {
     };
 }
 
-function __wasm_bindgen_func_elem_1564(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_1564(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_1561(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_1561(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_2164(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_2164(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_2160(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_2160(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
-function __wasm_bindgen_func_elem_423(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_423(arg0, arg1, arg2);
+function __wasm_bindgen_func_elem_422(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_422(arg0, arg1, arg2);
 }
 
 
