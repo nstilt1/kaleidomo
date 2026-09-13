@@ -580,6 +580,10 @@ async fn export_kaleidoscope(
     hue_rotation: u32,
     img_width: u32,
     img_height: u32,
+    // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
+    anti_alias: bool,
+    super_sample: u8,
+    aspect_correct: bool,
 ) -> Result<String, String> {
     let is_exporting = true;
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count, is_exporting);
@@ -623,7 +627,10 @@ async fn export_kaleidoscope(
             "hexagonal_flat_top" => kaleidomo_core::KaleidoType::HexagonalFlatTop,
             _ => return Err("Invalid kaleidoscope type".into()),
         },
-        hue_rotation
+        hue_rotation,
+        anti_alias,
+        super_sample: super_sample.clamp(1, 4),
+        aspect_correct,
     };
 
     let use_gpu = {
@@ -644,12 +651,36 @@ async fn export_kaleidoscope(
                 .lock()
                 .map_err(|_| "failed to lock GPU backend".to_string())?;
             let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
-            let pixel_count = (output_size_w as usize)
-                .checked_mul(output_size_h as usize)
-                .and_then(|v| v.checked_mul(4))
-                .ok_or_else(|| "output dimensions overflowed".to_string())?;
-            let mut pixels = vec![0u8; pixel_count];
-            gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+            // `super_sample`: render at `output_size * factor` internally, then
+            // box-downsample back down before saving, same as the CPU path (which
+            // gets this for free via `render_kaleidoscope_with_auto_backend`).
+            let factor = settings.super_sample.clamp(1, 4);
+            let pixels = if factor > 1 {
+                let render_w = output_size_w * factor as u32;
+                let render_h = output_size_h * factor as u32;
+                let render_settings = kaleidomo_core::KaleidoSettings {
+                    output_size_w: render_w,
+                    output_size_h: render_h,
+                    offset_x: settings.offset_x * factor as i32,
+                    offset_y: settings.offset_y * factor as i32,
+                    ..settings.clone()
+                };
+                let render_pixel_count = (render_w as usize)
+                    .checked_mul(render_h as usize)
+                    .and_then(|v| v.checked_mul(4))
+                    .ok_or_else(|| "output dimensions overflowed".to_string())?;
+                let mut big = vec![0u8; render_pixel_count];
+                gpu.render_into_buffer(&render_settings, &mut big).map_err(|e| e.to_string())?;
+                kaleidomo_core::downsample_box(&big, render_w, render_h, factor, output_size_w, output_size_h)
+            } else {
+                let pixel_count = (output_size_w as usize)
+                    .checked_mul(output_size_h as usize)
+                    .and_then(|v| v.checked_mul(4))
+                    .ok_or_else(|| "output dimensions overflowed".to_string())?;
+                let mut pixels = vec![0u8; pixel_count];
+                gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+                pixels
+            };
             let result_buffer = image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
                 .ok_or_else(|| "failed to create image from GPU output".to_string())?;
             result_buffer.save(&path_str).map_err(|e| format!("Failed to save image: {}", e))
@@ -691,6 +722,10 @@ async fn generate_kaleidoscope(
     hue_rotation: u32,
     img_width: u32,
     img_height: u32,
+    // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
+    anti_alias: bool,
+    super_sample: u8,
+    aspect_correct: bool,
 ) -> Result<String, String> {
     let mut _offset_x = 0;
     let mut _offset_y = 0;
@@ -719,6 +754,9 @@ async fn generate_kaleidoscope(
             _ => return Err("Invalid kaleidoscope type".into()),
         },
         hue_rotation,
+        anti_alias,
+        super_sample: super_sample.clamp(1, 4),
+        aspect_correct,
     };
 
     let use_gpu = {
@@ -738,8 +776,26 @@ async fn generate_kaleidoscope(
                 .lock()
                 .map_err(|_| "Failed to lock GPU backend".to_string())?;
             let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
-            let mut pixels = vec![0u8; (output_size_w * output_size_h * 4) as usize];
-            gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+            // `super_sample`: see `export_kaleidoscope` above for the same wrapper.
+            let factor = settings.super_sample.clamp(1, 4);
+            let pixels = if factor > 1 {
+                let render_w = output_size_w * factor as u32;
+                let render_h = output_size_h * factor as u32;
+                let render_settings = kaleidomo_core::KaleidoSettings {
+                    output_size_w: render_w,
+                    output_size_h: render_h,
+                    offset_x: settings.offset_x * factor as i32,
+                    offset_y: settings.offset_y * factor as i32,
+                    ..settings.clone()
+                };
+                let mut big = vec![0u8; (render_w * render_h * 4) as usize];
+                gpu.render_into_buffer(&render_settings, &mut big).map_err(|e| e.to_string())?;
+                kaleidomo_core::downsample_box(&big, render_w, render_h, factor, output_size_w, output_size_h)
+            } else {
+                let mut pixels = vec![0u8; (output_size_w * output_size_h * 4) as usize];
+                gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+                pixels
+            };
             image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
                 .ok_or_else(|| "Failed to construct image".to_string())
         })
@@ -814,6 +870,10 @@ async fn generate_video(
     hero_circle_left_x: f32,
     hero_circle_right_x: f32,
     hero_circle_y: f32,
+    // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
+    anti_alias: bool,
+    super_sample: u8,
+    aspect_correct: bool,
 ) -> Result<String, String> {
     let is_exporting = true;
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count, is_exporting);
@@ -858,6 +918,9 @@ async fn generate_video(
             _ => return Err("Invalid kaleidoscope type".into()),
         },
         hue_rotation,
+        anti_alias,
+        super_sample: super_sample.clamp(1, 4),
+        aspect_correct,
     };
 
     let video_settings = kaleidomo_core::VideoSettings {

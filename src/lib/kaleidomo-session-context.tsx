@@ -1,3 +1,4 @@
+// kaleidomo-session-context.tsx
 import React from "react";
 
 export type ExportDurationMode = "audio" | "seconds" | "infinite";
@@ -79,6 +80,16 @@ export type Settings = {
   orientationArcRange: number;
   // Waveform applied to the arc traversal. Sawtooth = continuous loop; sin/triangle = back-and-forth.
   orientationArcFn: string;
+
+  // ── Enhancements (all default-disabled to match existing rendered output) ──
+  // Bilinear texture filtering instead of nearest-neighbor sampling.
+  anti_alias: boolean;
+  // Internal supersampling factor (1 = disabled/native resolution, 2-4 = render
+  // larger internally and downsample). Mirrors `KaleidoSettings::super_sample`.
+  super_sample: 1 | 2 | 3 | 4;
+  // Corrects the kaleidoscope pattern so it isn't visually stretched into an
+  // ellipse on non-square output canvases.
+  aspect_correct: boolean;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -132,6 +143,9 @@ export const DEFAULT_SETTINGS: Settings = {
   orientationPhase: 0.0,
   orientationArcRange: 360.0,
   orientationArcFn: "sawtooth",
+  anti_alias: false,
+  super_sample: 1,
+  aspect_correct: false,
 };
 
 type KaleidomoSessionContextValue = {

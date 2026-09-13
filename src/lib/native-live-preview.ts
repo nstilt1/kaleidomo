@@ -1,3 +1,4 @@
+// native-live-preview.ts
 /**
  * native-live-preview.ts
  *
@@ -103,6 +104,10 @@ export interface NativeLivePreviewParams {
   audioOrientationAmount: number;
   audioReorientationAmount: number;
   orientationPeakMultiplier: number;
+  // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
+  antiAlias: boolean;
+  superSample: number;
+  aspectCorrect: boolean;
 }
 
 interface FrameParams {
@@ -121,6 +126,9 @@ interface FrameParams {
   imgWidth: number;
   imgHeight: number;
   jpegQuality: number;
+  antiAlias: boolean;
+  superSample: number;
+  aspectCorrect: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -572,6 +580,9 @@ export class NativeLivePreviewEngine {
       imgWidth: base.imgWidth,
       imgHeight: base.imgHeight,
       jpegQuality: 85,
+      antiAlias: base.antiAlias,
+      superSample: base.superSample,
+      aspectCorrect: base.aspectCorrect,
     };
   }
 }

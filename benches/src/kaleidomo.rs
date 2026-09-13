@@ -33,6 +33,9 @@ fn kaleido_bench(c: &mut Benchmarker) {
         hue_rotation: 0,
         offset_x: 0,
         offset_y: 0,
+        anti_alias: false,
+        super_sample: 1,
+        aspect_correct: false,
     };
 
     for (ty, ty_str) in [KaleidoType::Radial, KaleidoType::Square, KaleidoType::Diamond, KaleidoType::Hexagonal, KaleidoType::HexagonalFlatTop].iter().zip(&["radial", "square", "diamond", "hexagonal", "hexagonal_flat_top"]) {

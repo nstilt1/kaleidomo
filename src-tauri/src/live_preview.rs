@@ -1,3 +1,4 @@
+// kaleidomo-core src-tauri/src/live_preview.rs
 /// Native live-preview command for macOS (wgpu / Metal).
 ///
 /// ## Why spawn_blocking?
@@ -41,6 +42,22 @@ pub struct LivePreviewParams {
     pub hue_rotation: u32,
     pub img_width: u32,
     pub img_height: u32,
+    // ── Enhancements (see `KaleidoSettings` in kaleidomo-core/src/lib.rs) ──
+    /// Bilinear texture filtering instead of nearest-neighbor. Default: `false`.
+    #[serde(default)]
+    pub anti_alias: bool,
+    /// Internal supersampling factor, `1`-`4` (`1` disables it). Default: `1`.
+    #[serde(default = "default_super_sample")]
+    pub super_sample: u8,
+    /// Corrects stretching of the pattern on non-square canvases. Default: `false`.
+    #[serde(default)]
+    pub aspect_correct: bool,
+}
+
+/// Default for `LivePreviewParams::super_sample` so requests sent before this
+/// field existed still deserialize with supersampling disabled (`1`).
+fn default_super_sample() -> u8 {
+    1
 }
 
 impl LivePreviewParams {
@@ -67,6 +84,9 @@ impl LivePreviewParams {
             triangle_rotation_rad: self.rotation,
             kaleido_type,
             hue_rotation: self.hue_rotation,
+            anti_alias: self.anti_alias,
+            super_sample: self.super_sample.clamp(1, 4),
+            aspect_correct: self.aspect_correct,
         })
     }
 }
@@ -97,8 +117,19 @@ pub async fn render_live_preview_frame(
     let w = settings.output_size_w;
     let h = settings.output_size_h;
 
+    // `super_sample`: render at `w/h * factor` internally, then box-downsample
+    // back down to `w x h` before it goes into the response body (whose header
+    // always reports the requested `w`/`h`, not the oversized render size).
+    let factor = settings.super_sample.clamp(1, 4);
+    let (render_w, render_h) = (w * factor as u32, h * factor as u32);
+
     let pixel_count = (w as usize)
         .checked_mul(h as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or("output dimensions overflow")?;
+
+    let render_pixel_count = (render_w as usize)
+        .checked_mul(render_h as usize)
         .and_then(|n| n.checked_mul(4))
         .ok_or("output dimensions overflow")?;
 
@@ -130,11 +161,29 @@ pub async fn render_live_preview_frame(
             .as_mut()
             .ok_or_else(|| "GPU backend unavailable".to_string())?;
 
-        gpu.render_into_buffer(&settings, &mut body[8..])
-            .map_err(|e| {
-                log_error!("[live_preview] GPU render failed: {e}");
-                format!("GPU render failed: {e}")
-            })?;
+        if factor > 1 {
+            let render_settings = kaleidomo_core::KaleidoSettings {
+                output_size_w: render_w,
+                output_size_h: render_h,
+                offset_x: settings.offset_x * factor as i32,
+                offset_y: settings.offset_y * factor as i32,
+                ..settings.clone()
+            };
+            let mut big = vec![0u8; render_pixel_count];
+            gpu.render_into_buffer(&render_settings, &mut big)
+                .map_err(|e| {
+                    log_error!("[live_preview] GPU render failed: {e}");
+                    format!("GPU render failed: {e}")
+                })?;
+            let downsampled = kaleidomo_core::downsample_box(&big, render_w, render_h, factor, w, h);
+            body[8..].copy_from_slice(&downsampled);
+        } else {
+            gpu.render_into_buffer(&settings, &mut body[8..])
+                .map_err(|e| {
+                    log_error!("[live_preview] GPU render failed: {e}");
+                    format!("GPU render failed: {e}")
+                })?;
+        }
 
         Ok(body)
     })

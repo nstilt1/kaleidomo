@@ -1,3 +1,4 @@
+// src/components/Kaleidomo.tsx
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { invoke } from "@tauri-apps/api/core";
@@ -579,6 +580,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         kaleidoTypeIdx,
         settings.hue_rotate,
         vs,
+        settings.anti_alias,
+        settings.super_sample,
+        settings.aspect_correct,
       );
     } catch (e) {
       console.error("syncVideoSettingsToEngine failed", e);
@@ -671,6 +675,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       audioOrientationAmount: settings.audioOrientationAmount,
       audioReorientationAmount: settings.audioReorientationAmount,
       orientationPeakMultiplier: settings.orientationPeakMultiplier,
+      antiAlias: settings.anti_alias,
+      superSample: settings.super_sample,
+      aspectCorrect: settings.aspect_correct,
     };
   }, [settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode, nativePreviewRes, isFullscreen]);
 
@@ -971,6 +978,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         kaleidoTypeIdx,
         settings.hue_rotate,
         vs,
+        settings.anti_alias,
+        settings.super_sample,
+        settings.aspect_correct,
       );
 
       // Re-send audio peaks if loaded
@@ -1509,6 +1519,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
           hueRotation: activeSettings.hue_rotate,
           imgWidth: sourceWidth,
           imgHeight: sourceHeight,
+          antiAlias: activeSettings.anti_alias,
+          superSample: activeSettings.super_sample,
+          aspectCorrect: activeSettings.aspect_correct,
         });
 
         setOutputSrc(result);
@@ -1940,6 +1953,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         hueRotation: settings.hue_rotate,
         imgWidth,
         imgHeight,
+        antiAlias: settings.anti_alias,
+        superSample: settings.super_sample,
+        aspectCorrect: settings.aspect_correct,
       });
 
       alert(String(message));
@@ -2022,6 +2038,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         heroCircleLeftX: settings.heroCircleLeftX,
         heroCircleRightX: settings.heroCircleRightX,
         heroCircleY: settings.heroCircleY,
+        antiAlias: settings.anti_alias,
+        superSample: settings.super_sample,
+        aspectCorrect: settings.aspect_correct,
       });
 
       alert(String(message));
@@ -2063,6 +2082,12 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
               <TabsTrigger value="image">Image</TabsTrigger>
               <TabsTrigger value="video">Video</TabsTrigger>
               <TabsTrigger value="audio">Audio</TabsTrigger>
+            </TabsList>
+            {/* Second row — kept as its own TabsList (same Tabs context, so
+                clicking it switches the same active tab) so "Enhancements"
+                doesn't crowd the primary Image | Video | Audio row. */}
+            <TabsList className="shrink-0">
+              <TabsTrigger value="enhancements">Enhancements</TabsTrigger>
             </TabsList>
 
             {/* ── IMAGE TAB ── */}
@@ -2400,6 +2425,57 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
               <NumberSliderInput label="Smoothing" value={settings.audioPeakSmoothing} min={0} max={0.98} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, audioPeakSmoothing: v }))} roundToInteger={false} />
               <NumberSliderInput label="Noise Gate" value={settings.audioPeakFloor} min={0} max={0.5} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioPeakFloor: v }))} roundToInteger={false} />
               <NumberSliderInput label="Peak Clip" value={settings.audioPeakCeiling} min={0.05} max={1.0} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioPeakCeiling: v }))} roundToInteger={false} />
+            </TabsContent>
+
+            {/* ── ENHANCEMENTS TAB ── */}
+            <TabsContent value="enhancements" className="p-4 space-y-4">
+              <div className="space-y-2">
+                <input
+                  type="checkbox"
+                  id="antiAlias"
+                  checked={settings.anti_alias}
+                  onChange={(e) => setSettings((s) => ({ ...s, anti_alias: e.target.checked }))}
+                />
+                <label htmlFor="antiAlias" className="text-sm ml-2">Anti-aliasing</label>
+                <p className="text-xs text-muted-foreground">
+                  Bilinear-filters the source image instead of nearest-neighbor sampling, softening
+                  hard pixel edges and mirrored wedge seams.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <input
+                  type="checkbox"
+                  id="aspectCorrect"
+                  checked={settings.aspect_correct}
+                  onChange={(e) => setSettings((s) => ({ ...s, aspect_correct: e.target.checked }))}
+                />
+                <label htmlFor="aspectCorrect" className="text-sm ml-2">Aspect correction</label>
+                <p className="text-xs text-muted-foreground">
+                  Corrects the kaleidoscope pattern so it isn't visually stretched into an ellipse
+                  on non-square output canvases.
+                </p>
+              </div>
+
+              <div className="space-y-1">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Supersampling</p>
+                <div className="flex gap-1">
+                  {([1, 2, 3, 4] as const).map((factor) => (
+                    <button
+                      key={factor}
+                      type="button"
+                      className={`flex-1 text-xs px-2 py-1.5 rounded border transition-colors ${settings.super_sample === factor ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background hover:bg-accent"}`}
+                      onClick={() => setSettings((s) => ({ ...s, super_sample: factor }))}
+                    >
+                      {factor === 1 ? "Off" : `${factor}x`}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground opacity-60">
+                  Renders internally at a larger size and downsamples, reducing aliasing across the
+                  whole image. Higher values cost more render time.
+                </p>
+              </div>
             </TabsContent>
           </Tabs>
         </aside>
