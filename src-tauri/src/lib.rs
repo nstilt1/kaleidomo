@@ -1,3 +1,4 @@
+// src-tauri/src/lib.rs
 const PRODUCT_NAME: &str = "Kaleidomo";
 const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/downloads/kaleidomo";
 const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/downloads/kaleidomo";
@@ -5,7 +6,6 @@ const VERSION_URL: &str = "https://hephaestus.alteredbrainchemistry.com/download
 
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_fs::FsExt;
-use tauri_plugin_shell::ShellExt;
 
 use std::{collections::HashMap, sync::{Arc, Mutex}};
 use kaleidomo_core::{KaleidoSettings, pollster};
@@ -22,6 +22,8 @@ use licensing::*;
 
 mod live_preview;
 pub use live_preview::render_live_preview_frame;
+
+mod ffmpeg_sink;
 
 mod preview_server;
 
@@ -654,7 +656,7 @@ async fn export_kaleidoscope(
             // `super_sample`: render at `output_size * factor` internally, then
             // box-downsample back down before saving, same as the CPU path (which
             // gets this for free via `render_kaleidoscope_with_auto_backend`).
-            let factor = settings.super_sample.clamp(1, 4);
+            let factor = kaleidomo_core::safe_super_sample(settings.super_sample, settings.output_size_w, settings.output_size_h);
             let pixels = if factor > 1 {
                 let render_w = output_size_w * factor as u32;
                 let render_h = output_size_h * factor as u32;
@@ -663,6 +665,9 @@ async fn export_kaleidoscope(
                     output_size_h: render_h,
                     offset_x: settings.offset_x * factor as i32,
                     offset_y: settings.offset_y * factor as i32,
+                    // Keep source framing invariant when the intermediate render
+                    // width grows for supersampling.
+                    zoom: settings.zoom * factor as f32,
                     ..settings.clone()
                 };
                 let render_pixel_count = (render_w as usize)
@@ -777,7 +782,7 @@ async fn generate_kaleidoscope(
                 .map_err(|_| "Failed to lock GPU backend".to_string())?;
             let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
             // `super_sample`: see `export_kaleidoscope` above for the same wrapper.
-            let factor = settings.super_sample.clamp(1, 4);
+            let factor = kaleidomo_core::safe_super_sample(settings.super_sample, settings.output_size_w, settings.output_size_h);
             let pixels = if factor > 1 {
                 let render_w = output_size_w * factor as u32;
                 let render_h = output_size_h * factor as u32;
@@ -786,6 +791,9 @@ async fn generate_kaleidoscope(
                     output_size_h: render_h,
                     offset_x: settings.offset_x * factor as i32,
                     offset_y: settings.offset_y * factor as i32,
+                    // Keep source framing invariant when the intermediate render
+                    // width grows for supersampling.
+                    zoom: settings.zoom * factor as f32,
                     ..settings.clone()
                 };
                 let mut big = vec![0u8; (render_w * render_h * 4) as usize];
@@ -964,81 +972,67 @@ async fn generate_video(
 
     adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
 
-    let _output = if use_gpu {
+    // Validate the audio file (if any) up front, before we spend time
+    // rendering, and resolve it to a `PathBuf` for `FfmpegSink`.
+    let audio_path: Option<std::path::PathBuf> = match audio_file_path {
+        Some(p) if !p.is_empty() => {
+            log_info!("[generate_video] audio_file_path={p}");
+            if !std::path::Path::new(&p).exists() {
+                return Err(format!("Audio file does not exist: {p}"));
+            }
+            Some(std::path::PathBuf::from(p))
+        }
+        _ => None,
+    };
+
+    // Bitrate mapping carried over unchanged from the previous
+    // openh264-based pipeline: resolution * fps * quality.
+    let bitrate_bps =
+        (output_size_w as f32 * output_size_h as f32 * fps as f32 * quality).round() as u32;
+    let final_path = std::path::PathBuf::from(file_path.to_string());
+    log_info!("[generate_video] video_path={}", final_path.display());
+
+    if use_gpu {
         let gpu_arc = Arc::clone(&state.gpu_arc);
-        let file_path_str = file_path.to_string();
+        let app_handle = app.clone();
         tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let mut sink = ffmpeg_sink::FfmpegSink::create(
+                &app_handle,
+                &final_path,
+                output_size_w,
+                output_size_h,
+                fps,
+                bitrate_bps,
+                audio_path.as_deref(),
+            )?;
             let mut gpu_guard = gpu_arc
                 .lock()
                 .map_err(|_| "Failed to lock GPU backend".to_string())?;
             let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
-            kaleidomo_core::render_video_gpu(settings, video_settings, &file_path_str, gpu)
+            kaleidomo_core::render_video_gpu(settings, video_settings, &mut sink, gpu)
                 .map_err(|e| format!("Video generation failed: {}", e))
         })
         .await
         .map_err(|e| format!("spawn_blocking error: {e}"))??;
     } else {
-        match kaleidomo_core::render_video_with_auto_backend(&img, settings, video_settings, &file_path.to_string()) {
-            Ok(_) => (),
-            Err(e) => return Err(format!("Video generation failed: {}", e)),
-        };
-    };
-
-    // If an audio file was provided, mux it into the output video using ffmpeg.
-    if let Some(audio_path) = audio_file_path {
-        if !audio_path.is_empty() {
-            let video_path_str = file_path.to_string();
-
-            log_info!("[generate_video] audio_file_path={audio_path}");
-            log_info!("[generate_video] video_path={video_path_str}");
-
-            if !std::path::Path::new(&audio_path).exists() {
-                return Err(format!("Audio file does not exist: {audio_path}"));
-            }
-
-            // Write to a temp file alongside the output, then replace it.
-            let tmp_path = format!("{}.audiomux.mp4", video_path_str);
-
-            let output = app
-                .shell()
-                .sidecar("ffmpeg")
-                .map_err(|e| format!("Failed to load bundled FFmpeg sidecar: {e}"))?
-                .args([
-                    "-y",
-                    "-i", &video_path_str,
-                    "-i", &audio_path,
-                    "-c:v", "copy",          // copy video stream — no re-encode
-                    "-c:a", "aac",           // encode audio to AAC for MP4
-                    "-b:a", "192k",
-                    "-ar", "48000",          // normalize to video-friendly sample rate
-                    "-ac", "2",              // normalize to stereo
-                    "-shortest",             // trim to the shorter of video/audio
-                    "-movflags", "+faststart",
-                    &tmp_path,
-                ])
-                .output()
-                .await
-                .map_err(|e| format!("Failed to run bundled FFmpeg sidecar: {e}"))?;
-
-            if output.status.success() {
-                // Replace original with muxed version
-                std::fs::rename(&tmp_path, &video_path_str)
-                    .map_err(|e| format!("Failed to replace video with muxed version: {e}"))?;
-            } else {
-                let _ = std::fs::remove_file(&tmp_path);
-
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-
-                return Err(format!(
-                    "FFmpeg audio muxing failed.\n\nstatus: {:?}\n\nstderr:\n{}\n\nstdout:\n{}",
-                    output.status,
-                    stderr,
-                    stdout
-                ));
-            }
+        let mut sink = ffmpeg_sink::FfmpegSink::create(
+            &app,
+            &final_path,
+            output_size_w,
+            output_size_h,
+            fps,
+            bitrate_bps,
+            audio_path.as_deref(),
+        )?;
+        if let Err(e) = kaleidomo_core::render_video_with_auto_backend(
+            &img,
+            settings,
+            video_settings,
+            &mut sink,
+        ) {
+            return Err(format!("Video generation failed: {}", e));
         }
-    }
+    };
 
     Ok(format!("data:video/mp4"))
 }

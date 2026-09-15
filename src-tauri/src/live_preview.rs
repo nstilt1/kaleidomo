@@ -120,7 +120,7 @@ pub async fn render_live_preview_frame(
     // `super_sample`: render at `w/h * factor` internally, then box-downsample
     // back down to `w x h` before it goes into the response body (whose header
     // always reports the requested `w`/`h`, not the oversized render size).
-    let factor = settings.super_sample.clamp(1, 4);
+    let factor = kaleidomo_core::safe_super_sample(settings.super_sample, settings.output_size_w, settings.output_size_h);
     let (render_w, render_h) = (w * factor as u32, h * factor as u32);
 
     let pixel_count = (w as usize)
@@ -167,6 +167,11 @@ pub async fn render_live_preview_frame(
                 output_size_h: render_h,
                 offset_x: settings.offset_x * factor as i32,
                 offset_y: settings.offset_y * factor as i32,
+                // `source_scale = width_over_2 / zoom` ties visible source
+                // content to the actual render width, which just grew by
+                // `factor` (render_w/h vs w/h) — without this, supersampling
+                // silently zoomed the preview out relative to `w x h`.
+                zoom: settings.zoom * factor as f32,
                 ..settings.clone()
             };
             let mut big = vec![0u8; render_pixel_count];

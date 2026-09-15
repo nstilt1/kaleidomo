@@ -294,6 +294,11 @@ fn render_jpeg(
             output_size_h: render_h,
             offset_x: settings.offset_x * factor as i32,
             offset_y: settings.offset_y * factor as i32,
+            // `source_scale = width_over_2 / zoom` ties visible source
+            // content to the actual render width, which just grew by
+            // `factor` (render_w/h vs w/h) — without this, supersampling
+            // silently zoomed the preview out relative to `w x h`.
+            zoom: settings.zoom * factor as f32,
             ..settings.clone()
         }
     } else {

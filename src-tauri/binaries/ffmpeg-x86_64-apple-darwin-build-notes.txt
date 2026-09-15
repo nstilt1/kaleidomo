@@ -1,6 +1,8 @@
 FFmpeg ref: n7.1.1
+OpenH264 ref: v2.5.0
 Target triple: x86_64-apple-darwin
 Configure flags: --disable-gpl --disable-nonfree --disable-doc --disable-debug
                  --disable-ffplay --disable-ffprobe --enable-ffmpeg
-                 --enable-static --disable-shared
+                 --enable-static --disable-shared --disable-autodetect
+                 --enable-libopenh264 --enable-encoder=libopenh264
                  --arch=x86_64 --cc="clang -arch x86_64"

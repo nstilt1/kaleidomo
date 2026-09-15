@@ -41,12 +41,14 @@ export type Settings = {
   rotation_fn: string;
   // Cycles per second — replaces rotation_cycles / animation_duration
   rotation_cps: number;
+  rotationRateUnit: "cycles/s" | "degrees/s" | "s/cycle";
   // Hue modulation
   hue_range: number;
   hue_start_offset: number;
   hue_fn: string;
   // Cycles per second — replaces hue_cycles / animation_duration
   hue_cps: number;
+  colorRateUnit: "cycles/s" | "degrees/s" | "s/cycle";
   // Export duration — controls video length only, not live preview
   exportDurationMode: ExportDurationMode;
   // Used when exportDurationMode === "seconds"
@@ -63,8 +65,10 @@ export type Settings = {
   // Low-pass filter slope in dB/octave. Higher = steeper, more bass-only isolation.
   // 6 = 1-pole RC, 12 = 2-pole, 24 = 4-pole (Butterworth), 48 = 8-pole (ladder-like)
   audioLowpassSlope: 6 | 12 | 24 | 48;
-  // Base reorientation speed (orientation cycles per second, independent of audio)
+  // Base reorientation speed in the selected unit, independent of audio
   orientationBaseSpeed: number;
+  orientationSpeedUnit: "px/s" | "s/cycle" | "cycles/s";
+  rotationPhaseUnit: "degrees";
   // How much the normalized audio peak multiplies onto orientation + rotation
   orientationPeakMultiplier: number;
   // Hero circle / orientation settings
@@ -120,10 +124,12 @@ export const DEFAULT_SETTINGS: Settings = {
   rotation_start_offset: 0,
   rotation_fn: "sin",
   rotation_cps: 0.0,
+  rotationRateUnit: "cycles/s",
   hue_range: 360,
   hue_start_offset: 0,
   hue_fn: "sawtooth",
   hue_cps: 0.0,
+  colorRateUnit: "cycles/s",
   exportDurationMode: "seconds",
   export_duration_s: 12,
   audioReactiveEnabled: false,
@@ -135,6 +141,8 @@ export const DEFAULT_SETTINGS: Settings = {
   audioLowpassFreq: 169,
   audioLowpassSlope: 24,
   orientationBaseSpeed: 0.0,
+  orientationSpeedUnit: "px/s",
+  rotationPhaseUnit: "degrees",
   orientationPeakMultiplier: 0.0,
   // Hero circle defaults match the hardcoded values in wasm.rs / page.tsx
   heroCircleLeftX: 515.1039592844847,
