@@ -40,7 +40,7 @@ export class LiveKaleidoscopeEngine {
      * * `aspect_correct` — corrects the kaleidoscope pattern so it isn't visually stretched
      *   into an ellipse when the canvas is non-square. Default/disabled value: `false`.
      */
-    start_animation(count: number, offset_x: number, offset_y: number, zoom: number, tile_count: number, triangle_center_x: number, triangle_center_y: number, triangle_rotation_rad: number, kaleido_type_idx: number, hue_rotation: number, video_settings: WasmVideoSettings, anti_alias: boolean, super_sample: number, aspect_correct: boolean): void;
+    start_animation(count: number, offset_x: number, offset_y: number, zoom: number, tile_count: number, triangle_center_x: number, triangle_center_y: number, triangle_rotation_rad: number, kaleido_type_idx: number, hue_rotation: number, video_settings: WasmVideoSettings, anti_alias: number, super_sample: number, aspect_correct: boolean): void;
     /**
      * Cancel the animation loop (idempotent).
      */
@@ -50,7 +50,7 @@ export class LiveKaleidoscopeEngine {
      * * `super_sample` — internal supersampling factor, `1`-`4` (`1` disables it). Default: `1`.
      * * `aspect_correct` — corrects stretching on non-square canvases. Default: `false`.
      */
-    update_animation_settings(count: number, offset_x: number, offset_y: number, zoom: number, tile_count: number, triangle_center_x: number, triangle_center_y: number, triangle_rotation_rad: number, kaleido_type_idx: number, hue_rotation: number, video_settings: WasmVideoSettings, anti_alias: boolean, super_sample: number, aspect_correct: boolean): void;
+    update_animation_settings(count: number, offset_x: number, offset_y: number, zoom: number, tile_count: number, triangle_center_x: number, triangle_center_y: number, triangle_rotation_rad: number, kaleido_type_idx: number, hue_rotation: number, video_settings: WasmVideoSettings, anti_alias: number, super_sample: number, aspect_correct: boolean): void;
 }
 
 /**

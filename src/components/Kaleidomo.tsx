@@ -32,6 +32,8 @@ import { useFullscreenContext } from "@/lib/fullscreen-context";
 import { useControlsSync } from "@/lib/use-controls-sync";
 import { useLoopbackAudio } from "@/lib/use-loopback-audio";
 import { LoopbackAudioPanel } from "@/components/kaleidomo/LoopbackAudioPanel";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Slider } from "@/components/ui/slider";
 
 const LOOPBACK_PEAK_EVENT = "kd://loopback-peak";
 const AUDIO_SOURCE_MODE_EVENT = "kd://audio-source-mode";
@@ -187,6 +189,14 @@ const IMAGE_SETTING_KEYS = [
   "dimension_mode",
   "output_width",
   "output_height",
+  "anti_alias",
+  "super_sample",
+  "reconstruction_filter",
+  "derivative_mipmapping",
+  "anisotropy_level",
+  "edge_post_process",
+  "taa_enabled",
+  "taa_feedback_alpha",
 ] as const satisfies readonly (keyof Settings)[];
 
 const VIDEO_SETTING_KEYS = [
@@ -237,6 +247,10 @@ function cyclesToRate(cycles: number, unit: "cycles/s" | "degrees/s" | "s/cycle"
 
 function clampMin(value: number, min: number) {
   return Math.max(min, value);
+}
+
+function reconstructionMode(settings: Settings): 0 | 1 | 2 {
+  return settings.reconstruction_filter === "nearest" ? 0 : settings.reconstruction_filter === "bicubic" ? 2 : 1;
 }
 
 const SCALED_WEDGE_DIAGONAL_MULTIPLIER = 1.5;
@@ -625,7 +639,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         kaleidoTypeIdx,
         settings.hue_rotate,
         vs,
-        settings.anti_alias,
+        reconstructionMode(settings),
         settings.super_sample,
         settings.aspect_correct,
       );
@@ -736,9 +750,15 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       audioOrientationAmount: settings.audioOrientationAmount,
       audioReorientationAmount: settings.audioReorientationAmount,
       orientationPeakMultiplier: settings.orientationPeakMultiplier,
-      antiAlias: settings.anti_alias,
+      antiAlias: reconstructionMode(settings),
       superSample: settings.super_sample,
       aspectCorrect: settings.aspect_correct,
+      reconstructionFilter: settings.reconstruction_filter,
+      derivativeMipmapping: settings.derivative_mipmapping,
+      anisotropyLevel: settings.anisotropy_level,
+      edgePostProcess: settings.edge_post_process,
+      taaEnabled: settings.taa_enabled,
+      taaFeedbackAlpha: settings.taa_feedback_alpha,
     };
   }, [settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode, nativePreviewRes, isFullscreen]);
 
@@ -1578,9 +1598,15 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
           hueRotation: activeSettings.hue_rotate,
           imgWidth: sourceWidth,
           imgHeight: sourceHeight,
-          antiAlias: activeSettings.anti_alias,
+          antiAlias: reconstructionMode(activeSettings),
           superSample: activeSettings.super_sample,
           aspectCorrect: activeSettings.aspect_correct,
+          reconstructionFilter: activeSettings.reconstruction_filter,
+          derivativeMipmapping: activeSettings.derivative_mipmapping,
+          anisotropyLevel: activeSettings.anisotropy_level,
+          edgePostProcess: activeSettings.edge_post_process,
+          taaEnabled: activeSettings.taa_enabled,
+          taaFeedbackAlpha: activeSettings.taa_feedback_alpha,
         });
 
         setOutputSrc(result);
@@ -2021,9 +2047,15 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         hueRotation: settings.hue_rotate,
         imgWidth,
         imgHeight,
-        antiAlias: settings.anti_alias,
+        antiAlias: reconstructionMode(settings),
         superSample: settings.super_sample,
         aspectCorrect: settings.aspect_correct,
+        reconstructionFilter: settings.reconstruction_filter,
+        derivativeMipmapping: settings.derivative_mipmapping,
+        anisotropyLevel: settings.anisotropy_level,
+        edgePostProcess: settings.edge_post_process,
+        taaEnabled: settings.taa_enabled,
+        taaFeedbackAlpha: settings.taa_feedback_alpha,
       });
 
       alert(String(message));
@@ -2133,9 +2165,15 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         heroCircleLeftX: settings.heroCircleLeftX,
         heroCircleRightX: settings.heroCircleRightX,
         heroCircleY: settings.heroCircleY,
-        antiAlias: settings.anti_alias,
+        antiAlias: reconstructionMode(settings),
         superSample: settings.super_sample,
         aspectCorrect: settings.aspect_correct,
+        reconstructionFilter: settings.reconstruction_filter,
+        derivativeMipmapping: settings.derivative_mipmapping,
+        anisotropyLevel: settings.anisotropy_level,
+        edgePostProcess: settings.edge_post_process,
+        taaEnabled: settings.taa_enabled,
+        taaFeedbackAlpha: settings.taa_feedback_alpha,
       });
 
       alert(String(message));
@@ -2535,21 +2573,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
             </TabsContent>
 
             {/* ── ENHANCEMENTS TAB ── */}
-            <TabsContent value="enhancements" className="p-4 space-y-4">
-              <div className="space-y-2">
-                <input
-                  type="checkbox"
-                  id="antiAlias"
-                  checked={settings.anti_alias}
-                  onChange={(e) => setSettings((s) => ({ ...s, anti_alias: e.target.checked }))}
-                />
-                <label htmlFor="antiAlias" className="text-sm ml-2">Anti-aliasing</label>
-                <p className="text-xs text-muted-foreground">
-                  Bilinear-filters the source image instead of nearest-neighbor sampling, softening
-                  hard pixel edges and mirrored wedge seams.
-                </p>
-              </div>
-
+            <TabsContent value="enhancements" className="p-4 space-y-5 overflow-hidden">
               <div className="space-y-2">
                 <input
                   type="checkbox"
@@ -2564,26 +2588,73 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
                 </p>
               </div>
 
-              <div className="space-y-1">
-                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Supersampling</p>
-                <div className="flex gap-1">
-                  {([1, 2, 3, 4] as const).map((factor) => (
-                    <button
-                      key={factor}
-                      disabled={factor > 1 && factor > maxSupersamplingFactor}
-                      title={factor > maxSupersamplingFactor ? "Exceeds the 8192-pixel internal dimension limit" : undefined}
-                      type="button"
-                      className={`flex-1 text-xs px-2 py-1.5 rounded border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${settings.super_sample === factor ? "bg-primary text-primary-foreground border-primary" : "border-border bg-background hover:bg-accent"}`}
-                      onClick={() => setSettings((s) => ({ ...s, super_sample: factor }))}
-                    >
-                      {factor === 1 ? "Off" : `${factor}x`}
-                    </button>
-                  ))}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Step 1: Spatial Supersampling (SSAA)</label>
+                <Select value={String(settings.super_sample)} onValueChange={(value) => setSettings((s) => ({ ...s, super_sample: Number(value) as Settings["super_sample"] }))}>
+                  <SelectTrigger className="w-full min-w-0"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">1x (Off) — Fastest · Base quality</SelectItem>
+                    <SelectItem value="2" disabled={2 > maxSupersamplingFactor}>2x — Fast · Better quality</SelectItem>
+                    <SelectItem value="3" disabled={3 > maxSupersamplingFactor}>3x — Slow · High quality</SelectItem>
+                    <SelectItem value="4" disabled={4 > maxSupersamplingFactor}>4x — Slowest · Highest quality</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">Higher levels render more pixels before downsampling. Render cost increases quickly with each level.</p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Step 2: Source Texture Reconstruction / Interpolation</label>
+                <Select value={settings.reconstruction_filter} onValueChange={(value: Settings["reconstruction_filter"]) => setSettings((s) => ({ ...s, reconstruction_filter: value, anti_alias: value !== "nearest" }))}>
+                  <SelectTrigger className="w-full min-w-0"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="nearest">Nearest — Fastest · Lower quality</SelectItem>
+                    <SelectItem value="bilinear">Bilinear — Fast · Good quality</SelectItem>
+                    <SelectItem value="bicubic">Bicubic — Slower · Best quality</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-sm font-medium">Step 3: Derivatives &amp; Mipmap Filtering</p>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="derivativeMipmapping" checked={settings.derivative_mipmapping} onCheckedChange={(checked) => setSettings((s) => ({ ...s, derivative_mipmapping: checked === true }))} />
+                  <label htmlFor="derivativeMipmapping" className="text-sm">Enable Explicit Derivative Mipmapping</label>
                 </div>
-                <p className="text-xs text-muted-foreground opacity-60">
-                  Renders internally at a larger size and downsamples, reducing aliasing across the
-                  whole image. Higher values cost more render time. Multipliers exceeding 8192 pixels in either dimension are disabled.
-                </p>
+                <label className="text-xs text-muted-foreground">Anisotropy Level</label>
+                <Select value={String(settings.anisotropy_level)} onValueChange={(value) => setSettings((s) => ({ ...s, anisotropy_level: Number(value) as Settings["anisotropy_level"] }))}>
+                  <SelectTrigger className="w-full min-w-0"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">1x (Off) — Fastest · Base quality</SelectItem>
+                    <SelectItem value="2">2x — Faster · Improved quality</SelectItem>
+                    <SelectItem value="4">4x — Fast · Good quality</SelectItem>
+                    <SelectItem value="8">8x — Moderate · High quality</SelectItem>
+                    <SelectItem value="16">16x — Slower · Highest quality</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Step 4: Edge-Aware Post-Processing</label>
+                <Select value={settings.edge_post_process} onValueChange={(value: Settings["edge_post_process"]) => setSettings((s) => ({ ...s, edge_post_process: value }))}>
+                  <SelectTrigger className="w-full min-w-0"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="disabled">Off — Fastest · No edge smoothing</SelectItem>
+                    <SelectItem value="fxaa">FXAA — Fast · Good quality</SelectItem>
+                    <SelectItem value="smaa">SMAA — Slower · Better quality</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-sm font-medium">Step 5: Temporal Integration</p>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="taaEnabled" checked={settings.taa_enabled} onCheckedChange={(checked) => setSettings((s) => ({ ...s, taa_enabled: checked === true }))} />
+                  <label htmlFor="taaEnabled" className="text-sm">Enable Temporal Anti-Aliasing (TAA)</label>
+                </div>
+                <div className={settings.taa_enabled ? "space-y-2" : "space-y-2 opacity-50"}>
+                  <div className="flex justify-between text-xs"><label>Feedback Alpha</label><span>{settings.taa_feedback_alpha.toFixed(2)}</span></div>
+                  <Slider disabled={!settings.taa_enabled} min={0} max={1} step={0.01} value={[settings.taa_feedback_alpha]} onValueChange={([value]) => setSettings((s) => ({ ...s, taa_feedback_alpha: value ?? 0.9 }))} />
+                </div>
               </div>
             </TabsContent>
           </Tabs>

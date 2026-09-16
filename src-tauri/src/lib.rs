@@ -17,6 +17,28 @@ use image::io::Reader as ImageReader;
 
 use kaleidomo_core::backends::gpu::GpuBackend;
 
+fn enhancement_config(reconstruction: &str, derivatives: bool, anisotropy: u8, edge: &str, taa: bool, feedback: f32) -> kaleidomo_core::enhancement::EnhancementConfig {
+    kaleidomo_core::enhancement::EnhancementConfig::from_wire(reconstruction, derivatives, anisotropy, edge, taa, feedback)
+}
+
+struct EnhancingVideoSink<'a> {
+    inner: &'a mut dyn kaleidomo_core::VideoFrameSink,
+    width: u32,
+    height: u32,
+    pipeline: kaleidomo_core::enhancement::EnhancementPipeline,
+}
+
+impl kaleidomo_core::VideoFrameSink for EnhancingVideoSink<'_> {
+    fn write_rgba_frame(&mut self, rgba: &[u8]) -> Result<(), kaleidomo_core::VideoSinkError> {
+        let frame = image::RgbaImage::from_raw(self.width, self.height, rgba.to_vec())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid video RGBA frame dimensions"))?;
+        let enhanced = self.pipeline.finish_frame(&frame);
+        self.inner.write_rgba_frame(enhanced.as_raw())
+    }
+
+    fn finish(&mut self) -> Result<(), kaleidomo_core::VideoSinkError> { self.inner.finish() }
+}
+
 mod licensing;
 use licensing::*;
 
@@ -182,6 +204,7 @@ pub struct AppState {
     pub license_sync_cooldown: AsyncMutex<licensing::cooldown::LicenseSyncCooldownState>,
     pub loaded_gpu_image_path: Mutex<Option<String>>,
     pub last_version_fetch: AsyncMutex<Option<u64>>,
+    pub live_enhancement: Arc<Mutex<Option<(kaleidomo_core::enhancement::EnhancementConfig, kaleidomo_core::enhancement::EnhancementPipeline)>>>,
     /// Path to a preset/project file (.json) passed on the command line, e.g.
     /// `kaleidomo.exe C:\presets\my-preset.kmo.json`. When present, the
     /// frontend loads it on startup and enters fullscreen "kiosk" mode
@@ -583,9 +606,15 @@ async fn export_kaleidoscope(
     img_width: u32,
     img_height: u32,
     // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
-    anti_alias: bool,
+    anti_alias: u8,
     super_sample: u8,
     aspect_correct: bool,
+    reconstruction_filter: String,
+    derivative_mipmapping: bool,
+    anisotropy_level: u8,
+    edge_post_process: String,
+    taa_enabled: bool,
+    taa_feedback_alpha: f32,
 ) -> Result<String, String> {
     let is_exporting = true;
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count, is_exporting);
@@ -631,6 +660,8 @@ async fn export_kaleidoscope(
         },
         hue_rotation,
         anti_alias,
+        derivative_mipmapping,
+        anisotropy_level,
         super_sample: super_sample.clamp(1, 4),
         aspect_correct,
     };
@@ -644,6 +675,7 @@ async fn export_kaleidoscope(
     };
 
     adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
+    let enhancement = enhancement_config(&reconstruction_filter, derivative_mipmapping, anisotropy_level, &edge_post_process, taa_enabled, taa_feedback_alpha);
 
     if use_gpu {
         let gpu_arc = Arc::clone(&state.gpu_arc);
@@ -688,7 +720,8 @@ async fn export_kaleidoscope(
             };
             let result_buffer = image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
                 .ok_or_else(|| "failed to create image from GPU output".to_string())?;
-            result_buffer.save(&path_str).map_err(|e| format!("Failed to save image: {}", e))
+            let mut pipeline = kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement);
+            pipeline.finish_frame(&result_buffer).save(&path_str).map_err(|e| format!("Failed to save image: {}", e))
         })
         .await
         .map_err(|e| format!("spawn_blocking error: {e}"))??;
@@ -699,7 +732,8 @@ async fn export_kaleidoscope(
                 settings,
             );
 
-        result_buffer
+        let mut pipeline = kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement);
+        pipeline.finish_frame(&result_buffer)
             .save(path_to_save.to_string())
             .map_err(|e| format!("Failed to save image: {}", e))?;
     }
@@ -728,9 +762,15 @@ async fn generate_kaleidoscope(
     img_width: u32,
     img_height: u32,
     // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
-    anti_alias: bool,
+    anti_alias: u8,
     super_sample: u8,
     aspect_correct: bool,
+    reconstruction_filter: String,
+    derivative_mipmapping: bool,
+    anisotropy_level: u8,
+    edge_post_process: String,
+    taa_enabled: bool,
+    taa_feedback_alpha: f32,
 ) -> Result<String, String> {
     let mut _offset_x = 0;
     let mut _offset_y = 0;
@@ -760,6 +800,8 @@ async fn generate_kaleidoscope(
         },
         hue_rotation,
         anti_alias,
+        derivative_mipmapping,
+        anisotropy_level,
         super_sample: super_sample.clamp(1, 4),
         aspect_correct,
     };
@@ -822,6 +864,9 @@ async fn generate_kaleidoscope(
         kaleidomo_core::render_kaleidoscope_with_auto_backend(&img, settings)
     };
 
+    let mut pipeline = kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement_config(&reconstruction_filter, derivative_mipmapping, anisotropy_level, &edge_post_process, taa_enabled, taa_feedback_alpha));
+    let output = pipeline.finish_frame(&output);
+
     // 3. Convert RgbaImage to Base64 so React can show it in an <img /> tag
     let mut buffer = std::io::Cursor::new(Vec::new());
     output
@@ -879,9 +924,15 @@ async fn generate_video(
     hero_circle_right_x: f32,
     hero_circle_y: f32,
     // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
-    anti_alias: bool,
+    anti_alias: u8,
     super_sample: u8,
     aspect_correct: bool,
+    reconstruction_filter: String,
+    derivative_mipmapping: bool,
+    anisotropy_level: u8,
+    edge_post_process: String,
+    taa_enabled: bool,
+    taa_feedback_alpha: f32,
 ) -> Result<String, String> {
     let is_exporting = true;
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count, is_exporting);
@@ -927,6 +978,8 @@ async fn generate_video(
         },
         hue_rotation,
         anti_alias,
+        derivative_mipmapping,
+        anisotropy_level,
         super_sample: super_sample.clamp(1, 4),
         aspect_correct,
     };
@@ -972,6 +1025,8 @@ async fn generate_video(
 
     adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
 
+    let video_enhancement = enhancement_config(&reconstruction_filter, derivative_mipmapping, anisotropy_level, &edge_post_process, taa_enabled, taa_feedback_alpha);
+
     // Validate the audio file (if any) up front, before we spend time
     // rendering, and resolve it to a `PathBuf` for `FfmpegSink`.
     let audio_path: Option<std::path::PathBuf> = match audio_file_path {
@@ -1005,11 +1060,12 @@ async fn generate_video(
                 bitrate_bps,
                 audio_path.as_deref(),
             )?;
+            let mut enhanced_sink = EnhancingVideoSink { inner: &mut sink, width: output_size_w, height: output_size_h, pipeline: kaleidomo_core::enhancement::EnhancementPipeline::new(video_enhancement) };
             let mut gpu_guard = gpu_arc
                 .lock()
                 .map_err(|_| "Failed to lock GPU backend".to_string())?;
             let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
-            kaleidomo_core::render_video_gpu(settings, video_settings, &mut sink, gpu)
+            kaleidomo_core::render_video_gpu(settings, video_settings, &mut enhanced_sink, gpu)
                 .map_err(|e| format!("Video generation failed: {}", e))
         })
         .await
@@ -1024,11 +1080,12 @@ async fn generate_video(
             bitrate_bps,
             audio_path.as_deref(),
         )?;
+        let mut enhanced_sink = EnhancingVideoSink { inner: &mut sink, width: output_size_w, height: output_size_h, pipeline: kaleidomo_core::enhancement::EnhancementPipeline::new(video_enhancement) };
         if let Err(e) = kaleidomo_core::render_video_with_auto_backend(
             &img,
             settings,
             video_settings,
-            &mut sink,
+            &mut enhanced_sink,
         ) {
             return Err(format!("Video generation failed: {}", e));
         }
@@ -1145,6 +1202,7 @@ pub fn run() {
                 license_sync_cooldown: AsyncMutex::new(cooldown_state),
                 loaded_gpu_image_path: Mutex::new(None),
                 last_version_fetch: AsyncMutex::new(ts),
+                live_enhancement: Arc::new(Mutex::new(None)),
                 cli_preset_path: cli_preset_path.clone(),
             });
             // LoopbackState is managed independently so that tauri::State<'_, LoopbackState>

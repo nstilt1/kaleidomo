@@ -2,6 +2,9 @@
 import React from "react";
 
 export type ExportDurationMode = "audio" | "seconds" | "infinite";
+export type ReconstructionFilter = "nearest" | "bilinear" | "bicubic";
+export type AnisotropyLevel = 1 | 2 | 4 | 8 | 16;
+export type EdgePostProcess = "disabled" | "fxaa" | "smaa";
 
 export type Settings = {
   x: number;
@@ -91,6 +94,12 @@ export type Settings = {
   // Internal supersampling factor (1 = disabled/native resolution, 2-4 = render
   // larger internally and downsample). Mirrors `KaleidoSettings::super_sample`.
   super_sample: 1 | 2 | 3 | 4;
+  reconstruction_filter: ReconstructionFilter;
+  derivative_mipmapping: boolean;
+  anisotropy_level: AnisotropyLevel;
+  edge_post_process: EdgePostProcess;
+  taa_enabled: boolean;
+  taa_feedback_alpha: number;
   // Corrects the kaleidoscope pattern so it isn't visually stretched into an
   // ellipse on non-square output canvases.
   aspect_correct: boolean;
@@ -151,8 +160,14 @@ export const DEFAULT_SETTINGS: Settings = {
   orientationPhase: 0.0,
   orientationArcRange: 360.0,
   orientationArcFn: "sawtooth",
-  anti_alias: false,
+  anti_alias: true,
   super_sample: 1,
+  reconstruction_filter: "bilinear",
+  derivative_mipmapping: true,
+  anisotropy_level: 1,
+  edge_post_process: "disabled",
+  taa_enabled: false,
+  taa_feedback_alpha: 0.9,
   aspect_correct: false,
 };
 

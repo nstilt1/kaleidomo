@@ -63,7 +63,7 @@ export declare class LiveKaleidoscopeEngine {
     video_settings: WasmVideoSettings,
     // Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs.
     // Disabled defaults: anti_alias=false, super_sample=1, aspect_correct=false.
-    anti_alias: boolean,
+    anti_alias: number,
     super_sample: number,
     aspect_correct: boolean,
   ): void;
@@ -79,7 +79,7 @@ export declare class LiveKaleidoscopeEngine {
     kaleido_type_idx: number,
     hue_rotation: number,
     video_settings: WasmVideoSettings,
-    anti_alias: boolean,
+    anti_alias: number,
     super_sample: number,
     aspect_correct: boolean,
   ): void;

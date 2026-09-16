@@ -33,7 +33,9 @@ fn kaleido_bench(c: &mut Benchmarker) {
         hue_rotation: 0,
         offset_x: 0,
         offset_y: 0,
-        anti_alias: false,
+        anti_alias: 0,
+        derivative_mipmapping: true,
+        anisotropy_level: 1,
         super_sample: 1,
         aspect_correct: false,
     };

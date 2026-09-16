@@ -105,9 +105,15 @@ export interface NativeLivePreviewParams {
   audioReorientationAmount: number;
   orientationPeakMultiplier: number;
   // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
-  antiAlias: boolean;
+  antiAlias: 0 | 1 | 2;
   superSample: number;
   aspectCorrect: boolean;
+  reconstructionFilter: "nearest" | "bilinear" | "bicubic";
+  derivativeMipmapping: boolean;
+  anisotropyLevel: number;
+  edgePostProcess: "disabled" | "fxaa" | "smaa";
+  taaEnabled: boolean;
+  taaFeedbackAlpha: number;
 }
 
 interface FrameParams {
@@ -126,9 +132,15 @@ interface FrameParams {
   imgWidth: number;
   imgHeight: number;
   jpegQuality: number;
-  antiAlias: boolean;
+  antiAlias: 0 | 1 | 2;
   superSample: number;
   aspectCorrect: boolean;
+  reconstructionFilter: "nearest" | "bilinear" | "bicubic";
+  derivativeMipmapping: boolean;
+  anisotropyLevel: number;
+  edgePostProcess: "disabled" | "fxaa" | "smaa";
+  taaEnabled: boolean;
+  taaFeedbackAlpha: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +595,12 @@ export class NativeLivePreviewEngine {
       antiAlias: base.antiAlias,
       superSample: base.superSample,
       aspectCorrect: base.aspectCorrect,
+      reconstructionFilter: base.reconstructionFilter,
+      derivativeMipmapping: base.derivativeMipmapping,
+      anisotropyLevel: base.anisotropyLevel,
+      edgePostProcess: base.edgePostProcess,
+      taaEnabled: base.taaEnabled,
+      taaFeedbackAlpha: base.taaFeedbackAlpha,
     };
   }
 }
