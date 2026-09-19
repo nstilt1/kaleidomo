@@ -603,6 +603,10 @@ async fn export_kaleidoscope(
     kaleido_type: String,
     mut tile_count: f32,
     hue_rotation: u32,
+    recolor_enabled: bool,
+    recolor_seed: String,
+    recolor_mode: u8,
+    recolor_threshold: f32,
     img_width: u32,
     img_height: u32,
     // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
@@ -659,6 +663,10 @@ async fn export_kaleidoscope(
             _ => return Err("Invalid kaleidoscope type".into()),
         },
         hue_rotation,
+        recolor_enabled,
+        recolor_seed,
+        recolor_mode,
+        recolor_threshold,
         anti_alias,
         derivative_mipmapping,
         anisotropy_level,
@@ -744,6 +752,32 @@ async fn export_kaleidoscope(
 use base64::Engine as _;
 
 #[tauri::command]
+async fn preprocess_source_preview(
+    path: String,
+    seed_input: String,
+    threshold: f32,
+    mode: u8,
+) -> Result<String, String> {
+    let mut rgba = load_source_image(&adjust_path(&path))?.to_rgba8();
+    kaleidomo_core::preprocess::preprocess_source_frame_with_mode(
+        &mut rgba,
+        seed_input.as_bytes(),
+        threshold,
+        if mode == 1 {
+            kaleidomo_core::preprocess::RecolorMode::BorderedCells
+        } else {
+            kaleidomo_core::preprocess::RecolorMode::ColorBands
+        },
+    ).map_err(|e| e.to_string())?;
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut buffer, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(buffer.into_inner());
+    Ok(format!("data:image/png;base64,{encoded}"))
+}
+
+#[tauri::command]
 async fn generate_kaleidoscope(
     state: tauri::State<'_, AppState>,
     path: String,
@@ -759,6 +793,10 @@ async fn generate_kaleidoscope(
     kaleido_type: String,
     mut tile_count: f32,
     hue_rotation: u32,
+    recolor_enabled: bool,
+    recolor_seed: String,
+    recolor_mode: u8,
+    recolor_threshold: f32,
     img_width: u32,
     img_height: u32,
     // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
@@ -799,6 +837,10 @@ async fn generate_kaleidoscope(
             _ => return Err("Invalid kaleidoscope type".into()),
         },
         hue_rotation,
+        recolor_enabled,
+        recolor_seed,
+        recolor_mode,
+        recolor_threshold,
         anti_alias,
         derivative_mipmapping,
         anisotropy_level,
@@ -894,6 +936,10 @@ async fn generate_video(
     kaleido_type: String,
     mut tile_count: f32,
     hue_rotation: u32,
+    recolor_enabled: bool,
+    recolor_seed: String,
+    recolor_mode: u8,
+    recolor_threshold: f32,
     still_frame_ending: u32,
     fps: u32,
     quality: f32,
@@ -977,6 +1023,10 @@ async fn generate_video(
             _ => return Err("Invalid kaleidoscope type".into()),
         },
         hue_rotation,
+        recolor_enabled,
+        recolor_seed,
+        recolor_mode,
+        recolor_threshold,
         anti_alias,
         derivative_mipmapping,
         anisotropy_level,
@@ -1317,6 +1367,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             generate_kaleidoscope,
+            preprocess_source_preview,
             generate_video,
             export_kaleidoscope,
             init_gpu,

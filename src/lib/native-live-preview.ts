@@ -64,6 +64,10 @@ export interface NativeLivePreviewParams {
   rotation: number;
   kaleidoType: string;
   hueRotation: number;
+  recolorEnabled: boolean;
+  recolorSeed: string;
+  recolorMode: number;
+  recolorThreshold: number;
   imgWidth: number;
   imgHeight: number;
   // Animation — rates in cycles per second (replaces cycles + animationDuration)
@@ -129,6 +133,10 @@ interface FrameParams {
   rotation: number;
   kaleidoType: string;
   hueRotation: number;
+  recolorEnabled: boolean;
+  recolorSeed: string;
+  recolorMode: number;
+  recolorThreshold: number;
   imgWidth: number;
   imgHeight: number;
   jpegQuality: number;
@@ -589,6 +597,10 @@ export class NativeLivePreviewEngine {
       rotation: finalRotation,
       kaleidoType: base.kaleidoType,
       hueRotation,
+      recolorEnabled: base.recolorEnabled,
+      recolorSeed: base.recolorSeed,
+      recolorMode: base.recolorMode,
+      recolorThreshold: base.recolorThreshold,
       imgWidth: base.imgWidth,
       imgHeight: base.imgHeight,
       jpegQuality: 85,

@@ -14,6 +14,10 @@ export type Settings = {
   zoom: number;
   tile_count: number;
   hue_rotate: number;
+  recolor_enabled: boolean;
+  recolor_seed: string;
+  recolor_mode: "color_bands" | "bordered_cells";
+  recolor_threshold: number;
   ratio_num: number;
   ratio_den: number;
   offset_x: number;
@@ -113,6 +117,10 @@ export const DEFAULT_SETTINGS: Settings = {
   zoom: 2,
   tile_count: 1.0,
   hue_rotate: 0,
+  recolor_enabled: false,
+  recolor_seed: "kaleidomo",
+  recolor_mode: "color_bands",
+  recolor_threshold: 0.08,
   ratio_num: 9,
   ratio_den: 16,
   offset_x: 0,

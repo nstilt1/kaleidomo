@@ -60,6 +60,14 @@ pub struct FrameRequest {
     pub rotation: f32,
     pub kaleido_type: String,
     pub hue_rotation: u32,
+    #[serde(default)]
+    pub recolor_enabled: bool,
+    #[serde(default)]
+    pub recolor_seed: String,
+    #[serde(default)]
+    pub recolor_mode: u8,
+    #[serde(default = "default_recolor_threshold")]
+    pub recolor_threshold: f32,
     pub img_width: u32,
     pub img_height: u32,
     /// JPEG quality 1-100. Frontend sends e.g. 85.
@@ -108,6 +116,7 @@ fn default_true() -> bool { true }
 fn default_anisotropy() -> u8 { 1 }
 fn default_edge_filter() -> String { "disabled".into() }
 fn default_taa_feedback() -> f32 { 0.9 }
+fn default_recolor_threshold() -> f32 { 0.08 }
 
 impl FrameRequest {
     fn to_kaleido_settings(&self) -> Result<KaleidoSettings, String> {
@@ -132,6 +141,10 @@ impl FrameRequest {
             triangle_rotation_rad: self.rotation,
             kaleido_type,
             hue_rotation: self.hue_rotation,
+            recolor_enabled: self.recolor_enabled,
+            recolor_seed: self.recolor_seed.clone(),
+            recolor_mode: self.recolor_mode,
+            recolor_threshold: self.recolor_threshold,
             anti_alias: self.anti_alias,
             derivative_mipmapping: self.derivative_mipmapping,
             anisotropy_level: self.anisotropy_level,

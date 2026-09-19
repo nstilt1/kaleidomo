@@ -34,6 +34,7 @@ import { useLoopbackAudio } from "@/lib/use-loopback-audio";
 import { LoopbackAudioPanel } from "@/components/kaleidomo/LoopbackAudioPanel";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Slider } from "@/components/ui/slider";
+import { Input } from "@/components/ui/input";
 
 const LOOPBACK_PEAK_EVENT = "kd://loopback-peak";
 const AUDIO_SOURCE_MODE_EVENT = "kd://audio-source-mode";
@@ -181,6 +182,10 @@ const IMAGE_SETTING_KEYS = [
   "zoom",
   "tile_count",
   "hue_rotate",
+  "recolor_enabled",
+  "recolor_seed",
+  "recolor_mode",
+  "recolor_threshold",
   "ratio_num",
   "ratio_den",
   "offset_x",
@@ -523,6 +528,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   const [audioFileName, setAudioFileName] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [livePreviewError, setLivePreviewError] = useState<string | null>(null);
+  const [recoloredSourceSrc, setRecoloredSourceSrc] = useState("");
   // macOS native preview resolution cap. Higher = sharper but more IPC memory pressure.
   // 720 is the safe default (70 MB/s at 20fps with reusable ImageData).
   const [nativePreviewRes, setNativePreviewRes] = useState<512 | 720 | 1080>(720);
@@ -638,6 +644,10 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         settings.rotation,
         kaleidoTypeIdx,
         settings.hue_rotate,
+        settings.recolor_enabled,
+        settings.recolor_seed,
+        settings.recolor_mode === "bordered_cells" ? 1 : 0,
+        settings.recolor_threshold,
         vs,
         reconstructionMode(settings),
         settings.super_sample,
@@ -699,6 +709,10 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       rotation: settings.rotation,
       kaleidoType,
       hueRotation: settings.hue_rotate,
+      recolorEnabled: settings.recolor_enabled,
+      recolorSeed: settings.recolor_seed,
+      recolorMode: settings.recolor_mode === "bordered_cells" ? 1 : 0,
+      recolorThreshold: settings.recolor_threshold,
       imgWidth,
       imgHeight,
       // Animation / video settings — pass rates directly, no animationDuration needed
@@ -1061,6 +1075,10 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         settings.rotation,
         kaleidoTypeIdx,
         settings.hue_rotate,
+        settings.recolor_enabled,
+        settings.recolor_seed,
+        settings.recolor_mode === "bordered_cells" ? 1 : 0,
+        settings.recolor_threshold,
         vs,
         settings.anti_alias,
         settings.super_sample,
@@ -1529,6 +1547,26 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
     wedgePickerMode
   );
 
+  // Keep the source picker faithful to the pixels that enter the symmetry pass.
+  useEffect(() => {
+    if (!imagePath || !settings.recolor_enabled) {
+      setRecoloredSourceSrc("");
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void invoke<string>("preprocess_source_preview", {
+        path: imagePath,
+        seedInput: settings.recolor_seed,
+        threshold: settings.recolor_threshold,
+        mode: settings.recolor_mode === "bordered_cells" ? 1 : 0,
+      }).then((src) => {
+        if (!cancelled) setRecoloredSourceSrc(src);
+      }).catch((error) => console.error("Source recolor preview failed", error));
+    }, 100);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [imagePath, settings.recolor_enabled, settings.recolor_seed, settings.recolor_threshold, settings.recolor_mode]);
+
 
   const renderPreview = useCallback(
     async (options?: {
@@ -1596,6 +1634,10 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
           kaleidoType: activeKaleidoType,
           tileCount: activeSettings.tile_count,
           hueRotation: activeSettings.hue_rotate,
+          recolorEnabled: activeSettings.recolor_enabled,
+          recolorSeed: activeSettings.recolor_seed,
+          recolorMode: activeSettings.recolor_mode === "bordered_cells" ? 1 : 0,
+          recolorThreshold: activeSettings.recolor_threshold,
           imgWidth: sourceWidth,
           imgHeight: sourceHeight,
           antiAlias: reconstructionMode(activeSettings),
@@ -2045,6 +2087,10 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         kaleidoType,
         tileCount: settings.tile_count,
         hueRotation: settings.hue_rotate,
+        recolorEnabled: settings.recolor_enabled,
+        recolorSeed: settings.recolor_seed,
+        recolorMode: settings.recolor_mode === "bordered_cells" ? 1 : 0,
+        recolorThreshold: settings.recolor_threshold,
         imgWidth,
         imgHeight,
         antiAlias: reconstructionMode(settings),
@@ -2133,6 +2179,10 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         kaleidoType,
         tileCount: settings.tile_count,
         hueRotation: settings.hue_rotate,
+        recolorEnabled: settings.recolor_enabled,
+        recolorSeed: settings.recolor_seed,
+        recolorMode: settings.recolor_mode === "bordered_cells" ? 1 : 0,
+        recolorThreshold: settings.recolor_threshold,
         stillFrameEnding: settings.still_frame_ending,
         fps: settings.fps,
         quality: settings.quality,
@@ -2215,6 +2265,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
               <TabsTrigger value="image">Image</TabsTrigger>
               <TabsTrigger value="video">Video</TabsTrigger>
               <TabsTrigger value="audio">Audio</TabsTrigger>
+              <TabsTrigger value="recolor">Recolor</TabsTrigger>
             </TabsList>
             {/* Second row — kept as its own TabsList (same Tabs context, so
                 clicking it switches the same active tab) so "Enhancements"
@@ -2317,6 +2368,53 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
                 <Button variant="ghost" size="sm" onClick={loadImagePreset}>Load Preset</Button>
                 <Button variant="ghost" size="sm" onClick={saveImagePreset}>Save Preset</Button>
               </div>
+            </TabsContent>
+
+            {/* ── RECOLOR TAB ── */}
+            <TabsContent value="recolor" className="p-4 space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <label htmlFor="recolor-enabled" className="text-sm font-medium">Enable source recoloring</label>
+                  <p className="text-xs text-muted-foreground">Applied before kaleidoscope symmetry.</p>
+                </div>
+                <Checkbox
+                  id="recolor-enabled"
+                  checked={settings.recolor_enabled}
+                  onCheckedChange={(checked) => setSettings((s) => ({ ...s, recolor_enabled: checked === true }))}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Mode</label>
+                <Select value={settings.recolor_mode} onValueChange={(value: Settings["recolor_mode"]) => setSettings((s) => ({ ...s, recolor_mode: value }))}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="color_bands">Broad color bands</SelectItem>
+                    <SelectItem value="bordered_cells">Bordered cells / shapes</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">Bordered cells preserves dark outlines and separates smaller fills by color and brightness.</p>
+              </div>
+              <div className="space-y-2">
+                <label htmlFor="recolor-seed" className="text-sm font-medium">Seed</label>
+                <Input
+                  id="recolor-seed"
+                  type="text"
+                  value={settings.recolor_seed}
+                  onChange={(event) => setSettings((s) => ({ ...s, recolor_seed: event.target.value }))}
+                  placeholder="Any text"
+                />
+                <p className="text-xs text-muted-foreground">The full string is SHA-256 hashed, then used to seed ChaCha8.</p>
+              </div>
+              <NumberSliderInput
+                label="Color threshold"
+                value={settings.recolor_threshold}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(v) => setSettings((s) => ({ ...s, recolor_threshold: v }))}
+                roundToInteger={false}
+              />
+              <p className="text-xs text-muted-foreground">Higher values preserve low-saturation colors. Hue bands blend smoothly to avoid popping in gradients and motion.</p>
             </TabsContent>
 
             {/* ── VIDEO TAB ── */}
@@ -2677,6 +2775,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
                 {imagePath ? (
                   <WedgePicker
                     imagePath={imagePath}
+                    imageSrc={recoloredSourceSrc || imageSrc}
                     count={count}
                     settings={settings}
                     onUpdate={setSettings}
