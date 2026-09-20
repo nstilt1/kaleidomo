@@ -99,18 +99,19 @@ export class LiveKaleidoscopeEngine {
      * @param {string} recolor_seed
      * @param {number} recolor_mode
      * @param {number} recolor_threshold
+     * @param {number} recolor_cell_size
      * @param {WasmVideoSettings} video_settings
      * @param {number} anti_alias
      * @param {number} super_sample
      * @param {boolean} aspect_correct
      */
-    start_animation(count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, recolor_enabled, recolor_seed, recolor_mode, recolor_threshold, video_settings, anti_alias, super_sample, aspect_correct) {
+    start_animation(count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, recolor_enabled, recolor_seed, recolor_mode, recolor_threshold, recolor_cell_size, video_settings, anti_alias, super_sample, aspect_correct) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passStringToWasm0(recolor_seed, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
             _assertClass(video_settings, WasmVideoSettings);
-            wasm.livekaleidoscopeengine_start_animation(retptr, this.__wbg_ptr, count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, recolor_enabled, ptr0, len0, recolor_mode, recolor_threshold, video_settings.__wbg_ptr, anti_alias, super_sample, aspect_correct);
+            wasm.livekaleidoscopeengine_start_animation(retptr, this.__wbg_ptr, count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, recolor_enabled, ptr0, len0, recolor_mode, recolor_threshold, recolor_cell_size, video_settings.__wbg_ptr, anti_alias, super_sample, aspect_correct);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             if (r1) {
@@ -144,18 +145,19 @@ export class LiveKaleidoscopeEngine {
      * @param {string} recolor_seed
      * @param {number} recolor_mode
      * @param {number} recolor_threshold
+     * @param {number} recolor_cell_size
      * @param {WasmVideoSettings} video_settings
      * @param {number} anti_alias
      * @param {number} super_sample
      * @param {boolean} aspect_correct
      */
-    update_animation_settings(count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, recolor_enabled, recolor_seed, recolor_mode, recolor_threshold, video_settings, anti_alias, super_sample, aspect_correct) {
+    update_animation_settings(count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, recolor_enabled, recolor_seed, recolor_mode, recolor_threshold, recolor_cell_size, video_settings, anti_alias, super_sample, aspect_correct) {
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passStringToWasm0(recolor_seed, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
             _assertClass(video_settings, WasmVideoSettings);
-            wasm.livekaleidoscopeengine_update_animation_settings(retptr, this.__wbg_ptr, count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, recolor_enabled, ptr0, len0, recolor_mode, recolor_threshold, video_settings.__wbg_ptr, anti_alias, super_sample, aspect_correct);
+            wasm.livekaleidoscopeengine_update_animation_settings(retptr, this.__wbg_ptr, count, offset_x, offset_y, zoom, tile_count, triangle_center_x, triangle_center_y, triangle_rotation_rad, kaleido_type_idx, hue_rotation, recolor_enabled, ptr0, len0, recolor_mode, recolor_threshold, recolor_cell_size, video_settings.__wbg_ptr, anti_alias, super_sample, aspect_correct);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             if (r1) {
@@ -1073,7 +1075,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_2181(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_2240(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -1728,18 +1730,18 @@ function __wbg_get_imports() {
             getObject(arg0).writeTexture(getObject(arg1), getArrayU8FromWasm0(arg2, arg3), getObject(arg4), getObject(arg5));
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 126, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_2179);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 129, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_2238);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 86, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_735);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 88, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_793);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [F64], shim_idx: 2, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_426);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_442);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000004: function(arg0) {
@@ -1766,14 +1768,14 @@ function __wbg_get_imports() {
     };
 }
 
-function __wasm_bindgen_func_elem_735(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_735(arg0, arg1, addHeapObject(arg2));
+function __wasm_bindgen_func_elem_793(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_793(arg0, arg1, addHeapObject(arg2));
 }
 
-function __wasm_bindgen_func_elem_2179(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_2238(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_2179(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_2238(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -1784,12 +1786,12 @@ function __wasm_bindgen_func_elem_2179(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_2181(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_2181(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_2240(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_2240(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
-function __wasm_bindgen_func_elem_426(arg0, arg1, arg2) {
-    wasm.__wasm_bindgen_func_elem_426(arg0, arg1, arg2);
+function __wasm_bindgen_func_elem_442(arg0, arg1, arg2) {
+    wasm.__wasm_bindgen_func_elem_442(arg0, arg1, arg2);
 }
 
 

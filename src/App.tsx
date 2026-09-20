@@ -16,7 +16,7 @@ import { LicenseProvider, useLicense } from "@/lib/license-context";
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { KaleidomoProvider } from "@/lib/kaleidomo-session-context";
+import { KaleidomoProvider, useKaleidomoSession } from "@/lib/kaleidomo-session-context";
 import { setupAppMenu, type AppMenuHandles } from "@/lib/app-menu";
 import {
   SettingsProvider,
@@ -52,10 +52,13 @@ function AppLayout() {
 
   const location = useLocation();
   const menuHandlesRef = React.useRef<AppMenuHandles | null>(null);
+  const [menuReady, setMenuReady] = React.useState(false);
+  const { canUndo, canRedo, undo, redo } = useKaleidomoSession();
 
   React.useEffect(() => {
     void (async () => {
       menuHandlesRef.current = await setupAppMenu();
+      setMenuReady(true);
     })();
   }, []);
 
@@ -73,7 +76,26 @@ function AppLayout() {
     void handles.saveVideoPreset.setEnabled(isCreate);
     void handles.loadProject.setEnabled(isCreate);
     void handles.saveProject.setEnabled(isCreate);
-  }, [location.pathname]);
+  }, [location.pathname, menuReady]);
+
+  React.useEffect(() => {
+    const handles = menuHandlesRef.current;
+    if (!handles) return;
+    const isCreate = location.pathname === "/create";
+    void handles.undo.setEnabled(isCreate && canUndo);
+    void handles.redo.setEnabled(isCreate && canRedo);
+  }, [canUndo, canRedo, location.pathname, menuReady]);
+
+  React.useEffect(() => {
+    const onUndo = () => undo();
+    const onRedo = () => redo();
+    window.addEventListener("menu-undo", onUndo);
+    window.addEventListener("menu-redo", onRedo);
+    return () => {
+      window.removeEventListener("menu-undo", onUndo);
+      window.removeEventListener("menu-redo", onRedo);
+    };
+  }, [undo, redo]);
 
   const { isUnlocked, licenseType } = useLicense();
   const { isFullscreen } = useFullscreenContext();

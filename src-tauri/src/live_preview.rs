@@ -48,6 +48,8 @@ pub struct LivePreviewParams {
     pub recolor_mode: u8,
     #[serde(default = "default_recolor_threshold")]
     pub recolor_threshold: f32,
+    #[serde(default = "default_recolor_cell_size")]
+    pub recolor_cell_size: f32,
     pub img_width: u32,
     pub img_height: u32,
     // ── Enhancements (see `KaleidoSettings` in kaleidomo-core/src/lib.rs) ──
@@ -85,6 +87,7 @@ fn default_anisotropy() -> u8 { 1 }
 fn default_edge_filter() -> String { "disabled".into() }
 fn default_taa_feedback() -> f32 { 0.9 }
 fn default_recolor_threshold() -> f32 { 0.08 }
+fn default_recolor_cell_size() -> f32 { 64.0 }
 
 impl LivePreviewParams {
     fn to_kaleido_settings(&self) -> Result<KaleidoSettings, String> {
@@ -114,6 +117,7 @@ impl LivePreviewParams {
             recolor_seed: self.recolor_seed.clone(),
             recolor_mode: self.recolor_mode,
             recolor_threshold: self.recolor_threshold,
+            recolor_cell_size: self.recolor_cell_size,
             anti_alias: self.anti_alias,
             derivative_mipmapping: self.derivative_mipmapping,
             anisotropy_level: self.anisotropy_level,

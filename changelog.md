@@ -2,6 +2,13 @@
 
 All notable changes to Kaleidomo are documented here.
 
+## 1.3 — 2026-09-XX
+
+- Added multiple enhancement algorithms such as anti-aliasing and supersampling.
+- Added several seeded "recolor" algorithms for quickly recoloring the outputs.
+- Added progress checking for exporting video.
+- Added Undo/Redo feature.
+
 ## 1.2 — 2026-07-28
 
 - Added CLI for windows EXE so that you can run the app from the command line with a preset file path like so:

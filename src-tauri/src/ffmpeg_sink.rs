@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use kaleidomo_core::{VideoFrameSink, VideoSinkError};
 use tauri::AppHandle;
+use tauri::Emitter;
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
@@ -48,6 +49,7 @@ enum FfmpegOutcome {
 /// Streams RGBA frames to the bundled FFmpeg sidecar over its stdin and
 /// finalizes an MP4 on `finish()`.
 pub struct FfmpegSink {
+    app: AppHandle,
     child: Option<CommandChild>,
     outcome_rx: Option<std::sync::mpsc::Receiver<FfmpegOutcome>>,
     stderr_tail: Arc<Mutex<String>>,
@@ -60,6 +62,8 @@ pub struct FfmpegSink {
     /// output file that's no longer a temp file.
     finished_ok: bool,
     frames_written: u64,
+    total_frames: u64,
+    last_emitted_percent: u8,
     started_at: Instant,
 }
 
@@ -81,6 +85,7 @@ impl FfmpegSink {
         fps: u32,
         bitrate_bps: u32,
         audio_path: Option<&Path>,
+        total_frames: u64,
     ) -> Result<Self, String> {
         if width == 0 || height == 0 {
             return Err("width and height must be non-zero".into());
@@ -252,6 +257,7 @@ impl FfmpegSink {
         });
 
         Ok(Self {
+            app: app.clone(),
             child: Some(child),
             outcome_rx: Some(outcome_rx),
             stderr_tail,
@@ -261,6 +267,8 @@ impl FfmpegSink {
             final_path: final_path.to_path_buf(),
             finished_ok: false,
             frames_written: 0,
+            total_frames: total_frames.max(1),
+            last_emitted_percent: 0,
             started_at: Instant::now(),
         })
     }
@@ -309,6 +317,19 @@ impl VideoFrameSink for FfmpegSink {
         }
 
         self.frames_written += 1;
+        let percent = ((self.frames_written.saturating_mul(100) / self.total_frames)
+            .min(100)) as u8;
+        if percent != self.last_emitted_percent {
+            self.last_emitted_percent = percent;
+            let _ = self.app.emit(
+                "kd://video-export-progress",
+                serde_json::json!({
+                    "currentFrame": self.frames_written,
+                    "totalFrames": self.total_frames,
+                    "percent": percent,
+                }),
+            );
+        }
         if self.frames_written % FRAME_LOG_INTERVAL == 0 {
             let elapsed = self.started_at.elapsed().as_secs_f64();
             let fps = if elapsed > 0.0 {

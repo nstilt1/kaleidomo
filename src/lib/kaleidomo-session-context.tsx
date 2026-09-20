@@ -16,8 +16,9 @@ export type Settings = {
   hue_rotate: number;
   recolor_enabled: boolean;
   recolor_seed: string;
-  recolor_mode: "color_bands" | "bordered_cells";
+  recolor_mode: "color_bands" | "bordered_cells" | "seeded_voronoi" | "connected_components" | "slic_superpixels";
   recolor_threshold: number;
+  recolor_cell_size: number;
   ratio_num: number;
   ratio_den: number;
   offset_x: number;
@@ -121,6 +122,7 @@ export const DEFAULT_SETTINGS: Settings = {
   recolor_seed: "kaleidomo",
   recolor_mode: "color_bands",
   recolor_threshold: 0.08,
+  recolor_cell_size: 64,
   ratio_num: 9,
   ratio_den: 16,
   offset_x: 0,
@@ -198,7 +200,20 @@ type KaleidomoSessionContextValue = {
   setImgHeight: React.Dispatch<React.SetStateAction<number>>;
   isRendering: boolean;
   setIsRendering: React.Dispatch<React.SetStateAction<boolean>>;
+  canUndo: boolean;
+  canRedo: boolean;
+  undo: () => void;
+  redo: () => void;
 };
+
+type HistorySnapshot = {
+  settings: Settings;
+  count: number;
+  kaleidoType: string;
+};
+
+const HISTORY_LIMIT = 100;
+const HISTORY_COALESCE_MS = 300;
 
 const KaleidomoSessionContext = React.createContext<KaleidomoSessionContextValue | null>(null);
 
@@ -210,12 +225,106 @@ export function KaleidomoProvider({
   const [imagePath, setImagePath] = React.useState("");
   const [imageSrc, setImageSrc] = React.useState("");
   const [outputSrc, setOutputSrc] = React.useState("");
-  const [count, setCount] = React.useState(6);
-  const [settings, setSettings] = React.useState<Settings>(DEFAULT_SETTINGS);
-  const [kaleidoType, setKaleidoType] = React.useState("radial");
+  const [count, setCountState] = React.useState(6);
+  const [settings, setSettingsState] = React.useState<Settings>(DEFAULT_SETTINGS);
+  const [kaleidoType, setKaleidoTypeState] = React.useState("radial");
   const [imgWidth, setImgWidth] = React.useState(0);
   const [imgHeight, setImgHeight] = React.useState(0);
   const [isRendering, setIsRendering] = React.useState(false);
+  const stateRef = React.useRef<HistorySnapshot>({
+    settings: DEFAULT_SETTINGS,
+    count: 6,
+    kaleidoType: "radial",
+  });
+  const undoStackRef = React.useRef<HistorySnapshot[]>([]);
+  const redoStackRef = React.useRef<HistorySnapshot[]>([]);
+  const lastChangeRef = React.useRef({ group: "", time: 0 });
+  const [historyVersion, setHistoryVersion] = React.useState(0);
+
+  const recordChange = React.useCallback((group: keyof HistorySnapshot) => {
+    const now = Date.now();
+    const last = lastChangeRef.current;
+    if (last.group !== group || now - last.time > HISTORY_COALESCE_MS) {
+      undoStackRef.current.push(stateRef.current);
+      if (undoStackRef.current.length > HISTORY_LIMIT) undoStackRef.current.shift();
+    }
+    lastChangeRef.current = { group, time: now };
+    redoStackRef.current = [];
+    setHistoryVersion((version) => version + 1);
+  }, []);
+
+  const setSettings = React.useCallback<React.Dispatch<React.SetStateAction<Settings>>>((update) => {
+    const current = stateRef.current.settings;
+    const next = typeof update === "function" ? update(current) : update;
+    if (Object.is(current, next)) return;
+    recordChange("settings");
+    stateRef.current = { ...stateRef.current, settings: next };
+    setSettingsState(next);
+  }, [recordChange]);
+
+  const setCount = React.useCallback<React.Dispatch<React.SetStateAction<number>>>((update) => {
+    const current = stateRef.current.count;
+    const next = typeof update === "function" ? update(current) : update;
+    if (Object.is(current, next)) return;
+    recordChange("count");
+    stateRef.current = { ...stateRef.current, count: next };
+    setCountState(next);
+  }, [recordChange]);
+
+  const setKaleidoType = React.useCallback<React.Dispatch<React.SetStateAction<string>>>((update) => {
+    const current = stateRef.current.kaleidoType;
+    const next = typeof update === "function" ? update(current) : update;
+    if (Object.is(current, next)) return;
+    recordChange("kaleidoType");
+    stateRef.current = { ...stateRef.current, kaleidoType: next };
+    setKaleidoTypeState(next);
+  }, [recordChange]);
+
+  const restoreSnapshot = React.useCallback((snapshot: HistorySnapshot) => {
+    stateRef.current = snapshot;
+    setSettingsState(snapshot.settings);
+    setCountState(snapshot.count);
+    setKaleidoTypeState(snapshot.kaleidoType);
+    lastChangeRef.current = { group: "", time: 0 };
+    setHistoryVersion((version) => version + 1);
+  }, []);
+
+  const undo = React.useCallback(() => {
+    const previous = undoStackRef.current.pop();
+    if (!previous) return;
+    redoStackRef.current.push(stateRef.current);
+    restoreSnapshot(previous);
+  }, [restoreSnapshot]);
+
+  const redo = React.useCallback(() => {
+    const next = redoStackRef.current.pop();
+    if (!next) return;
+    undoStackRef.current.push(stateRef.current);
+    restoreSnapshot(next);
+  }, [restoreSnapshot]);
+
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.isContentEditable || target?.matches("input, textarea")) return;
+      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+
+      const key = event.key.toLowerCase();
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        undo();
+      } else if ((key === "z" && event.shiftKey) || (key === "y" && !event.shiftKey)) {
+        event.preventDefault();
+        redo();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [undo, redo]);
+
+  const canUndo = undoStackRef.current.length > 0;
+  const canRedo = redoStackRef.current.length > 0;
 
   const value = React.useMemo(
     () => ({
@@ -237,6 +346,10 @@ export function KaleidomoProvider({
       setImgHeight,
       isRendering,
       setIsRendering,
+      canUndo,
+      canRedo,
+      undo,
+      redo,
     }),
     [
       imagePath,
@@ -248,6 +361,11 @@ export function KaleidomoProvider({
       imgWidth,
       imgHeight,
       isRendering,
+      historyVersion,
+      canUndo,
+      canRedo,
+      undo,
+      redo,
     ]
   );
 

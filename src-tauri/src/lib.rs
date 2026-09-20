@@ -9,7 +9,7 @@ use tauri_plugin_fs::FsExt;
 
 use std::{collections::HashMap, sync::{Arc, Mutex}};
 use kaleidomo_core::{KaleidoSettings, pollster};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use std::fs;
 use std::io::Cursor;
@@ -607,6 +607,7 @@ async fn export_kaleidoscope(
     recolor_seed: String,
     recolor_mode: u8,
     recolor_threshold: f32,
+    recolor_cell_size: f32,
     img_width: u32,
     img_height: u32,
     // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
@@ -667,6 +668,7 @@ async fn export_kaleidoscope(
         recolor_seed,
         recolor_mode,
         recolor_threshold,
+        recolor_cell_size,
         anti_alias,
         derivative_mipmapping,
         anisotropy_level,
@@ -757,17 +759,21 @@ async fn preprocess_source_preview(
     seed_input: String,
     threshold: f32,
     mode: u8,
+    cell_size: f32,
 ) -> Result<String, String> {
     let mut rgba = load_source_image(&adjust_path(&path))?.to_rgba8();
-    kaleidomo_core::preprocess::preprocess_source_frame_with_mode(
+    kaleidomo_core::preprocess::preprocess_source_frame_with_mode_and_cell_size(
         &mut rgba,
         seed_input.as_bytes(),
         threshold,
-        if mode == 1 {
-            kaleidomo_core::preprocess::RecolorMode::BorderedCells
-        } else {
-            kaleidomo_core::preprocess::RecolorMode::ColorBands
+        match mode {
+            1 => kaleidomo_core::preprocess::RecolorMode::BorderedCells,
+            2 => kaleidomo_core::preprocess::RecolorMode::SeededVoronoi,
+            3 => kaleidomo_core::preprocess::RecolorMode::ConnectedComponents,
+            4 => kaleidomo_core::preprocess::RecolorMode::SlicSuperpixels,
+            _ => kaleidomo_core::preprocess::RecolorMode::ColorBands,
         },
+        cell_size,
     ).map_err(|e| e.to_string())?;
     let mut buffer = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(rgba)
@@ -797,6 +803,7 @@ async fn generate_kaleidoscope(
     recolor_seed: String,
     recolor_mode: u8,
     recolor_threshold: f32,
+    recolor_cell_size: f32,
     img_width: u32,
     img_height: u32,
     // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
@@ -841,6 +848,7 @@ async fn generate_kaleidoscope(
         recolor_seed,
         recolor_mode,
         recolor_threshold,
+        recolor_cell_size,
         anti_alias,
         derivative_mipmapping,
         anisotropy_level,
@@ -940,6 +948,7 @@ async fn generate_video(
     recolor_seed: String,
     recolor_mode: u8,
     recolor_threshold: f32,
+    recolor_cell_size: f32,
     still_frame_ending: u32,
     fps: u32,
     quality: f32,
@@ -1027,6 +1036,7 @@ async fn generate_video(
         recolor_seed,
         recolor_mode,
         recolor_threshold,
+        recolor_cell_size,
         anti_alias,
         derivative_mipmapping,
         anisotropy_level,
@@ -1064,6 +1074,8 @@ async fn generate_video(
         hero_circle_y,
         hero_desired_left_rotation: rotation,
     };
+    let total_export_frames =
+        (animation_duration * fps as f32).round() as u64 + still_frame_ending as u64;
 
     let use_gpu = {
         let guard = state
@@ -1109,6 +1121,7 @@ async fn generate_video(
                 fps,
                 bitrate_bps,
                 audio_path.as_deref(),
+                total_export_frames,
             )?;
             let mut enhanced_sink = EnhancingVideoSink { inner: &mut sink, width: output_size_w, height: output_size_h, pipeline: kaleidomo_core::enhancement::EnhancementPipeline::new(video_enhancement) };
             let mut gpu_guard = gpu_arc
@@ -1129,6 +1142,7 @@ async fn generate_video(
             fps,
             bitrate_bps,
             audio_path.as_deref(),
+            total_export_frames,
         )?;
         let mut enhanced_sink = EnhancingVideoSink { inner: &mut sink, width: output_size_w, height: output_size_h, pipeline: kaleidomo_core::enhancement::EnhancementPipeline::new(video_enhancement) };
         if let Err(e) = kaleidomo_core::render_video_with_auto_backend(
@@ -1183,6 +1197,30 @@ fn gpu_available(state: tauri::State<'_, AppState>) -> bool {
 #[tauri::command]
 fn get_preview_ws_port(state: tauri::State<'_, AppState>) -> u16 {
     state.preview_ws_port
+}
+
+#[cfg(target_os = "macos")]
+fn begin_macos_shutdown(app: &tauri::AppHandle) {
+    static SHUTDOWN_STARTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    if SHUTDOWN_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+
+    // Let every WebView stop animation frames, WebSockets, media playback,
+    // and WASM/native preview engines before WebKit starts destroying them.
+    let _ = app.emit("kd://app-will-exit", ());
+
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // macOS 14 can trap inside WebPageProxy::~WebPageProxy while tearing
+        // down a busy WKWebView. The cleanup event above releases the app's
+        // resources; exiting directly then avoids WebKit's faulty destructor
+        // path. This only runs after an explicit close or quit request.
+        std::process::exit(0);
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1326,6 +1364,17 @@ pub fn run() {
         })
         .on_window_event(move |window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the main window does not necessarily emit
+                // RunEvent::ExitRequested while the hidden controls window is
+                // still alive. Intercept it before Tauri drops the WKWebView so
+                // the live-preview callbacks can shut down first.
+                #[cfg(target_os = "macos")]
+                if window.label() == "main" {
+                    api.prevent_close();
+                    begin_macos_shutdown(window.app_handle());
+                    return;
+                }
+
                 // A CLI/kiosk launch keeps the controls WebView hidden. If the
                 // main window is closed without exiting the app, that hidden
                 // controls window keeps the Tauri event loop (and kaleidomo.exe)
@@ -1408,6 +1457,19 @@ pub fn run() {
             stop_loopback_capture,
             get_loopback_peak,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                // On macOS, destroying WKWebView while its live-preview
+                // WebSocket/requestAnimationFrame callbacks are still active can
+                // trip a WebKit WebPageProxy destructor assertion. Give both
+                // webviews a short, explicit teardown phase before the real exit.
+                if cfg!(target_os = "macos") && code.is_none() {
+                    api.prevent_exit();
+                    #[cfg(target_os = "macos")]
+                    begin_macos_shutdown(app);
+                }
+            }
+        });
 }

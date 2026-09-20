@@ -58,6 +58,12 @@ type LoadedImage = {
   height: number;
 };
 
+type VideoExportProgress = {
+  currentFrame: number;
+  totalFrames: number;
+  percent: number;
+};
+
 const tryLoadImageFromPath = async (path: string): Promise<LoadedImage> => {
   const assetUrl = convertFileSrc(path);
   const img = new Image();
@@ -174,6 +180,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function recolorModeIndex(mode: Settings["recolor_mode"]): number {
+  if (mode === "bordered_cells") return 1;
+  if (mode === "seeded_voronoi") return 2;
+  if (mode === "connected_components") return 3;
+  if (mode === "slic_superpixels") return 4;
+  return 0;
+}
+
+const RECOLOR_MODE_INFO: Record<Settings["recolor_mode"], { label: string; speed: string; description: string }> = {
+  color_bands: { label: "Broad color bands", speed: "Instant", description: "Smoothly shifts broad hue ranges." },
+  bordered_cells: { label: "Bordered cells / shapes", speed: "Instant", description: "Preserves dark outlines and separates fills by color and brightness." },
+  seeded_voronoi: { label: "Seeded Voronoi cells", speed: "Instant", description: "Creates resizable deterministic spatial cells directly on the GPU." },
+  connected_components: { label: "Connected components", speed: "Moderate", description: "Analyzes contiguous source regions and caches the result." },
+  slic_superpixels: { label: "SLIC superpixels", speed: "Slow", description: "Iteratively clusters the source in perceptual color and position space, then caches it." },
+};
+
 const IMAGE_SETTING_KEYS = [
   "x",
   "y",
@@ -186,6 +208,7 @@ const IMAGE_SETTING_KEYS = [
   "recolor_seed",
   "recolor_mode",
   "recolor_threshold",
+  "recolor_cell_size",
   "ratio_num",
   "ratio_den",
   "offset_x",
@@ -529,10 +552,58 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   const [audioError, setAudioError] = useState<string | null>(null);
   const [livePreviewError, setLivePreviewError] = useState<string | null>(null);
   const [recoloredSourceSrc, setRecoloredSourceSrc] = useState("");
+  const [isRecolorPreprocessing, setIsRecolorPreprocessing] = useState(false);
   // macOS native preview resolution cap. Higher = sharper but more IPC memory pressure.
   // 720 is the safe default (70 MB/s at 20fps with reusable ImageData).
   const [nativePreviewRes, setNativePreviewRes] = useState<512 | 720 | 1080>(720);
   const [audioPlaying, setAudioPlaying] = useState(false);
+  const [isVideoExporting, setIsVideoExporting] = useState(false);
+  const [videoExportProgress, setVideoExportProgress] = useState<VideoExportProgress>({
+    currentFrame: 0,
+    totalFrames: 0,
+    percent: 0,
+  });
+  const [showVideoExportProgress, setShowVideoExportProgress] = useState(false);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<VideoExportProgress>("kd://video-export-progress", (event) => {
+      setVideoExportProgress(event.payload);
+    }).then((fn) => {
+      unlisten = fn;
+    }).catch(console.error);
+
+    return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
+    const stopForShutdown = () => {
+      if (engineRef.current) {
+        try { engineRef.current.stop_animation(); } catch (_) { /* shutting down */ }
+        try { engineRef.current.free?.(); } catch (_) { /* shutting down */ }
+        engineRef.current = null;
+      }
+      if (nativeEngineRef.current) {
+        nativeEngineRef.current.stop();
+        nativeEngineRef.current = null;
+      }
+      if (audioElementRef.current) {
+        audioElementRef.current.pause();
+        audioElementRef.current.src = "";
+      }
+    };
+
+    let unlisten: (() => void) | undefined;
+    void listen("kd://app-will-exit", stopForShutdown).then((fn) => { unlisten = fn; });
+    window.addEventListener("pagehide", stopForShutdown);
+    window.addEventListener("beforeunload", stopForShutdown);
+    return () => {
+      unlisten?.();
+      window.removeEventListener("pagehide", stopForShutdown);
+      window.removeEventListener("beforeunload", stopForShutdown);
+      stopForShutdown();
+    };
+  }, []);
   // CLI/kiosk launches load project state asynchronously, then enter fullscreen.
   // Track that startup path so the live preview can be started exactly once after
   // React has committed both the loaded image state and the fullscreen canvas.
@@ -646,8 +717,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         settings.hue_rotate,
         settings.recolor_enabled,
         settings.recolor_seed,
-        settings.recolor_mode === "bordered_cells" ? 1 : 0,
+        recolorModeIndex(settings.recolor_mode),
         settings.recolor_threshold,
+        settings.recolor_cell_size,
         vs,
         reconstructionMode(settings),
         settings.super_sample,
@@ -711,8 +783,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       hueRotation: settings.hue_rotate,
       recolorEnabled: settings.recolor_enabled,
       recolorSeed: settings.recolor_seed,
-      recolorMode: settings.recolor_mode === "bordered_cells" ? 1 : 0,
+      recolorMode: recolorModeIndex(settings.recolor_mode),
       recolorThreshold: settings.recolor_threshold,
+      recolorCellSize: settings.recolor_cell_size,
       imgWidth,
       imgHeight,
       // Animation / video settings — pass rates directly, no animationDuration needed
@@ -1077,8 +1150,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         settings.hue_rotate,
         settings.recolor_enabled,
         settings.recolor_seed,
-        settings.recolor_mode === "bordered_cells" ? 1 : 0,
+        recolorModeIndex(settings.recolor_mode),
         settings.recolor_threshold,
+        settings.recolor_cell_size,
         vs,
         settings.anti_alias,
         settings.super_sample,
@@ -1551,21 +1625,31 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   useEffect(() => {
     if (!imagePath || !settings.recolor_enabled) {
       setRecoloredSourceSrc("");
+      setIsRecolorPreprocessing(false);
       return;
     }
+    const requiresPreprocessing = settings.recolor_mode === "connected_components" || settings.recolor_mode === "slic_superpixels";
+    setIsRecolorPreprocessing(requiresPreprocessing);
     let cancelled = false;
     const timer = window.setTimeout(() => {
       void invoke<string>("preprocess_source_preview", {
         path: imagePath,
         seedInput: settings.recolor_seed,
         threshold: settings.recolor_threshold,
-        mode: settings.recolor_mode === "bordered_cells" ? 1 : 0,
+        mode: recolorModeIndex(settings.recolor_mode),
+        cellSize: settings.recolor_cell_size,
       }).then((src) => {
-        if (!cancelled) setRecoloredSourceSrc(src);
-      }).catch((error) => console.error("Source recolor preview failed", error));
+        if (!cancelled) {
+          setRecoloredSourceSrc(src);
+          setIsRecolorPreprocessing(false);
+        }
+      }).catch((error) => {
+        if (!cancelled) setIsRecolorPreprocessing(false);
+        console.error("Source recolor preview failed", error);
+      });
     }, 100);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [imagePath, settings.recolor_enabled, settings.recolor_seed, settings.recolor_threshold, settings.recolor_mode]);
+  }, [imagePath, settings.recolor_enabled, settings.recolor_seed, settings.recolor_threshold, settings.recolor_mode, settings.recolor_cell_size]);
 
 
   const renderPreview = useCallback(
@@ -1636,8 +1720,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
           hueRotation: activeSettings.hue_rotate,
           recolorEnabled: activeSettings.recolor_enabled,
           recolorSeed: activeSettings.recolor_seed,
-          recolorMode: activeSettings.recolor_mode === "bordered_cells" ? 1 : 0,
+          recolorMode: recolorModeIndex(activeSettings.recolor_mode),
           recolorThreshold: activeSettings.recolor_threshold,
+          recolorCellSize: activeSettings.recolor_cell_size,
           imgWidth: sourceWidth,
           imgHeight: sourceHeight,
           antiAlias: reconstructionMode(activeSettings),
@@ -2089,8 +2174,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         hueRotation: settings.hue_rotate,
         recolorEnabled: settings.recolor_enabled,
         recolorSeed: settings.recolor_seed,
-        recolorMode: settings.recolor_mode === "bordered_cells" ? 1 : 0,
+        recolorMode: recolorModeIndex(settings.recolor_mode),
         recolorThreshold: settings.recolor_threshold,
+        recolorCellSize: settings.recolor_cell_size,
         imgWidth,
         imgHeight,
         antiAlias: reconstructionMode(settings),
@@ -2113,6 +2199,11 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   };
 
   const handleVideo = async () => {
+    if (isVideoExporting) {
+      setShowVideoExportProgress((visible) => !visible);
+      return;
+    }
+
     if (!imagePath || imgWidth <= 0 || imgHeight <= 0) {
       return;
     }
@@ -2145,6 +2236,10 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       settings.tile_count,
       wedgePickerMode
     ).effectiveZoom;
+
+    setIsVideoExporting(true);
+    setShowVideoExportProgress(false);
+    setVideoExportProgress({ currentFrame: 0, totalFrames: 0, percent: 0 });
 
     try {
       console.log("settings.still_frame_ending frames = " + settings.still_frame_ending);
@@ -2181,8 +2276,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         hueRotation: settings.hue_rotate,
         recolorEnabled: settings.recolor_enabled,
         recolorSeed: settings.recolor_seed,
-        recolorMode: settings.recolor_mode === "bordered_cells" ? 1 : 0,
+        recolorMode: recolorModeIndex(settings.recolor_mode),
         recolorThreshold: settings.recolor_threshold,
+        recolorCellSize: settings.recolor_cell_size,
         stillFrameEnding: settings.still_frame_ending,
         fps: settings.fps,
         quality: settings.quality,
@@ -2228,9 +2324,11 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
 
       alert(String(message));
     } catch (e) {
-      if (e !== "Export cancelled") {
+      if (e !== "Export cancelled" && e !== "Video export cancelled") {
         console.error("Export failed", e);
       }
+    } finally {
+      setIsVideoExporting(false);
     }
   };
 
@@ -2249,8 +2347,14 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
           </div>
           <div className="grid grid-cols-2 gap-2">
             <Button onClick={handlePickFile} className="w-full" size="sm">Select Image</Button>
-            <Button variant="outline" size="sm" onClick={() => void renderPreview()} disabled={isRendering}>
-              {isRendering ? "Rendering…" : "Preview"}
+            <Button
+              variant="outline"
+              size="sm"
+              className="min-w-[96px]"
+              onClick={() => void renderPreview()}
+              disabled={isRendering || isRecolorPreprocessing}
+            >
+              {isRendering ? "Rendering…" : isRecolorPreprocessing ? "Processing…" : "Preview"}
             </Button>
           </div>
           <div className="grid grid-cols-2 gap-1">
@@ -2388,11 +2492,12 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
                 <Select value={settings.recolor_mode} onValueChange={(value: Settings["recolor_mode"]) => setSettings((s) => ({ ...s, recolor_mode: value }))}>
                   <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="color_bands">Broad color bands</SelectItem>
-                    <SelectItem value="bordered_cells">Bordered cells / shapes</SelectItem>
+                    {(Object.entries(RECOLOR_MODE_INFO) as [Settings["recolor_mode"], (typeof RECOLOR_MODE_INFO)[Settings["recolor_mode"]]][]).map(([value, info]) => (
+                      <SelectItem key={value} value={value}>{info.label} — {info.speed}</SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
-                <p className="text-xs text-muted-foreground">Bordered cells preserves dark outlines and separates smaller fills by color and brightness.</p>
+                <p className="text-xs text-muted-foreground">{RECOLOR_MODE_INFO[settings.recolor_mode].description}</p>
               </div>
               <div className="space-y-2">
                 <label htmlFor="recolor-seed" className="text-sm font-medium">Seed</label>
@@ -2414,6 +2519,16 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
                 onChange={(v) => setSettings((s) => ({ ...s, recolor_threshold: v }))}
                 roundToInteger={false}
               />
+              {["seeded_voronoi", "connected_components", "slic_superpixels"].includes(settings.recolor_mode) && (
+                <NumberSliderInput
+                  label={settings.recolor_mode === "connected_components" ? "Minimum component size" : settings.recolor_mode === "slic_superpixels" ? "Superpixel size" : "Cell size (source pixels)"}
+                  value={settings.recolor_cell_size}
+                  min={4}
+                  max={512}
+                  step={1}
+                  onChange={(v) => setSettings((s) => ({ ...s, recolor_cell_size: v }))}
+                />
+              )}
               <p className="text-xs text-muted-foreground">Higher values preserve low-saturation colors. Hue bands blend smoothly to avoid popping in gradients and motion.</p>
             </TabsContent>
 
@@ -2509,9 +2624,40 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
               <NumberSliderInput label="Zoom Rate" value={settings.zoom_cps} min={0} max={10} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, zoom_cps: v }))} unit="cycles/s" roundToInteger={false} />
 
               <div className="grid grid-cols-2 gap-2 pt-2">
-                <Button onClick={handleVideo} className="bg-primary">Export MP4</Button>
+                <Button
+                  onClick={handleVideo}
+                  className="bg-primary"
+                  aria-expanded={isVideoExporting ? showVideoExportProgress : undefined}
+                >
+                  {isVideoExporting ? "Exporting…" : "Export MP4"}
+                </Button>
                 <Button variant="outline" size="sm" onClick={resetVideoSettings}>Reset</Button>
               </div>
+              {isVideoExporting && showVideoExportProgress && (
+                <div className="space-y-1.5" role="status" aria-live="polite">
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>{videoExportProgress.percent >= 100 ? "Finalizing video…" : "Rendering video…"}</span>
+                    <span>{videoExportProgress.percent}%</span>
+                  </div>
+                  <div
+                    className="h-2 w-full overflow-hidden rounded-full bg-muted"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={videoExportProgress.percent}
+                  >
+                    <div
+                      className="h-full bg-primary transition-[width] duration-200"
+                      style={{ width: `${videoExportProgress.percent}%` }}
+                    />
+                  </div>
+                  {videoExportProgress.totalFrames > 0 && (
+                    <p className="text-[11px] text-muted-foreground">
+                      Frame {Math.min(videoExportProgress.currentFrame, videoExportProgress.totalFrames).toLocaleString()} of {videoExportProgress.totalFrames.toLocaleString()}
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-1">
                 <Button variant="ghost" size="sm" onClick={loadVideoPreset}>Load Preset</Button>
                 <Button variant="ghost" size="sm" onClick={saveVideoPreset}>Save Preset</Button>

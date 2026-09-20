@@ -68,6 +68,7 @@ export interface NativeLivePreviewParams {
   recolorSeed: string;
   recolorMode: number;
   recolorThreshold: number;
+  recolorCellSize: number;
   imgWidth: number;
   imgHeight: number;
   // Animation — rates in cycles per second (replaces cycles + animationDuration)
@@ -137,6 +138,7 @@ interface FrameParams {
   recolorSeed: string;
   recolorMode: number;
   recolorThreshold: number;
+  recolorCellSize: number;
   imgWidth: number;
   imgHeight: number;
   jpegQuality: number;
@@ -601,6 +603,7 @@ export class NativeLivePreviewEngine {
       recolorSeed: base.recolorSeed,
       recolorMode: base.recolorMode,
       recolorThreshold: base.recolorThreshold,
+      recolorCellSize: base.recolorCellSize,
       imgWidth: base.imgWidth,
       imgHeight: base.imgHeight,
       jpegQuality: 85,

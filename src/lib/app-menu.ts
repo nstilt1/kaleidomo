@@ -2,6 +2,8 @@ import { Menu, MenuItem, Submenu, PredefinedMenuItem } from "@tauri-apps/api/men
 import { Window } from "@tauri-apps/api/window";
 
 export type AppMenuHandles = {
+  undo: MenuItem;
+  redo: MenuItem;
   loadImagePreset: MenuItem;
   saveImagePreset: MenuItem;
   loadVideoPreset: MenuItem;
@@ -16,6 +18,20 @@ function dispatchCreatePageEvent(eventName: string) {
 }
 
 export async function setupAppMenu(): Promise<AppMenuHandles> {
+  const undo = await MenuItem.new({
+    id: "undo",
+    text: "Undo",
+    accelerator: "CmdOrCtrl+Z",
+    action: () => dispatchCreatePageEvent("menu-undo"),
+  });
+
+  const redo = await MenuItem.new({
+    id: "redo",
+    text: "Redo",
+    accelerator: "CmdOrCtrl+Shift+Z",
+    action: () => dispatchCreatePageEvent("menu-redo"),
+  });
+
   const loadImagePreset = await MenuItem.new({
     id: "load-image-preset",
     text: "Load Image Preset...",
@@ -78,8 +94,8 @@ export async function setupAppMenu(): Promise<AppMenuHandles> {
   const editSubmenu = await Submenu.new({
     text: "Edit",
     items: [
-      await PredefinedMenuItem.new({ item: "Undo" }),
-      await PredefinedMenuItem.new({ item: "Redo" }),
+      undo,
+      redo,
       await PredefinedMenuItem.new({ item: "Separator" }),
       await PredefinedMenuItem.new({ item: "Cut" }),
       await PredefinedMenuItem.new({ item: "Copy" }),
@@ -100,6 +116,8 @@ export async function setupAppMenu(): Promise<AppMenuHandles> {
   await menu.setAsWindowMenu(controlsWindow);
 
   return {
+    undo,
+    redo,
     loadImagePreset,
     saveImagePreset,
     loadVideoPreset,
