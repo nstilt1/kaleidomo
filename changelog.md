@@ -2,12 +2,13 @@
 
 All notable changes to Kaleidomo are documented here.
 
-## 1.3 — 2026-09-XX
+## 1.3 — 2026-09-20
 
-- Added multiple enhancement algorithms such as anti-aliasing and supersampling.
-- Added several seeded "recolor" algorithms for quickly recoloring the outputs.
+- Added multiple enhancement algorithms for anti-aliasing and supersampling.
+- Added several seeded "recolor" algorithms for quickly recoloring the output.
 - Added progress checking for exporting video.
 - Added Undo/Redo feature.
+- Fixed live preview resolution and FPS rendering on macOS.
 
 ## 1.2 — 2026-07-28
 

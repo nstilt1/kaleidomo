@@ -45,6 +45,34 @@ use licensing::*;
 mod live_preview;
 pub use live_preview::render_live_preview_frame;
 
+#[cfg(target_os = "macos")]
+mod native_preview_surface;
+#[cfg(not(target_os = "macos"))]
+mod native_preview_surface {
+    #[derive(Default)]
+    pub struct NativePreviewSurfaceState;
+
+    #[tauri::command]
+    pub async fn mount_native_preview_surface() -> Result<(), String> {
+        Err("native Metal preview is only available on macOS".into())
+    }
+
+    #[tauri::command]
+    pub async fn unmount_native_preview_surface() -> Result<(), String> {
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn update_native_preview_surface() -> Result<(), String> {
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub fn present_native_preview_frame() -> Result<(), String> {
+        Err("native Metal preview is only available on macOS".into())
+    }
+}
+
 mod ffmpeg_sink;
 
 mod preview_server;
@@ -1296,6 +1324,8 @@ pub fn run() {
             // LoopbackState is managed independently so that tauri::State<'_, LoopbackState>
             // resolves in start_loopback_capture / stop_loopback_capture / get_loopback_peak.
             app.manage(LoopbackState::new());
+            #[cfg(target_os = "macos")]
+            app.manage(native_preview_surface::NativePreviewSurfaceState::default());
 
             // Paths chosen through the Tauri dialog plugin are automatically
             // added to the fs plugin scope. A preset supplied on the command
@@ -1426,6 +1456,10 @@ pub fn run() {
             select_image,
             gpu_available,
             render_live_preview_frame,
+            native_preview_surface::mount_native_preview_surface,
+            native_preview_surface::unmount_native_preview_surface,
+            native_preview_surface::update_native_preview_surface,
+            native_preview_surface::present_native_preview_frame,
             get_preview_ws_port,
             license_data,
             is_unlocked,

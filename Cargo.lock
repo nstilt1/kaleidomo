@@ -2672,10 +2672,12 @@ dependencies = [
  "kamadak-exif",
  "log",
  "objc2",
+ "objc2-app-kit",
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-core-media",
  "objc2-foundation",
+ "objc2-quartz-core",
  "objc2-screen-capture-kit",
  "serde",
  "serde_json",
@@ -2688,6 +2690,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-shell",
  "tokio",
+ "wgpu",
 ]
 
 [[package]]
@@ -2703,6 +2706,7 @@ dependencies = [
  "pollster",
  "rand_chacha 0.9.0",
  "rand_core 0.9.5",
+ "raw-window-handle",
  "rayon",
  "serde",
  "sha2",
@@ -3431,8 +3435,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96c1358452b371bf9f104e21ec536d37a650eb10f7ee379fff67d2e08d537f1f"
 dependencies = [
  "bitflags 2.11.0",
+ "block2",
+ "libc",
  "objc2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-video",
  "objc2-foundation",
  "objc2-metal",
 ]

@@ -90,7 +90,7 @@ fn default_recolor_threshold() -> f32 { 0.08 }
 fn default_recolor_cell_size() -> f32 { 64.0 }
 
 impl LivePreviewParams {
-    fn to_kaleido_settings(&self) -> Result<KaleidoSettings, String> {
+    pub(crate) fn to_kaleido_settings(&self) -> Result<KaleidoSettings, String> {
         let kaleido_type = match self.kaleido_type.to_lowercase().as_str() {
             "radial"            => KaleidoType::Radial,
             "square"            => KaleidoType::Square,
