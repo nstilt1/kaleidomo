@@ -1,9 +1,17 @@
 FFmpeg ref: n7.1.1
+OpenH264 ref: v2.5.0
 Target triple: x86_64-pc-windows-msvc
 Cross-compiler: x86_64-w64-mingw32
 Configure flags: --disable-gpl --disable-nonfree --disable-doc --disable-debug
                  --disable-ffplay --disable-ffprobe --enable-ffmpeg
-                 --enable-static --disable-shared
+                 --enable-static --disable-shared --disable-autodetect
+                 --enable-libopenh264 --enable-encoder=libopenh264
                  --arch=x86_64 --target-os=mingw32 --cross-prefix=x86_64-w64-mingw32-
                  --enable-w32threads --disable-pthreads
                  --extra-ldflags="-static -static-libgcc -static-libstdc++"
+
+NOTE: this .exe cannot run on the macOS build host, so the
+"-encoders | grep openh264" sanity check done for the macOS builds isn't
+run here. Verify libopenh264 is present by running the built
+ffmpeg-x86_64-pc-windows-msvc.exe -encoders on a Windows machine (or under Wine) before
+shipping it.

@@ -1,3 +1,4 @@
+// kaleidomo-core src-tauri/src/live_preview.rs
 /// Native live-preview command for macOS (wgpu / Metal).
 ///
 /// ## Why spawn_blocking?
@@ -39,12 +40,57 @@ pub struct LivePreviewParams {
     pub rotation: f32,
     pub kaleido_type: String,
     pub hue_rotation: u32,
+    #[serde(default)]
+    pub recolor_enabled: bool,
+    #[serde(default)]
+    pub recolor_seed: String,
+    #[serde(default)]
+    pub recolor_mode: u8,
+    #[serde(default = "default_recolor_threshold")]
+    pub recolor_threshold: f32,
+    #[serde(default = "default_recolor_cell_size")]
+    pub recolor_cell_size: f32,
     pub img_width: u32,
     pub img_height: u32,
+    // ── Enhancements (see `KaleidoSettings` in kaleidomo-core/src/lib.rs) ──
+    /// Bilinear texture filtering instead of nearest-neighbor. Default: `false`.
+    #[serde(default)]
+    pub anti_alias: u8,
+    /// Internal supersampling factor, `1`-`4` (`1` disables it). Default: `1`.
+    #[serde(default = "default_super_sample")]
+    pub super_sample: u8,
+    /// Corrects stretching of the pattern on non-square canvases. Default: `false`.
+    #[serde(default)]
+    pub aspect_correct: bool,
+    #[serde(default = "default_reconstruction")]
+    pub reconstruction_filter: String,
+    #[serde(default = "default_true")]
+    pub derivative_mipmapping: bool,
+    #[serde(default = "default_anisotropy")]
+    pub anisotropy_level: u8,
+    #[serde(default = "default_edge_filter")]
+    pub edge_post_process: String,
+    #[serde(default)]
+    pub taa_enabled: bool,
+    #[serde(default = "default_taa_feedback")]
+    pub taa_feedback_alpha: f32,
 }
 
+/// Default for `LivePreviewParams::super_sample` so requests sent before this
+/// field existed still deserialize with supersampling disabled (`1`).
+fn default_super_sample() -> u8 {
+    1
+}
+fn default_reconstruction() -> String { "bilinear".into() }
+fn default_true() -> bool { true }
+fn default_anisotropy() -> u8 { 1 }
+fn default_edge_filter() -> String { "disabled".into() }
+fn default_taa_feedback() -> f32 { 0.9 }
+fn default_recolor_threshold() -> f32 { 0.08 }
+fn default_recolor_cell_size() -> f32 { 64.0 }
+
 impl LivePreviewParams {
-    fn to_kaleido_settings(&self) -> Result<KaleidoSettings, String> {
+    pub(crate) fn to_kaleido_settings(&self) -> Result<KaleidoSettings, String> {
         let kaleido_type = match self.kaleido_type.to_lowercase().as_str() {
             "radial"            => KaleidoType::Radial,
             "square"            => KaleidoType::Square,
@@ -67,6 +113,16 @@ impl LivePreviewParams {
             triangle_rotation_rad: self.rotation,
             kaleido_type,
             hue_rotation: self.hue_rotation,
+            recolor_enabled: self.recolor_enabled,
+            recolor_seed: self.recolor_seed.clone(),
+            recolor_mode: self.recolor_mode,
+            recolor_threshold: self.recolor_threshold,
+            recolor_cell_size: self.recolor_cell_size,
+            anti_alias: self.anti_alias,
+            derivative_mipmapping: self.derivative_mipmapping,
+            anisotropy_level: self.anisotropy_level,
+            super_sample: self.super_sample.clamp(1, 4),
+            aspect_correct: self.aspect_correct,
         })
     }
 }
@@ -97,8 +153,19 @@ pub async fn render_live_preview_frame(
     let w = settings.output_size_w;
     let h = settings.output_size_h;
 
+    // `super_sample`: render at `w/h * factor` internally, then box-downsample
+    // back down to `w x h` before it goes into the response body (whose header
+    // always reports the requested `w`/`h`, not the oversized render size).
+    let factor = kaleidomo_core::safe_super_sample(settings.super_sample, settings.output_size_w, settings.output_size_h);
+    let (render_w, render_h) = (w * factor as u32, h * factor as u32);
+
     let pixel_count = (w as usize)
         .checked_mul(h as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or("output dimensions overflow")?;
+
+    let render_pixel_count = (render_w as usize)
+        .checked_mul(render_h as usize)
         .and_then(|n| n.checked_mul(4))
         .ok_or("output dimensions overflow")?;
 
@@ -109,6 +176,15 @@ pub async fn render_live_preview_frame(
     // SAFETY: GpuBackend contains wgpu types which are Send on native targets.
     let gpu_arc: Arc<Mutex<Option<kaleidomo_core::backends::gpu::GpuBackend>>> =
         Arc::clone(&state.gpu_arc);
+    let enhancement_state = Arc::clone(&state.live_enhancement);
+    let enhancement_config = kaleidomo_core::enhancement::EnhancementConfig::from_wire(
+        &params.reconstruction_filter,
+        params.derivative_mipmapping,
+        params.anisotropy_level,
+        &params.edge_post_process,
+        params.taa_enabled,
+        params.taa_feedback_alpha,
+    );
 
     let body = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
         log_info!(
@@ -130,11 +206,44 @@ pub async fn render_live_preview_frame(
             .as_mut()
             .ok_or_else(|| "GPU backend unavailable".to_string())?;
 
-        gpu.render_into_buffer(&settings, &mut body[8..])
-            .map_err(|e| {
-                log_error!("[live_preview] GPU render failed: {e}");
-                format!("GPU render failed: {e}")
-            })?;
+        if factor > 1 {
+            let render_settings = kaleidomo_core::KaleidoSettings {
+                output_size_w: render_w,
+                output_size_h: render_h,
+                offset_x: settings.offset_x * factor as i32,
+                offset_y: settings.offset_y * factor as i32,
+                // `source_scale = width_over_2 / zoom` ties visible source
+                // content to the actual render width, which just grew by
+                // `factor` (render_w/h vs w/h) — without this, supersampling
+                // silently zoomed the preview out relative to `w x h`.
+                zoom: settings.zoom * factor as f32,
+                ..settings.clone()
+            };
+            let mut big = vec![0u8; render_pixel_count];
+            gpu.render_into_buffer(&render_settings, &mut big)
+                .map_err(|e| {
+                    log_error!("[live_preview] GPU render failed: {e}");
+                    format!("GPU render failed: {e}")
+                })?;
+            let downsampled = kaleidomo_core::downsample_box(&big, render_w, render_h, factor, w, h);
+            body[8..].copy_from_slice(&downsampled);
+        } else {
+            gpu.render_into_buffer(&settings, &mut body[8..])
+                .map_err(|e| {
+                    log_error!("[live_preview] GPU render failed: {e}");
+                    format!("GPU render failed: {e}")
+                })?;
+        }
+
+        let resolved = image::RgbaImage::from_raw(w, h, body[8..].to_vec())
+            .ok_or_else(|| "invalid live-preview RGBA dimensions".to_string())?;
+        let mut enhancement = enhancement_state.lock()
+            .map_err(|_| "enhancement mutex poisoned".to_string())?;
+        if enhancement.as_ref().map(|(config, _)| *config) != Some(enhancement_config) {
+            *enhancement = Some((enhancement_config, kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement_config)));
+        }
+        let enhanced = enhancement.as_mut().expect("enhancement initialized").1.finish_frame(&resolved);
+        body[8..].copy_from_slice(enhanced.as_raw());
 
         Ok(body)
     })

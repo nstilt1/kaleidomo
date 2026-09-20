@@ -4,6 +4,7 @@ import type { Settings } from "@/lib/kaleidomo-session-context";
 
 interface PickerProps {
   imagePath: string;
+  imageSrc?: string;
   count: number;
   settings: Settings;
   sourceRadiusPx: number;
@@ -64,6 +65,7 @@ function computeDesiredLeftRotation(
 
 export const WedgePicker: React.FC<PickerProps> = ({
   imagePath,
+  imageSrc,
   count,
   settings,
   sourceRadiusPx,
@@ -229,7 +231,7 @@ export const WedgePicker: React.FC<PickerProps> = ({
 
     const img = new Image();
     img.crossOrigin = "anonymous";
-    const src = convertFileSrc(imagePath);
+    const src = imageSrc || convertFileSrc(imagePath);
 
     img.onload = () => {
       imageRef.current = img;
@@ -243,7 +245,7 @@ export const WedgePicker: React.FC<PickerProps> = ({
 
     img.src = src;
     return () => { imageRef.current = null; };
-  }, [imagePath, draw]);
+  }, [imagePath, imageSrc, draw]);
 
   // Resize observer
   useEffect(() => {

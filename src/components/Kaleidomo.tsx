@@ -1,3 +1,4 @@
+// src/components/Kaleidomo.tsx
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { invoke } from "@tauri-apps/api/core";
@@ -31,6 +32,9 @@ import { useFullscreenContext } from "@/lib/fullscreen-context";
 import { useControlsSync } from "@/lib/use-controls-sync";
 import { useLoopbackAudio } from "@/lib/use-loopback-audio";
 import { LoopbackAudioPanel } from "@/components/kaleidomo/LoopbackAudioPanel";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Slider } from "@/components/ui/slider";
+import { Input } from "@/components/ui/input";
 
 const LOOPBACK_PEAK_EVENT = "kd://loopback-peak";
 const AUDIO_SOURCE_MODE_EVENT = "kd://audio-source-mode";
@@ -52,6 +56,12 @@ type LoadedImage = {
   imageSrc: string;
   width: number;
   height: number;
+};
+
+type VideoExportProgress = {
+  currentFrame: number;
+  totalFrames: number;
+  percent: number;
 };
 
 const tryLoadImageFromPath = async (path: string): Promise<LoadedImage> => {
@@ -170,6 +180,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function recolorModeIndex(mode: Settings["recolor_mode"]): number {
+  if (mode === "bordered_cells") return 1;
+  if (mode === "seeded_voronoi") return 2;
+  if (mode === "connected_components") return 3;
+  if (mode === "slic_superpixels") return 4;
+  return 0;
+}
+
+const RECOLOR_MODE_INFO: Record<Settings["recolor_mode"], { label: string; speed: string; description: string }> = {
+  color_bands: { label: "Broad color bands", speed: "Instant", description: "Smoothly shifts broad hue ranges." },
+  bordered_cells: { label: "Bordered cells / shapes", speed: "Instant", description: "Preserves dark outlines and separates fills by color and brightness." },
+  seeded_voronoi: { label: "Seeded Voronoi cells", speed: "Instant", description: "Creates resizable deterministic spatial cells directly on the GPU." },
+  connected_components: { label: "Connected components", speed: "Moderate", description: "Analyzes contiguous source regions and caches the result." },
+  slic_superpixels: { label: "SLIC superpixels", speed: "Slow", description: "Iteratively clusters the source in perceptual color and position space, then caches it." },
+};
+
 const IMAGE_SETTING_KEYS = [
   "x",
   "y",
@@ -178,6 +204,11 @@ const IMAGE_SETTING_KEYS = [
   "zoom",
   "tile_count",
   "hue_rotate",
+  "recolor_enabled",
+  "recolor_seed",
+  "recolor_mode",
+  "recolor_threshold",
+  "recolor_cell_size",
   "ratio_num",
   "ratio_den",
   "offset_x",
@@ -186,6 +217,14 @@ const IMAGE_SETTING_KEYS = [
   "dimension_mode",
   "output_width",
   "output_height",
+  "anti_alias",
+  "super_sample",
+  "reconstruction_filter",
+  "derivative_mipmapping",
+  "anisotropy_level",
+  "edge_post_process",
+  "taa_enabled",
+  "taa_feedback_alpha",
 ] as const satisfies readonly (keyof Settings)[];
 
 const VIDEO_SETTING_KEYS = [
@@ -199,52 +238,90 @@ const VIDEO_SETTING_KEYS = [
   "zoom_cps",
   "rotation_range",
   "rotation_start_offset",
+  "rotationPhaseUnit",
+  "orientationBaseSpeed",
+  "orientationSpeedUnit",
   "rotation_fn",
   "rotation_cps",
+  "rotationRateUnit",
   "hue_range",
   "hue_start_offset",
   "hue_fn",
   "hue_cps",
+  "colorRateUnit",
   "exportDurationMode",
   "export_duration_s",
 ] as const satisfies readonly (keyof Settings)[];
+
+function orientationSpeedPx(settings: Settings): number {
+  const speed = settings.orientationBaseSpeed;
+  const circumference = 2 * Math.PI * Math.max(1, Math.abs(settings.heroCircleRightX - settings.heroCircleLeftX) / 2);
+  return settings.orientationSpeedUnit === "cycles/s" ? speed * circumference
+    : settings.orientationSpeedUnit === "s/cycle" ? (speed > 0 ? circumference / speed : 0)
+    : speed;
+}
+
+function rotationPhaseCycles(settings: Settings): number {
+  return ((settings.rotation_start_offset % 360 + 360) % 360) / 360;
+}
+
+function rateToCycles(value: number, unit: "cycles/s" | "degrees/s" | "s/cycle"): number {
+  return unit === "degrees/s" ? value / 360 : unit === "s/cycle" ? (value > 0 ? 1 / value : 0) : value;
+}
+
+function cyclesToRate(cycles: number, unit: "cycles/s" | "degrees/s" | "s/cycle"): number {
+  return unit === "degrees/s" ? cycles * 360 : unit === "s/cycle" ? (cycles > 0 ? 1 / cycles : 0) : cycles;
+}
 
 function clampMin(value: number, min: number) {
   return Math.max(min, value);
 }
 
+function reconstructionMode(settings: Settings): 0 | 1 | 2 {
+  return settings.reconstruction_filter === "nearest" ? 0 : settings.reconstruction_filter === "bicubic" ? 2 : 1;
+}
+
 const SCALED_WEDGE_DIAGONAL_MULTIPLIER = 1.5;
-const HEXAGONAL_SQRT_3 = 1.7320508075688772;
 const SCALED_MODE_REFERENCE_ZOOM = 0.01;
 
 function getEffectiveZoomAndSourceRadius(
   userZoom: number,
-  resolution: number,
+  referenceResolution: number,
+  renderWidth: number,
   imgWidth: number,
   imgHeight: number,
-  tileCount: number,
+  // Intentionally unused — zoom is source-framing-relative, not tile-count-relative.
+  _tileCount: number,
   mode: "legacy" | "scaled"
 ) {
   const safeUserZoom = clampMin(userZoom, 0.0001);
+  const safeReferenceResolution = clampMin(referenceResolution, 1);
+  const safeRenderWidth = clampMin(renderWidth, 1);
+
+  let sourceRadiusPx: number;
 
   if (mode === "legacy") {
-    const sourceRadiusPx = resolution / (2 * safeUserZoom);
-
-    return {
-      effectiveZoom: safeUserZoom,
-      sourceRadiusPx,
-    };
+    // Preserve the historical meaning of the Zoom control at the project's
+    // reference resolution, then convert that source radius to the actual
+    // renderer width. This makes a 720px live preview and a 4K export show
+    // the same source area inside every tile.
+    sourceRadiusPx = safeReferenceResolution / (2 * safeUserZoom);
+  } else {
+    const imageDiagonal = Math.hypot(imgWidth, imgHeight);
+    const scaledRadiusAtReferenceZoom =
+      imageDiagonal * SCALED_WEDGE_DIAGONAL_MULTIPLIER;
+    sourceRadiusPx =
+      scaledRadiusAtReferenceZoom / (safeUserZoom / SCALED_MODE_REFERENCE_ZOOM);
   }
 
-  const imageDiagonal = Math.hypot(imgWidth, imgHeight);
-  const scaledRadiusAtReferenceZoom =
-    imageDiagonal * SCALED_WEDGE_DIAGONAL_MULTIPLIER;
-  const sourceRadiusPx =
-    scaledRadiusAtReferenceZoom / (safeUserZoom / SCALED_MODE_REFERENCE_ZOOM);
-
-  const safeTileCount = clampMin(tileCount, 0.0001);
-  const hexRadiusPx = resolution / (safeTileCount * HEXAGONAL_SQRT_3);
-  const effectiveZoom = clampMin(hexRadiusPx / sourceRadiusPx, 0.000001);
+  // All renderers use `source_scale = width_over_2 / zoom`. Therefore zoom
+  // must be derived from the *actual render width*, not settings.resolution.
+  // Keeping sourceRadiusPx constant is what guarantees identical per-tile
+  // framing between preview, still export, and video export.
+  const effectiveZoom = clampMin(
+    (safeRenderWidth / 2) / sourceRadiusPx,
+    0.000001
+  );
 
   return {
     effectiveZoom,
@@ -282,6 +359,14 @@ function migrateVideoSettings(incoming: unknown): Partial<Settings> {
   }
 
   const migrated = { ...incoming } as Partial<Settings> & Record<string, unknown>;
+
+  migrated.orientationSpeedUnit = incoming.orientationSpeedUnit === "s/cycle" || incoming.orientationSpeedUnit === "cycles/s" ? incoming.orientationSpeedUnit : "px/s";
+  migrated.rotationRateUnit = incoming.rotationRateUnit === "degrees/s" || incoming.rotationRateUnit === "s/cycle" ? incoming.rotationRateUnit : "cycles/s";
+  migrated.colorRateUnit = incoming.colorRateUnit === "degrees/s" || incoming.colorRateUnit === "s/cycle" ? incoming.colorRateUnit : "cycles/s";
+  if (incoming.rotationPhaseUnit !== "degrees" && typeof incoming.rotation_start_offset === "number") {
+    migrated.rotation_start_offset = ((incoming.rotation_start_offset % 1 + 1) % 1) * 360;
+  }
+  migrated.rotationPhaseUnit = "degrees";
 
   const oldFrameCount =
     typeof incoming.frame_count === "number" && Number.isFinite(incoming.frame_count)
@@ -466,10 +551,59 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   const [audioFileName, setAudioFileName] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
   const [livePreviewError, setLivePreviewError] = useState<string | null>(null);
+  const [recoloredSourceSrc, setRecoloredSourceSrc] = useState("");
+  const [isRecolorPreprocessing, setIsRecolorPreprocessing] = useState(false);
   // macOS native preview resolution cap. Higher = sharper but more IPC memory pressure.
   // 720 is the safe default (70 MB/s at 20fps with reusable ImageData).
   const [nativePreviewRes, setNativePreviewRes] = useState<512 | 720 | 1080>(720);
   const [audioPlaying, setAudioPlaying] = useState(false);
+  const [isVideoExporting, setIsVideoExporting] = useState(false);
+  const [videoExportProgress, setVideoExportProgress] = useState<VideoExportProgress>({
+    currentFrame: 0,
+    totalFrames: 0,
+    percent: 0,
+  });
+  const [showVideoExportProgress, setShowVideoExportProgress] = useState(false);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<VideoExportProgress>("kd://video-export-progress", (event) => {
+      setVideoExportProgress(event.payload);
+    }).then((fn) => {
+      unlisten = fn;
+    }).catch(console.error);
+
+    return () => unlisten?.();
+  }, []);
+
+  useEffect(() => {
+    const stopForShutdown = () => {
+      if (engineRef.current) {
+        try { engineRef.current.stop_animation(); } catch (_) { /* shutting down */ }
+        try { engineRef.current.free?.(); } catch (_) { /* shutting down */ }
+        engineRef.current = null;
+      }
+      if (nativeEngineRef.current) {
+        nativeEngineRef.current.stop();
+        nativeEngineRef.current = null;
+      }
+      if (audioElementRef.current) {
+        audioElementRef.current.pause();
+        audioElementRef.current.src = "";
+      }
+    };
+
+    let unlisten: (() => void) | undefined;
+    void listen("kd://app-will-exit", stopForShutdown).then((fn) => { unlisten = fn; });
+    window.addEventListener("pagehide", stopForShutdown);
+    window.addEventListener("beforeunload", stopForShutdown);
+    return () => {
+      unlisten?.();
+      window.removeEventListener("pagehide", stopForShutdown);
+      window.removeEventListener("beforeunload", stopForShutdown);
+      stopForShutdown();
+    };
+  }, []);
   // CLI/kiosk launches load project state asynchronously, then enter fullscreen.
   // Track that startup path so the live preview can be started exactly once after
   // React has committed both the loaded image state and the fullscreen canvas.
@@ -515,17 +649,18 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       // so we can pass the _cps values directly as the cycle fields without recompiling WASM.
       vs.animation_duration = 1.0;
       vs.rotation_range = settings.rotation_range;
-      vs.rotation_cycles = settings.rotation_cps;
-      vs.rotation_start_offset = settings.rotation_start_offset;
+      vs.rotation_cycles = rateToCycles(settings.rotation_cps, settings.rotationRateUnit);
+      vs.rotation_start_offset = rotationPhaseCycles(settings);
       vs.set_rotation_fn(settings.rotation_fn);
       vs.hue_range = settings.hue_range;
-      vs.hue_cycles = settings.hue_cps;
+      vs.hue_cycles = rateToCycles(settings.hue_cps, settings.colorRateUnit);
       vs.hue_start_offset = settings.hue_start_offset;
       vs.set_hue_fn(settings.hue_fn);
       vs.fps = settings.fps;
       vs.zoom_max = getEffectiveZoomAndSourceRadius(
         settings.zoom_max,
         settings.resolution,
+        liveCanvasRef.current?.width ?? settings.resolution,
         imgWidth,
         imgHeight,
         settings.tile_count,
@@ -534,6 +669,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       vs.zoom_min = getEffectiveZoomAndSourceRadius(
         settings.zoom_min,
         settings.resolution,
+        liveCanvasRef.current?.width ?? settings.resolution,
         imgWidth,
         imgHeight,
         settings.tile_count,
@@ -553,12 +689,13 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       vs.hero_circle_right_x = settings.heroCircleRightX;
       vs.hero_circle_y = settings.heroCircleY;
       vs.hero_desired_left_rotation = settings.rotation;
-      vs.orientation_base_speed = settings.orientationBaseSpeed;
+      vs.orientation_base_speed = orientationSpeedPx(settings);
       vs.orientation_peak_multiplier = settings.orientationPeakMultiplier;
 
       const { effectiveZoom } = getEffectiveZoomAndSourceRadius(
         settings.zoom,
         settings.resolution,
+        liveCanvasRef.current?.width ?? settings.resolution,
         imgWidth,
         imgHeight,
         settings.tile_count,
@@ -578,7 +715,15 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         settings.rotation,
         kaleidoTypeIdx,
         settings.hue_rotate,
+        settings.recolor_enabled,
+        settings.recolor_seed,
+        recolorModeIndex(settings.recolor_mode),
+        settings.recolor_threshold,
+        settings.recolor_cell_size,
         vs,
+        reconstructionMode(settings),
+        settings.super_sample,
+        settings.aspect_correct,
       );
     } catch (e) {
       console.error("syncVideoSettingsToEngine failed", e);
@@ -636,25 +781,46 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       rotation: settings.rotation,
       kaleidoType,
       hueRotation: settings.hue_rotate,
+      recolorEnabled: settings.recolor_enabled,
+      recolorSeed: settings.recolor_seed,
+      recolorMode: recolorModeIndex(settings.recolor_mode),
+      recolorThreshold: settings.recolor_threshold,
+      recolorCellSize: settings.recolor_cell_size,
       imgWidth,
       imgHeight,
       // Animation / video settings — pass rates directly, no animationDuration needed
       fps: settings.fps,
       rotationRange: settings.rotation_range,
-      rotationCps: settings.rotation_cps,
-      rotationStartOffset: settings.rotation_start_offset,
+      rotationCps: rateToCycles(settings.rotation_cps, settings.rotationRateUnit),
+      rotationStartOffset: rotationPhaseCycles(settings),
       rotationFn: settings.rotation_fn,
       hueRange: settings.hue_range,
-      hueCps: settings.hue_cps,
+      hueCps: rateToCycles(settings.hue_cps, settings.colorRateUnit),
       hueStartOffset: settings.hue_start_offset,
       hueFn: settings.hue_fn,
-      zoomMax: effectiveMaxZoomState.effectiveZoom,
-      zoomMin: effectiveMinZoomState.effectiveZoom,
+      zoomMax: getEffectiveZoomAndSourceRadius(
+        settings.zoom_max,
+        settings.resolution,
+        dims.w,
+        imgWidth,
+        imgHeight,
+        settings.tile_count,
+        wedgePickerMode
+      ).effectiveZoom,
+      zoomMin: getEffectiveZoomAndSourceRadius(
+        settings.zoom_min,
+        settings.resolution,
+        dims.w,
+        imgWidth,
+        imgHeight,
+        settings.tile_count,
+        wedgePickerMode
+      ).effectiveZoom,
       zoomFn: settings.zoom_fn,
       zoomStartOffset: settings.zoom_start_offset,
       zoomCps: settings.zoom_cps,
       // Orientation / hero-circle
-      orientationBaseSpeed: settings.orientationBaseSpeed,
+      orientationBaseSpeed: orientationSpeedPx(settings),
       heroCircleLeftX: settings.heroCircleLeftX,
       heroCircleRightX: settings.heroCircleRightX,
       heroCircleY: settings.heroCircleY,
@@ -671,6 +837,15 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       audioOrientationAmount: settings.audioOrientationAmount,
       audioReorientationAmount: settings.audioReorientationAmount,
       orientationPeakMultiplier: settings.orientationPeakMultiplier,
+      antiAlias: reconstructionMode(settings),
+      superSample: settings.super_sample,
+      aspectCorrect: settings.aspect_correct,
+      reconstructionFilter: settings.reconstruction_filter,
+      derivativeMipmapping: settings.derivative_mipmapping,
+      anisotropyLevel: settings.anisotropy_level,
+      edgePostProcess: settings.edge_post_process,
+      taaEnabled: settings.taa_enabled,
+      taaFeedbackAlpha: settings.taa_feedback_alpha,
     };
   }, [settings, count, kaleidoType, imgWidth, imgHeight, wedgePickerMode, nativePreviewRes, isFullscreen]);
 
@@ -909,17 +1084,18 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       // WASM shim: animation_duration=1.0 so cycle fields equal cps values directly
       vs.animation_duration = 1.0;
       vs.rotation_range = settings.rotation_range;
-      vs.rotation_cycles = settings.rotation_cps;
-      vs.rotation_start_offset = settings.rotation_start_offset;
+      vs.rotation_cycles = rateToCycles(settings.rotation_cps, settings.rotationRateUnit);
+      vs.rotation_start_offset = rotationPhaseCycles(settings);
       vs.set_rotation_fn(settings.rotation_fn);
       vs.hue_range = settings.hue_range;
-      vs.hue_cycles = settings.hue_cps;
+      vs.hue_cycles = rateToCycles(settings.hue_cps, settings.colorRateUnit);
       vs.hue_start_offset = settings.hue_start_offset;
       vs.set_hue_fn(settings.hue_fn);
       vs.fps = settings.fps;
       vs.zoom_max = getEffectiveZoomAndSourceRadius(
         settings.zoom_max,
         settings.resolution,
+        canvas.width,
         imgWidth,
         imgHeight,
         settings.tile_count,
@@ -928,6 +1104,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       vs.zoom_min = getEffectiveZoomAndSourceRadius(
         settings.zoom_min,
         settings.resolution,
+        canvas.width,
         imgWidth,
         imgHeight,
         settings.tile_count,
@@ -945,12 +1122,13 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       vs.hero_circle_right_x = settings.heroCircleRightX;
       vs.hero_circle_y = settings.heroCircleY;
       vs.hero_desired_left_rotation = settings.rotation;
-      vs.orientation_base_speed = settings.orientationBaseSpeed;
+      vs.orientation_base_speed = orientationSpeedPx(settings);
       vs.orientation_peak_multiplier = settings.orientationPeakMultiplier;
 
       const { effectiveZoom } = getEffectiveZoomAndSourceRadius(
         settings.zoom,
         settings.resolution,
+        canvas.width,
         imgWidth,
         imgHeight,
         settings.tile_count,
@@ -970,7 +1148,15 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         settings.rotation,
         kaleidoTypeIdx,
         settings.hue_rotate,
+        settings.recolor_enabled,
+        settings.recolor_seed,
+        recolorModeIndex(settings.recolor_mode),
+        settings.recolor_threshold,
+        settings.recolor_cell_size,
         vs,
+        settings.anti_alias,
+        settings.super_sample,
+        settings.aspect_correct,
       );
 
       // Re-send audio peaks if loaded
@@ -1415,17 +1601,19 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
     []
   );
 
+  // Apple GPUs reject the supersampled input texture when the source image
+  // itself would exceed the 8192-pixel texture limit. Output resolution is
+  // tiled separately and must not disable supersampling here.
+  const maxSupersamplingFactor = Math.floor(8192 / Math.max(1, imgWidth, imgHeight));
+  useEffect(() => {
+    if (settings.super_sample > 1 && settings.super_sample > maxSupersamplingFactor) {
+      setSettings((s) => ({ ...s, super_sample: 1 }));
+    }
+  }, [settings.super_sample, maxSupersamplingFactor, setSettings]);
+
   const effectiveZoomState = getEffectiveZoomAndSourceRadius(
     settings.zoom,
     settings.resolution,
-    imgWidth,
-    imgHeight,
-    settings.tile_count,
-    wedgePickerMode
-  );
-
-  const effectiveMinZoomState = getEffectiveZoomAndSourceRadius(
-    settings.zoom_min,
     settings.resolution,
     imgWidth,
     imgHeight,
@@ -1433,14 +1621,36 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
     wedgePickerMode
   );
 
-  const effectiveMaxZoomState = getEffectiveZoomAndSourceRadius(
-    settings.zoom_max,
-    settings.resolution,
-    imgWidth,
-    imgHeight,
-    settings.tile_count,
-    wedgePickerMode
-  );
+  // Keep the source picker faithful to the pixels that enter the symmetry pass.
+  useEffect(() => {
+    if (!imagePath || !settings.recolor_enabled) {
+      setRecoloredSourceSrc("");
+      setIsRecolorPreprocessing(false);
+      return;
+    }
+    const requiresPreprocessing = settings.recolor_mode === "connected_components" || settings.recolor_mode === "slic_superpixels";
+    setIsRecolorPreprocessing(requiresPreprocessing);
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void invoke<string>("preprocess_source_preview", {
+        path: imagePath,
+        seedInput: settings.recolor_seed,
+        threshold: settings.recolor_threshold,
+        mode: recolorModeIndex(settings.recolor_mode),
+        cellSize: settings.recolor_cell_size,
+      }).then((src) => {
+        if (!cancelled) {
+          setRecoloredSourceSrc(src);
+          setIsRecolorPreprocessing(false);
+        }
+      }).catch((error) => {
+        if (!cancelled) setIsRecolorPreprocessing(false);
+        console.error("Source recolor preview failed", error);
+      });
+    }, 100);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [imagePath, settings.recolor_enabled, settings.recolor_seed, settings.recolor_threshold, settings.recolor_mode, settings.recolor_cell_size]);
+
 
   const renderPreview = useCallback(
     async (options?: {
@@ -1499,6 +1709,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
           zoom: getEffectiveZoomAndSourceRadius(
             activeSettings.zoom,
             activeSettings.resolution,
+            width,
             sourceWidth,
             sourceHeight,
             activeSettings.tile_count,
@@ -1507,8 +1718,22 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
           kaleidoType: activeKaleidoType,
           tileCount: activeSettings.tile_count,
           hueRotation: activeSettings.hue_rotate,
+          recolorEnabled: activeSettings.recolor_enabled,
+          recolorSeed: activeSettings.recolor_seed,
+          recolorMode: recolorModeIndex(activeSettings.recolor_mode),
+          recolorThreshold: activeSettings.recolor_threshold,
+          recolorCellSize: activeSettings.recolor_cell_size,
           imgWidth: sourceWidth,
           imgHeight: sourceHeight,
+          antiAlias: reconstructionMode(activeSettings),
+          superSample: activeSettings.super_sample,
+          aspectCorrect: activeSettings.aspect_correct,
+          reconstructionFilter: activeSettings.reconstruction_filter,
+          derivativeMipmapping: activeSettings.derivative_mipmapping,
+          anisotropyLevel: activeSettings.anisotropy_level,
+          edgePostProcess: activeSettings.edge_post_process,
+          taaEnabled: activeSettings.taa_enabled,
+          taaFeedbackAlpha: activeSettings.taa_feedback_alpha,
         });
 
         setOutputSrc(result);
@@ -1782,7 +2007,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         throw new Error("Preset file is not a valid object.");
       }
 
-      const mergedSettings = mergeSettingsWithBase(DEFAULT_SETTINGS, parsed.settings);
+      const mergedSettings = mergeSettingsWithBase(DEFAULT_SETTINGS, migrateVideoSettings(parsed.settings));
       setSettings(mergedSettings);
 
       if (typeof parsed.count === "number" && Number.isFinite(parsed.count)) {
@@ -1819,7 +2044,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       const nextKaleidoType =
         typeof parsed.kaleidoType === "string" ? parsed.kaleidoType : "radial";
 
-      const nextSettings = mergeSettingsWithBase(DEFAULT_SETTINGS, parsed.settings);
+      const nextSettings = mergeSettingsWithBase(DEFAULT_SETTINGS, migrateVideoSettings(parsed.settings));
 
       if (isRecord(parsed.uiSettings)) {
         if (
@@ -1922,6 +2147,15 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
     }
 
     const { width, height } = calculateDimensions(settings);
+    const exportZoom = getEffectiveZoomAndSourceRadius(
+      settings.zoom,
+      settings.resolution,
+      width,
+      imgWidth,
+      imgHeight,
+      settings.tile_count,
+      wedgePickerMode
+    ).effectiveZoom;
 
     try {
       const message = await invoke("export_kaleidoscope", {
@@ -1929,7 +2163,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         x: settings.x,
         y: settings.y,
         rotation: settings.rotation,
-        zoom: effectiveZoomState.effectiveZoom,
+        zoom: exportZoom,
         count,
         outputSizeH: height,
         outputSizeW: width,
@@ -1938,8 +2172,22 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         kaleidoType,
         tileCount: settings.tile_count,
         hueRotation: settings.hue_rotate,
+        recolorEnabled: settings.recolor_enabled,
+        recolorSeed: settings.recolor_seed,
+        recolorMode: recolorModeIndex(settings.recolor_mode),
+        recolorThreshold: settings.recolor_threshold,
+        recolorCellSize: settings.recolor_cell_size,
         imgWidth,
         imgHeight,
+        antiAlias: reconstructionMode(settings),
+        superSample: settings.super_sample,
+        aspectCorrect: settings.aspect_correct,
+        reconstructionFilter: settings.reconstruction_filter,
+        derivativeMipmapping: settings.derivative_mipmapping,
+        anisotropyLevel: settings.anisotropy_level,
+        edgePostProcess: settings.edge_post_process,
+        taaEnabled: settings.taa_enabled,
+        taaFeedbackAlpha: settings.taa_feedback_alpha,
       });
 
       alert(String(message));
@@ -1951,11 +2199,47 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   };
 
   const handleVideo = async () => {
+    if (isVideoExporting) {
+      setShowVideoExportProgress((visible) => !visible);
+      return;
+    }
+
     if (!imagePath || imgWidth <= 0 || imgHeight <= 0) {
       return;
     }
 
     const { width, height } = calculateDimensions(settings);
+    const exportZoom = getEffectiveZoomAndSourceRadius(
+      settings.zoom,
+      settings.resolution,
+      width,
+      imgWidth,
+      imgHeight,
+      settings.tile_count,
+      wedgePickerMode
+    ).effectiveZoom;
+    const exportZoomMin = getEffectiveZoomAndSourceRadius(
+      settings.zoom_min,
+      settings.resolution,
+      width,
+      imgWidth,
+      imgHeight,
+      settings.tile_count,
+      wedgePickerMode
+    ).effectiveZoom;
+    const exportZoomMax = getEffectiveZoomAndSourceRadius(
+      settings.zoom_max,
+      settings.resolution,
+      width,
+      imgWidth,
+      imgHeight,
+      settings.tile_count,
+      wedgePickerMode
+    ).effectiveZoom;
+
+    setIsVideoExporting(true);
+    setShowVideoExportProgress(false);
+    setVideoExportProgress({ currentFrame: 0, totalFrames: 0, percent: 0 });
 
     try {
       console.log("settings.still_frame_ending frames = " + settings.still_frame_ending);
@@ -1981,7 +2265,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         x: settings.x,
         y: settings.y,
         rotation: settings.rotation,
-        zoom: effectiveZoomState.effectiveZoom,
+        zoom: exportZoom,
         count,
         outputSizeH: height,
         outputSizeW: width,
@@ -1990,11 +2274,16 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         kaleidoType,
         tileCount: settings.tile_count,
         hueRotation: settings.hue_rotate,
+        recolorEnabled: settings.recolor_enabled,
+        recolorSeed: settings.recolor_seed,
+        recolorMode: recolorModeIndex(settings.recolor_mode),
+        recolorThreshold: settings.recolor_threshold,
+        recolorCellSize: settings.recolor_cell_size,
         stillFrameEnding: settings.still_frame_ending,
         fps: settings.fps,
         quality: settings.quality,
-        zoomMax: effectiveMaxZoomState.effectiveZoom,
-        zoomMin: effectiveMinZoomState.effectiveZoom,
+        zoomMax: exportZoomMax,
+        zoomMin: exportZoomMin,
         zoomFn: settings.zoom_fn,
         zoomStartOffset: settings.zoom_start_offset,
         // Convert cps back to cycles for the Rust command (cycles = cps * duration)
@@ -2004,31 +2293,42 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         animationDuration: exportDurationS,
         rotationRange: settings.rotation_range,
         // Convert cps back to cycles for the Rust command
-        rotationCycles: settings.rotation_cps * exportDurationS,
-        rotationStartOffset: settings.rotation_start_offset,
+        rotationCycles: rateToCycles(settings.rotation_cps, settings.rotationRateUnit) * exportDurationS,
+        rotationStartOffset: rotationPhaseCycles(settings),
         rotationFn: settings.rotation_fn,
         hueRange: settings.hue_range,
         // Convert cps back to cycles for the Rust command
-        hueCycles: settings.hue_cps * exportDurationS,
+        hueCycles: rateToCycles(settings.hue_cps, settings.colorRateUnit) * exportDurationS,
         hueStartOffset: settings.hue_start_offset,
         hueFn: settings.hue_fn,
         audioFilePath,
 
         audioReactiveEnabled: settings.audioReactiveEnabled,
         audioPeakSmoothing: settings.audioPeakSmoothing,
-        orientationBaseSpeed: settings.orientationBaseSpeed,
+        orientationBaseSpeed: orientationSpeedPx(settings),
         orientationPeakMultiplier: settings.orientationPeakMultiplier,
         audioPeaks: Array.from(normalizedAudioPeaksRef.current ?? new Float32Array(0)),
         heroCircleLeftX: settings.heroCircleLeftX,
         heroCircleRightX: settings.heroCircleRightX,
         heroCircleY: settings.heroCircleY,
+        antiAlias: reconstructionMode(settings),
+        superSample: settings.super_sample,
+        aspectCorrect: settings.aspect_correct,
+        reconstructionFilter: settings.reconstruction_filter,
+        derivativeMipmapping: settings.derivative_mipmapping,
+        anisotropyLevel: settings.anisotropy_level,
+        edgePostProcess: settings.edge_post_process,
+        taaEnabled: settings.taa_enabled,
+        taaFeedbackAlpha: settings.taa_feedback_alpha,
       });
 
       alert(String(message));
     } catch (e) {
-      if (e !== "Export cancelled") {
+      if (e !== "Export cancelled" && e !== "Video export cancelled") {
         console.error("Export failed", e);
       }
+    } finally {
+      setIsVideoExporting(false);
     }
   };
 
@@ -2047,8 +2347,14 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
           </div>
           <div className="grid grid-cols-2 gap-2">
             <Button onClick={handlePickFile} className="w-full" size="sm">Select Image</Button>
-            <Button variant="outline" size="sm" onClick={() => void renderPreview()} disabled={isRendering}>
-              {isRendering ? "Rendering…" : "Preview"}
+            <Button
+              variant="outline"
+              size="sm"
+              className="min-w-[96px]"
+              onClick={() => void renderPreview()}
+              disabled={isRendering || isRecolorPreprocessing}
+            >
+              {isRendering ? "Rendering…" : isRecolorPreprocessing ? "Processing…" : "Preview"}
             </Button>
           </div>
           <div className="grid grid-cols-2 gap-1">
@@ -2063,6 +2369,13 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
               <TabsTrigger value="image">Image</TabsTrigger>
               <TabsTrigger value="video">Video</TabsTrigger>
               <TabsTrigger value="audio">Audio</TabsTrigger>
+              <TabsTrigger value="recolor">Recolor</TabsTrigger>
+            </TabsList>
+            {/* Second row — kept as its own TabsList (same Tabs context, so
+                clicking it switches the same active tab) so "Enhancements"
+                doesn't crowd the primary Image | Video | Audio row. */}
+            <TabsList className="shrink-0">
+              <TabsTrigger value="enhancements">Enhancements</TabsTrigger>
             </TabsList>
 
             {/* ── IMAGE TAB ── */}
@@ -2161,6 +2474,64 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
               </div>
             </TabsContent>
 
+            {/* ── RECOLOR TAB ── */}
+            <TabsContent value="recolor" className="p-4 space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <label htmlFor="recolor-enabled" className="text-sm font-medium">Enable source recoloring</label>
+                  <p className="text-xs text-muted-foreground">Applied before kaleidoscope symmetry.</p>
+                </div>
+                <Checkbox
+                  id="recolor-enabled"
+                  checked={settings.recolor_enabled}
+                  onCheckedChange={(checked) => setSettings((s) => ({ ...s, recolor_enabled: checked === true }))}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Mode</label>
+                <Select value={settings.recolor_mode} onValueChange={(value: Settings["recolor_mode"]) => setSettings((s) => ({ ...s, recolor_mode: value }))}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {(Object.entries(RECOLOR_MODE_INFO) as [Settings["recolor_mode"], (typeof RECOLOR_MODE_INFO)[Settings["recolor_mode"]]][]).map(([value, info]) => (
+                      <SelectItem key={value} value={value}>{info.label} — {info.speed}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{RECOLOR_MODE_INFO[settings.recolor_mode].description}</p>
+              </div>
+              <div className="space-y-2">
+                <label htmlFor="recolor-seed" className="text-sm font-medium">Seed</label>
+                <Input
+                  id="recolor-seed"
+                  type="text"
+                  value={settings.recolor_seed}
+                  onChange={(event) => setSettings((s) => ({ ...s, recolor_seed: event.target.value }))}
+                  placeholder="Any text"
+                />
+                <p className="text-xs text-muted-foreground">The full string is SHA-256 hashed, then used to seed ChaCha8.</p>
+              </div>
+              <NumberSliderInput
+                label="Color threshold"
+                value={settings.recolor_threshold}
+                min={0}
+                max={1}
+                step={0.01}
+                onChange={(v) => setSettings((s) => ({ ...s, recolor_threshold: v }))}
+                roundToInteger={false}
+              />
+              {["seeded_voronoi", "connected_components", "slic_superpixels"].includes(settings.recolor_mode) && (
+                <NumberSliderInput
+                  label={settings.recolor_mode === "connected_components" ? "Minimum component size" : settings.recolor_mode === "slic_superpixels" ? "Superpixel size" : "Cell size (source pixels)"}
+                  value={settings.recolor_cell_size}
+                  min={4}
+                  max={512}
+                  step={1}
+                  onChange={(v) => setSettings((s) => ({ ...s, recolor_cell_size: v }))}
+                />
+              )}
+              <p className="text-xs text-muted-foreground">Higher values preserve low-saturation colors. Hue bands blend smoothly to avoid popping in gradients and motion.</p>
+            </TabsContent>
+
             {/* ── VIDEO TAB ── */}
             <TabsContent value="video" className="p-4 space-y-4">
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Export Duration</p>
@@ -2191,8 +2562,10 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
               <hr className="opacity-20" />
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Rotation</p>
               <NumberSliderInput label="Rotation Range" value={settings.rotation_range} min={-720.0} max={720.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, rotation_range: v }))} unit="°" roundToInteger={false} />
-              <NumberSliderInput label="Rotation Rate" value={settings.rotation_cps} min={0} max={16} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, rotation_cps: v }))} unit="cycles/s" roundToInteger={false} />
-              <NumberSliderInput label="Rotation Phase Offset" value={settings.rotation_start_offset} min={-360} max={360} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, rotation_start_offset: v }))} unit="cycles" roundToInteger={false} presetValues={[0, 90, 180]} />
+              <Select value={settings.rotationRateUnit} onValueChange={(unit: Settings["rotationRateUnit"]) => setSettings((s) => ({ ...s, rotationRateUnit: unit, rotation_cps: cyclesToRate(rateToCycles(s.rotation_cps, s.rotationRateUnit), unit) }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cycles/s">Cycles per second</SelectItem><SelectItem value="degrees/s">Degrees per second</SelectItem><SelectItem value="s/cycle">Seconds per cycle</SelectItem></SelectContent></Select>
+              <NumberSliderInput label="Rotation Rate" value={settings.rotation_cps} min={0} max={settings.rotationRateUnit === "degrees/s" ? 5760 : 16} step={settings.rotationRateUnit === "degrees/s" ? 1 : 0.01} onChange={(v) => setSettings((s) => ({ ...s, rotation_cps: v }))} unit={settings.rotationRateUnit} roundToInteger={false} />
+              <p className="text-xs text-muted-foreground">Starting position within the rotation waveform: 90° is a quarter cycle, 180° is halfway, and 360° is the same as 0°. Rotation Range controls the angle swept.</p>
+              <NumberSliderInput label="Rotation Cycle Start" value={settings.rotation_start_offset} min={-360} max={360} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, rotation_start_offset: v }))} unit="°" roundToInteger={false} presetValues={[0, 90, 180, 270]} />
               <Select onValueChange={(v) => setSettings((s) => ({ ...s, rotation_fn: v }))} value={settings.rotation_fn}>
                 <SelectTrigger className="w-full"><SelectValue placeholder="Rotation function" /></SelectTrigger>
                 <SelectContent>
@@ -2211,7 +2584,8 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
               <hr className="opacity-20" />
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Color</p>
               <NumberSliderInput label="Color Range" value={settings.hue_range} min={-720.0} max={720.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, hue_range: v }))} unit="°" roundToInteger={false} presetValues={[-360, 0, 360]} />
-              <NumberSliderInput label="Color Rate" value={settings.hue_cps} min={0} max={16.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, hue_cps: v }))} unit="cycles/s" roundToInteger={false} presetValues={[0, 0.5, 1, 2]} />
+              <Select value={settings.colorRateUnit} onValueChange={(unit: Settings["colorRateUnit"]) => setSettings((s) => ({ ...s, colorRateUnit: unit, hue_cps: cyclesToRate(rateToCycles(s.hue_cps, s.colorRateUnit), unit) }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cycles/s">Cycles per second</SelectItem><SelectItem value="degrees/s">Degrees per second</SelectItem><SelectItem value="s/cycle">Seconds per cycle</SelectItem></SelectContent></Select>
+              <NumberSliderInput label="Color Rate" value={settings.hue_cps} min={0} max={settings.colorRateUnit === "degrees/s" ? 5760 : 16.0} step={settings.colorRateUnit === "degrees/s" ? 1 : 0.01} onChange={(v) => setSettings((s) => ({ ...s, hue_cps: v }))} unit={settings.colorRateUnit} roundToInteger={false} presetValues={[0, 0.5, 1, 2]} />
               <NumberSliderInput label="Color Phase Offset" value={settings.hue_start_offset} min={-360} max={360} step={0.1} onChange={(v) => setSettings((s) => ({ ...s, hue_start_offset: v }))} roundToInteger={false} presetValues={[0, 90, 180]} />
               <Select onValueChange={(v) => setSettings((s) => ({ ...s, hue_fn: v }))} value={settings.hue_fn}>
                 <SelectTrigger className="w-full"><SelectValue placeholder="Color function" /></SelectTrigger>
@@ -2250,9 +2624,40 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
               <NumberSliderInput label="Zoom Rate" value={settings.zoom_cps} min={0} max={10} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, zoom_cps: v }))} unit="cycles/s" roundToInteger={false} />
 
               <div className="grid grid-cols-2 gap-2 pt-2">
-                <Button onClick={handleVideo} className="bg-primary">Export MP4</Button>
+                <Button
+                  onClick={handleVideo}
+                  className="bg-primary"
+                  aria-expanded={isVideoExporting ? showVideoExportProgress : undefined}
+                >
+                  {isVideoExporting ? "Exporting…" : "Export MP4"}
+                </Button>
                 <Button variant="outline" size="sm" onClick={resetVideoSettings}>Reset</Button>
               </div>
+              {isVideoExporting && showVideoExportProgress && (
+                <div className="space-y-1.5" role="status" aria-live="polite">
+                  <div className="flex justify-between text-xs text-muted-foreground">
+                    <span>{videoExportProgress.percent >= 100 ? "Finalizing video…" : "Rendering video…"}</span>
+                    <span>{videoExportProgress.percent}%</span>
+                  </div>
+                  <div
+                    className="h-2 w-full overflow-hidden rounded-full bg-muted"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={videoExportProgress.percent}
+                  >
+                    <div
+                      className="h-full bg-primary transition-[width] duration-200"
+                      style={{ width: `${videoExportProgress.percent}%` }}
+                    />
+                  </div>
+                  {videoExportProgress.totalFrames > 0 && (
+                    <p className="text-[11px] text-muted-foreground">
+                      Frame {Math.min(videoExportProgress.currentFrame, videoExportProgress.totalFrames).toLocaleString()} of {videoExportProgress.totalFrames.toLocaleString()}
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-1">
                 <Button variant="ghost" size="sm" onClick={loadVideoPreset}>Load Preset</Button>
                 <Button variant="ghost" size="sm" onClick={saveVideoPreset}>Save Preset</Button>
@@ -2354,7 +2759,16 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
               <hr className="opacity-20" />
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Orientation</p>
 
-              <NumberSliderInput label="Base Speed" value={settings.orientationBaseSpeed} min={0} max={500} step={1} onChange={(v) => setSettings((s) => ({ ...s, orientationBaseSpeed: v }))} unit="px/s" roundToInteger={false} />
+              <Select value={settings.orientationSpeedUnit} onValueChange={(unit: Settings["orientationSpeedUnit"]) => setSettings((s) => {
+                const px = orientationSpeedPx(s);
+                const circumference = 2 * Math.PI * Math.max(1, Math.abs(s.heroCircleRightX - s.heroCircleLeftX) / 2);
+                return { ...s, orientationSpeedUnit: unit, orientationBaseSpeed: unit === "px/s" ? px : unit === "cycles/s" ? px / circumference : px > 0 ? circumference / px : 0 };
+              })}>
+                <SelectTrigger aria-label="Base speed units"><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="px/s">Pixels per second</SelectItem><SelectItem value="s/cycle">Seconds per cycle</SelectItem><SelectItem value="cycles/s">Cycles per second</SelectItem></SelectContent>
+              </Select>
+              <NumberSliderInput label="Base Reorientation Speed" value={settings.orientationBaseSpeed} min={0} max={settings.orientationSpeedUnit === "cycles/s" ? 5 : 500} step={settings.orientationSpeedUnit === "px/s" ? 1 : 0.01} onChange={(v) => setSettings((s) => ({ ...s, orientationBaseSpeed: v }))} unit={settings.orientationSpeedUnit} roundToInteger={false} />
+              <p className="text-xs text-muted-foreground">One cycle runs the selected arc waveform once. Zero pauses base movement in every unit.</p>
               <NumberSliderInput label="Beat Drive" value={settings.orientationPeakMultiplier} min={0} max={5} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, orientationPeakMultiplier: v }))} unit="circles/s" roundToInteger={false} />
               {/* Phase offset: starting position on the hero circle in degrees.
                   0° = leftmost point, increases clockwise. */}
@@ -2401,6 +2815,92 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
               <NumberSliderInput label="Noise Gate" value={settings.audioPeakFloor} min={0} max={0.5} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioPeakFloor: v }))} roundToInteger={false} />
               <NumberSliderInput label="Peak Clip" value={settings.audioPeakCeiling} min={0.05} max={1.0} step={0.001} onChange={(v) => setSettings((s) => ({ ...s, audioPeakCeiling: v }))} roundToInteger={false} />
             </TabsContent>
+
+            {/* ── ENHANCEMENTS TAB ── */}
+            <TabsContent value="enhancements" className="p-4 space-y-5 overflow-hidden">
+              <div className="space-y-2">
+                <input
+                  type="checkbox"
+                  id="aspectCorrect"
+                  checked={settings.aspect_correct}
+                  onChange={(e) => setSettings((s) => ({ ...s, aspect_correct: e.target.checked }))}
+                />
+                <label htmlFor="aspectCorrect" className="text-sm ml-2">Aspect correction</label>
+                <p className="text-xs text-muted-foreground">
+                  Corrects the kaleidoscope pattern so it isn't visually stretched into an ellipse
+                  on non-square output canvases.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Step 1: Spatial Supersampling (SSAA)</label>
+                <Select value={String(settings.super_sample)} onValueChange={(value) => setSettings((s) => ({ ...s, super_sample: Number(value) as Settings["super_sample"] }))}>
+                  <SelectTrigger className="w-full min-w-0"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">1x (Off) — Fastest · Base quality</SelectItem>
+                    <SelectItem value="2" disabled={2 > maxSupersamplingFactor}>2x — Fast · Better quality</SelectItem>
+                    <SelectItem value="3" disabled={3 > maxSupersamplingFactor}>3x — Slow · High quality</SelectItem>
+                    <SelectItem value="4" disabled={4 > maxSupersamplingFactor}>4x — Slowest · Highest quality</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">Higher levels render more pixels before downsampling. Render cost increases quickly with each level.</p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Step 2: Source Texture Reconstruction / Interpolation</label>
+                <Select value={settings.reconstruction_filter} onValueChange={(value: Settings["reconstruction_filter"]) => setSettings((s) => ({ ...s, reconstruction_filter: value, anti_alias: value !== "nearest" }))}>
+                  <SelectTrigger className="w-full min-w-0"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="nearest">Nearest — Fastest · Lower quality</SelectItem>
+                    <SelectItem value="bilinear">Bilinear — Fast · Good quality</SelectItem>
+                    <SelectItem value="bicubic">Bicubic — Slower · Best quality</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-sm font-medium">Step 3: Derivatives &amp; Mipmap Filtering</p>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="derivativeMipmapping" checked={settings.derivative_mipmapping} onCheckedChange={(checked) => setSettings((s) => ({ ...s, derivative_mipmapping: checked === true }))} />
+                  <label htmlFor="derivativeMipmapping" className="text-sm">Enable Explicit Derivative Mipmapping</label>
+                </div>
+                <label className="text-xs text-muted-foreground">Anisotropy Level</label>
+                <Select value={String(settings.anisotropy_level)} onValueChange={(value) => setSettings((s) => ({ ...s, anisotropy_level: Number(value) as Settings["anisotropy_level"] }))}>
+                  <SelectTrigger className="w-full min-w-0"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">1x (Off) — Fastest · Base quality</SelectItem>
+                    <SelectItem value="2">2x — Faster · Improved quality</SelectItem>
+                    <SelectItem value="4">4x — Fast · Good quality</SelectItem>
+                    <SelectItem value="8">8x — Moderate · High quality</SelectItem>
+                    <SelectItem value="16">16x — Slower · Highest quality</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-medium">Step 4: Edge-Aware Post-Processing</label>
+                <Select value={settings.edge_post_process} onValueChange={(value: Settings["edge_post_process"]) => setSettings((s) => ({ ...s, edge_post_process: value }))}>
+                  <SelectTrigger className="w-full min-w-0"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="disabled">Off — Fastest · No edge smoothing</SelectItem>
+                    <SelectItem value="fxaa">FXAA — Fast · Good quality</SelectItem>
+                    <SelectItem value="smaa">SMAA — Slower · Better quality</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-sm font-medium">Step 5: Temporal Integration</p>
+                <div className="flex items-center gap-2">
+                  <Checkbox id="taaEnabled" checked={settings.taa_enabled} onCheckedChange={(checked) => setSettings((s) => ({ ...s, taa_enabled: checked === true }))} />
+                  <label htmlFor="taaEnabled" className="text-sm">Enable Temporal Anti-Aliasing (TAA)</label>
+                </div>
+                <div className={settings.taa_enabled ? "space-y-2" : "space-y-2 opacity-50"}>
+                  <div className="flex justify-between text-xs"><label>Feedback Alpha</label><span>{settings.taa_feedback_alpha.toFixed(2)}</span></div>
+                  <Slider disabled={!settings.taa_enabled} min={0} max={1} step={0.01} value={[settings.taa_feedback_alpha]} onValueChange={([value]) => setSettings((s) => ({ ...s, taa_feedback_alpha: value ?? 0.9 }))} />
+                </div>
+              </div>
+            </TabsContent>
           </Tabs>
         </aside>
 
@@ -2421,6 +2921,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
                 {imagePath ? (
                   <WedgePicker
                     imagePath={imagePath}
+                    imageSrc={recoloredSourceSrc || imageSrc}
                     count={count}
                     settings={settings}
                     onUpdate={setSettings}

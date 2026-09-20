@@ -28,6 +28,7 @@
 //! The JS side reads width/height from the response headers rather than
 //! a binary header prefix, keeping the body a pure flat pixel buffer.
 
+// kaleidomo-core src-tauri/src/frame_protocol.rs
 use std::sync::{Arc, Mutex};
 
 use kaleidomo_core::{KaleidoSettings, KaleidoType};
@@ -101,6 +102,11 @@ impl FrameRequest {
                 triangle_rotation_rad: get_f32!("rot"),
                 kaleido_type,
                 hue_rotation:        get_u32!("hue"),
+                // Enhancements — optional query params so URLs built before these
+                // existed still parse; absent/unparseable values fall back to disabled.
+                anti_alias:          m.get("aa").and_then(|v| v.parse::<u8>().ok()).map(|v| v != 0).unwrap_or(false),
+                super_sample:        m.get("ss").and_then(|v| v.parse::<u8>().ok()).map(|v| v.clamp(1, 4)).unwrap_or(1),
+                aspect_correct:      m.get("ac").and_then(|v| v.parse::<u8>().ok()).map(|v| v != 0).unwrap_or(false),
             },
         })
     }
@@ -120,6 +126,10 @@ pub fn render_frame_sync(
         .and_then(|n| n.checked_mul(4))
         .ok_or("output dimensions overflow")?;
 
+    // `super_sample`: render at `w/h * factor` internally, then box-downsample
+    // back down to the requested `w x h` — same wrapper used by the other two
+    // native-preview entry points (live_preview.rs, preview_server.rs).
+    let factor = req.settings.super_sample.clamp(1, 4);
     let mut pixels = vec![0u8; pixel_count];
 
     let mut guard = gpu_arc
@@ -130,8 +140,27 @@ pub fn render_frame_sync(
         .as_mut()
         .ok_or("GPU backend unavailable")?;
 
-    gpu.render_into_buffer(&req.settings, &mut pixels)
-        .map_err(|e| format!("GPU render failed: {e}"))?;
+    if factor > 1 {
+        let (render_w, render_h) = (w * factor as u32, h * factor as u32);
+        let render_pixel_count = (render_w as usize)
+            .checked_mul(render_h as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or("output dimensions overflow")?;
+        let render_settings = KaleidoSettings {
+            output_size_w: render_w,
+            output_size_h: render_h,
+            offset_x: req.settings.offset_x * factor as i32,
+            offset_y: req.settings.offset_y * factor as i32,
+            ..req.settings.clone()
+        };
+        let mut big = vec![0u8; render_pixel_count];
+        gpu.render_into_buffer(&render_settings, &mut big)
+            .map_err(|e| format!("GPU render failed: {e}"))?;
+        pixels = kaleidomo_core::downsample_box(&big, render_w, render_h, factor, w, h);
+    } else {
+        gpu.render_into_buffer(&req.settings, &mut pixels)
+            .map_err(|e| format!("GPU render failed: {e}"))?;
+    }
 
     Ok(pixels)
 }

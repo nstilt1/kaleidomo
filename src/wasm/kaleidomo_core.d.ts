@@ -33,13 +33,24 @@ export class LiveKaleidoscopeEngine {
      * * `base_settings_js` — a JS object matching `KaleidoSettings` (count, offset_x/y, zoom,
      *   tile_count, triangle_center_x/y, triangle_rotation_rad, kaleido_type_idx, hue_rotation)
      * * `video_settings` — a `WasmVideoSettings` instance
+     * * `anti_alias` — enables bilinear texture filtering when sampling the source image
+     *   instead of nearest-neighbor. Default/disabled value: `false`.
+     * * `super_sample` — internal supersampling factor (`1` = disabled/native resolution,
+     *   `2`-`4` render larger internally and box-downsample). Default/disabled value: `1`.
+     * * `aspect_correct` — corrects the kaleidoscope pattern so it isn't visually stretched
+     *   into an ellipse when the canvas is non-square. Default/disabled value: `false`.
      */
-    start_animation(count: number, offset_x: number, offset_y: number, zoom: number, tile_count: number, triangle_center_x: number, triangle_center_y: number, triangle_rotation_rad: number, kaleido_type_idx: number, hue_rotation: number, video_settings: WasmVideoSettings): void;
+    start_animation(count: number, offset_x: number, offset_y: number, zoom: number, tile_count: number, triangle_center_x: number, triangle_center_y: number, triangle_rotation_rad: number, kaleido_type_idx: number, hue_rotation: number, recolor_enabled: boolean, recolor_seed: string, recolor_mode: number, recolor_threshold: number, recolor_cell_size: number, video_settings: WasmVideoSettings, anti_alias: number, super_sample: number, aspect_correct: boolean): void;
     /**
      * Cancel the animation loop (idempotent).
      */
     stop_animation(): void;
-    update_animation_settings(count: number, offset_x: number, offset_y: number, zoom: number, tile_count: number, triangle_center_x: number, triangle_center_y: number, triangle_rotation_rad: number, kaleido_type_idx: number, hue_rotation: number, video_settings: WasmVideoSettings): void;
+    /**
+     * * `anti_alias` — bilinear texture filtering instead of nearest-neighbor. Default: `false`.
+     * * `super_sample` — internal supersampling factor, `1`-`4` (`1` disables it). Default: `1`.
+     * * `aspect_correct` — corrects stretching on non-square canvases. Default: `false`.
+     */
+    update_animation_settings(count: number, offset_x: number, offset_y: number, zoom: number, tile_count: number, triangle_center_x: number, triangle_center_y: number, triangle_rotation_rad: number, kaleido_type_idx: number, hue_rotation: number, recolor_enabled: boolean, recolor_seed: string, recolor_mode: number, recolor_threshold: number, recolor_cell_size: number, video_settings: WasmVideoSettings, anti_alias: number, super_sample: number, aspect_correct: boolean): void;
 }
 
 /**
@@ -165,9 +176,9 @@ export interface InitOutput {
     readonly livekaleidoscopeengine_load_source_image: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly livekaleidoscopeengine_new: (a: number) => number;
     readonly livekaleidoscopeengine_set_audio_peaks: (a: number, b: number) => void;
-    readonly livekaleidoscopeengine_start_animation: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => void;
+    readonly livekaleidoscopeengine_start_animation: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number) => void;
     readonly livekaleidoscopeengine_stop_animation: (a: number) => void;
-    readonly livekaleidoscopeengine_update_animation_settings: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => void;
+    readonly livekaleidoscopeengine_update_animation_settings: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number) => void;
     readonly wasmvideosettings_get_hue_fn: (a: number, b: number) => void;
     readonly wasmvideosettings_get_orientation_fn: (a: number, b: number) => void;
     readonly wasmvideosettings_get_rotation_fn: (a: number, b: number) => void;
@@ -177,15 +188,15 @@ export interface InitOutput {
     readonly wasmvideosettings_set_orientation_fn: (a: number, b: number, c: number) => void;
     readonly wasmvideosettings_set_rotation_fn: (a: number, b: number, c: number) => void;
     readonly wasmvideosettings_set_zoom_fn: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_1562: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_420: (a: number, b: number) => void;
-    readonly __wasm_bindgen_func_elem_423: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_2164: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_1564: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_442: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_2238: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_2240: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_793: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;
     readonly __wbindgen_export4: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_export5: (a: number, b: number) => void;
     readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
 }
 

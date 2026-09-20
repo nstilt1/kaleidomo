@@ -1,3 +1,4 @@
+// native-live-preview.ts
 /**
  * native-live-preview.ts
  *
@@ -63,6 +64,11 @@ export interface NativeLivePreviewParams {
   rotation: number;
   kaleidoType: string;
   hueRotation: number;
+  recolorEnabled: boolean;
+  recolorSeed: string;
+  recolorMode: number;
+  recolorThreshold: number;
+  recolorCellSize: number;
   imgWidth: number;
   imgHeight: number;
   // Animation — rates in cycles per second (replaces cycles + animationDuration)
@@ -103,6 +109,16 @@ export interface NativeLivePreviewParams {
   audioOrientationAmount: number;
   audioReorientationAmount: number;
   orientationPeakMultiplier: number;
+  // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
+  antiAlias: 0 | 1 | 2;
+  superSample: number;
+  aspectCorrect: boolean;
+  reconstructionFilter: "nearest" | "bilinear" | "bicubic";
+  derivativeMipmapping: boolean;
+  anisotropyLevel: number;
+  edgePostProcess: "disabled" | "fxaa" | "smaa";
+  taaEnabled: boolean;
+  taaFeedbackAlpha: number;
 }
 
 interface FrameParams {
@@ -118,9 +134,23 @@ interface FrameParams {
   rotation: number;
   kaleidoType: string;
   hueRotation: number;
+  recolorEnabled: boolean;
+  recolorSeed: string;
+  recolorMode: number;
+  recolorThreshold: number;
+  recolorCellSize: number;
   imgWidth: number;
   imgHeight: number;
   jpegQuality: number;
+  antiAlias: 0 | 1 | 2;
+  superSample: number;
+  aspectCorrect: boolean;
+  reconstructionFilter: "nearest" | "bilinear" | "bicubic";
+  derivativeMipmapping: boolean;
+  anisotropyLevel: number;
+  edgePostProcess: "disabled" | "fxaa" | "smaa";
+  taaEnabled: boolean;
+  taaFeedbackAlpha: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +272,9 @@ export class NativeLivePreviewEngine {
   private _ws: WebSocket | null = null;
   private _wsPort = 0;
   private _wsReady = false;
+  private _directSurfaceReady = false;
+  private _lastSurfaceLayoutKey = "";
+  private _surfaceLayoutInFlight = false;
 
   // Current base settings
   private _base: NativeLivePreviewParams | null = null;
@@ -287,8 +320,108 @@ export class NativeLivePreviewEngine {
     this._smoothedPeak = 0;
     this._accumulatedOrientationOffset = 0;
     this._frameCount = 0;
-    // Connect WebSocket; schedule loop once connected
-    this._connectWs();
+    // Prefer the native AppKit/Metal surface. If mounting it fails, retain the
+    // JPEG WebSocket path as a compatibility fallback.
+    void this._mountDirectSurface();
+  }
+
+  private async _mountDirectSurface(): Promise<void> {
+    const canvas = this._canvas;
+    if (!canvas) {
+      this._connectWs();
+      return;
+    }
+    const rect = this._getDirectSurfaceRect();
+    if (!rect) {
+      this._connectWs();
+      return;
+    }
+    try {
+      await invoke("mount_native_preview_surface", {
+        rect,
+      });
+      this._lastSurfaceLayoutKey = this._surfaceLayoutKey(rect);
+      this._directSurfaceReady = true;
+      if (this._running) this._schedule();
+    } catch (error) {
+      console.warn("[native-preview] direct Metal surface unavailable; using JPEG fallback", error);
+      this._directSurfaceReady = false;
+      this._connectWs();
+    }
+  }
+
+  private _getDirectSurfaceRect(): {
+    x: number; y: number; width: number; height: number;
+    contentX: number; contentY: number; contentWidth: number; contentHeight: number;
+    devicePixelRatio: number; visible: boolean;
+  } | null {
+    const canvas = this._canvas;
+    if (!canvas) return null;
+    const bounds = canvas.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return null;
+
+    // The DOM canvas is the available viewport. Fit the native view inside it
+    // using the actual project/output aspect ratio so the Metal blit never
+    // stretches a square/portrait/wide render into the viewport's ratio.
+    const outputWidth = Math.max(1, this._base?.outputSizeW ?? canvas.width);
+    const outputHeight = Math.max(1, this._base?.outputSizeH ?? canvas.height);
+    const fullscreenSized =
+      bounds.width >= window.innerWidth - 2 && bounds.height >= window.innerHeight - 2;
+    const borderInset = fullscreenSized ? 0 : 1;
+    const stageWidth = Math.max(1, bounds.width - borderInset * 2);
+    const stageHeight = Math.max(1, bounds.height - borderInset * 2);
+    const outputAspect = outputWidth / outputHeight;
+    const stageAspect = stageWidth / stageHeight;
+    let contentWidth = stageWidth;
+    let contentHeight = stageHeight;
+    if (stageAspect > outputAspect) {
+      contentWidth = contentHeight * outputAspect;
+    } else {
+      contentHeight = contentWidth / outputAspect;
+    }
+    const fullyInsideViewport =
+      bounds.left >= -0.5 && bounds.top >= -0.5 &&
+      bounds.right <= window.innerWidth + 0.5 &&
+      bounds.bottom <= window.innerHeight + 0.5;
+    return {
+      x: bounds.left + borderInset,
+      y: bounds.top + borderInset,
+      width: stageWidth,
+      height: stageHeight,
+      contentX: (stageWidth - contentWidth) * 0.5,
+      contentY: (stageHeight - contentHeight) * 0.5,
+      contentWidth,
+      contentHeight,
+      devicePixelRatio: window.devicePixelRatio || 1,
+      visible: fullyInsideViewport,
+    };
+  }
+
+  private _surfaceLayoutKey(rect: {
+    x: number; y: number; width: number; height: number;
+    contentX: number; contentY: number; contentWidth: number; contentHeight: number;
+    devicePixelRatio: number; visible: boolean;
+  }): string {
+    return [
+      rect.x, rect.y, rect.width, rect.height,
+      rect.contentX, rect.contentY, rect.contentWidth, rect.contentHeight,
+      rect.devicePixelRatio, Number(rect.visible),
+    ]
+      .map((value) => value.toFixed(1))
+      .join(":");
+  }
+
+  private _syncDirectSurfaceLayout(): void {
+    if (!this._directSurfaceReady || this._surfaceLayoutInFlight) return;
+    const rect = this._getDirectSurfaceRect();
+    if (!rect) return;
+    const key = this._surfaceLayoutKey(rect);
+    if (key === this._lastSurfaceLayoutKey) return;
+    this._lastSurfaceLayoutKey = key;
+    this._surfaceLayoutInFlight = true;
+    void invoke("update_native_preview_surface", { rect })
+      .catch((error) => console.error("[native-preview] layout update failed:", error))
+      .finally(() => { this._surfaceLayoutInFlight = false; });
   }
 
   private _connectWs(): void {
@@ -306,6 +439,12 @@ export class NativeLivePreviewEngine {
     ws.binaryType = "blob"; // frames arrive as Blobs — outside JSC heap
     this._ws = ws;
     this._wsReady = false;
+    if (this._directSurfaceReady) {
+      this._directSurfaceReady = false;
+      void invoke("unmount_native_preview_surface").catch((error) => {
+        console.warn("[native-preview] failed to unmount direct Metal surface", error);
+      });
+    }
 
     ws.onopen = () => {
       this._wsReady = true;
@@ -343,6 +482,13 @@ export class NativeLivePreviewEngine {
   stop(): void {
     this._running = false;
     this._inFlight = false;
+
+    if (this._directSurfaceReady) {
+      this._directSurfaceReady = false;
+      void invoke("unmount_native_preview_surface").catch((error) => {
+        console.warn("[native-preview] failed to unmount direct Metal surface", error);
+      });
+    }
 
     if (this._rafId !== null) {
       cancelAnimationFrame(this._rafId);
@@ -399,7 +545,7 @@ export class NativeLivePreviewEngine {
     }
     if (this._inFlight) { this._schedule(); return; }
 
-    const targetFps = Math.min(Math.max(1, base.fps), 30);
+    const targetFps = Math.min(Math.max(1, base.fps), 120);
     const minFrameMs = 1000 / targetFps;
     const sinceLastMs = nowMs - this._lastFrameMs;
     if (sinceLastMs < minFrameMs) {
@@ -426,6 +572,27 @@ export class NativeLivePreviewEngine {
     this._frameCount = (this._frameCount ?? 0) + 1;
     if (this._frameCount % 300 === 1) {
       console.log(`[native-preview] frame=${this._frameCount} t=${animElapsed.toFixed(2)}s acc=${this._accumulatedOrientationOffset.toFixed(4)} x=${params.x.toFixed(1)} y=${params.y.toFixed(1)}`);
+    }
+
+    if (this._directSurfaceReady) {
+      this._syncDirectSurfaceLayout();
+      this._inFlight = true;
+      void invoke("present_native_preview_frame", { params })
+        .catch((error) => {
+          console.error("[native-preview] direct Metal presentation failed:", error);
+          this._onError?.(`Direct Metal preview failed: ${String(error)}`);
+          if (this._directSurfaceReady) {
+            this._directSurfaceReady = false;
+            void invoke("unmount_native_preview_surface").finally(() => {
+              if (this._running) this._connectWs();
+            });
+          }
+        })
+        .finally(() => {
+          this._inFlight = false;
+          if (this._running) this._schedule();
+        });
+      return;
     }
 
     if (!this._wsReady || !this._ws) {
@@ -569,9 +736,23 @@ export class NativeLivePreviewEngine {
       rotation: finalRotation,
       kaleidoType: base.kaleidoType,
       hueRotation,
+      recolorEnabled: base.recolorEnabled,
+      recolorSeed: base.recolorSeed,
+      recolorMode: base.recolorMode,
+      recolorThreshold: base.recolorThreshold,
+      recolorCellSize: base.recolorCellSize,
       imgWidth: base.imgWidth,
       imgHeight: base.imgHeight,
       jpegQuality: 85,
+      antiAlias: base.antiAlias,
+      superSample: base.superSample,
+      aspectCorrect: base.aspectCorrect,
+      reconstructionFilter: base.reconstructionFilter,
+      derivativeMipmapping: base.derivativeMipmapping,
+      anisotropyLevel: base.anisotropyLevel,
+      edgePostProcess: base.edgePostProcess,
+      taaEnabled: base.taaEnabled,
+      taaFeedbackAlpha: base.taaFeedbackAlpha,
     };
   }
 }

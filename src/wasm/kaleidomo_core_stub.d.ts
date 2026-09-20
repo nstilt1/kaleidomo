@@ -1,3 +1,4 @@
+// kaleidomo_core_stub.d.ts
 /**
  * Minimal hand-written declarations for the wasm-bindgen output.
  * The real generated .d.ts (from wasm-bindgen) will be placed at
@@ -60,6 +61,11 @@ export declare class LiveKaleidoscopeEngine {
     kaleido_type_idx: number,
     hue_rotation: number,
     video_settings: WasmVideoSettings,
+    // Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs.
+    // Disabled defaults: anti_alias=false, super_sample=1, aspect_correct=false.
+    anti_alias: number,
+    super_sample: number,
+    aspect_correct: boolean,
   ): void;
   update_animation_settings(
     count: number,
@@ -73,6 +79,9 @@ export declare class LiveKaleidoscopeEngine {
     kaleido_type_idx: number,
     hue_rotation: number,
     video_settings: WasmVideoSettings,
+    anti_alias: number,
+    super_sample: number,
+    aspect_correct: boolean,
   ): void;
   stop_animation(): void;
   set_audio_peaks(peaks: Float32Array): void;

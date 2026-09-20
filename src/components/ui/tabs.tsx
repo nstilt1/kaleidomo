@@ -49,8 +49,8 @@ function TabsContent({ value, children, className }: { value: string; children: 
   // Outer div is the scroll container — it fills remaining aside height
   // Inner div gets the padding/spacing from className
   return (
-    <div className="flex-1 overflow-y-auto min-h-0">
-      <div className={cn("pb-8", className)}>{children}</div>
+    <div className="flex-1 min-h-0 min-w-0 overflow-x-hidden overflow-y-auto">
+      <div className={cn("min-w-0 max-w-full pb-8", className)}>{children}</div>
     </div>
   );
 }

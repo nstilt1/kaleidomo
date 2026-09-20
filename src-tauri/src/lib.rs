@@ -1,3 +1,4 @@
+// src-tauri/src/lib.rs
 const PRODUCT_NAME: &str = "Kaleidomo";
 const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/downloads/kaleidomo";
 const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/downloads/kaleidomo";
@@ -5,11 +6,10 @@ const VERSION_URL: &str = "https://hephaestus.alteredbrainchemistry.com/download
 
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_fs::FsExt;
-use tauri_plugin_shell::ShellExt;
 
 use std::{collections::HashMap, sync::{Arc, Mutex}};
 use kaleidomo_core::{KaleidoSettings, pollster};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use std::fs;
 use std::io::Cursor;
@@ -17,11 +17,63 @@ use image::io::Reader as ImageReader;
 
 use kaleidomo_core::backends::gpu::GpuBackend;
 
+fn enhancement_config(reconstruction: &str, derivatives: bool, anisotropy: u8, edge: &str, taa: bool, feedback: f32) -> kaleidomo_core::enhancement::EnhancementConfig {
+    kaleidomo_core::enhancement::EnhancementConfig::from_wire(reconstruction, derivatives, anisotropy, edge, taa, feedback)
+}
+
+struct EnhancingVideoSink<'a> {
+    inner: &'a mut dyn kaleidomo_core::VideoFrameSink,
+    width: u32,
+    height: u32,
+    pipeline: kaleidomo_core::enhancement::EnhancementPipeline,
+}
+
+impl kaleidomo_core::VideoFrameSink for EnhancingVideoSink<'_> {
+    fn write_rgba_frame(&mut self, rgba: &[u8]) -> Result<(), kaleidomo_core::VideoSinkError> {
+        let frame = image::RgbaImage::from_raw(self.width, self.height, rgba.to_vec())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid video RGBA frame dimensions"))?;
+        let enhanced = self.pipeline.finish_frame(&frame);
+        self.inner.write_rgba_frame(enhanced.as_raw())
+    }
+
+    fn finish(&mut self) -> Result<(), kaleidomo_core::VideoSinkError> { self.inner.finish() }
+}
+
 mod licensing;
 use licensing::*;
 
 mod live_preview;
 pub use live_preview::render_live_preview_frame;
+
+#[cfg(target_os = "macos")]
+mod native_preview_surface;
+#[cfg(not(target_os = "macos"))]
+mod native_preview_surface {
+    #[derive(Default)]
+    pub struct NativePreviewSurfaceState;
+
+    #[tauri::command]
+    pub async fn mount_native_preview_surface() -> Result<(), String> {
+        Err("native Metal preview is only available on macOS".into())
+    }
+
+    #[tauri::command]
+    pub async fn unmount_native_preview_surface() -> Result<(), String> {
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn update_native_preview_surface() -> Result<(), String> {
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub fn present_native_preview_frame() -> Result<(), String> {
+        Err("native Metal preview is only available on macOS".into())
+    }
+}
+
+mod ffmpeg_sink;
 
 mod preview_server;
 
@@ -180,6 +232,7 @@ pub struct AppState {
     pub license_sync_cooldown: AsyncMutex<licensing::cooldown::LicenseSyncCooldownState>,
     pub loaded_gpu_image_path: Mutex<Option<String>>,
     pub last_version_fetch: AsyncMutex<Option<u64>>,
+    pub live_enhancement: Arc<Mutex<Option<(kaleidomo_core::enhancement::EnhancementConfig, kaleidomo_core::enhancement::EnhancementPipeline)>>>,
     /// Path to a preset/project file (.json) passed on the command line, e.g.
     /// `kaleidomo.exe C:\presets\my-preset.kmo.json`. When present, the
     /// frontend loads it on startup and enters fullscreen "kiosk" mode
@@ -578,8 +631,23 @@ async fn export_kaleidoscope(
     kaleido_type: String,
     mut tile_count: f32,
     hue_rotation: u32,
+    recolor_enabled: bool,
+    recolor_seed: String,
+    recolor_mode: u8,
+    recolor_threshold: f32,
+    recolor_cell_size: f32,
     img_width: u32,
     img_height: u32,
+    // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
+    anti_alias: u8,
+    super_sample: u8,
+    aspect_correct: bool,
+    reconstruction_filter: String,
+    derivative_mipmapping: bool,
+    anisotropy_level: u8,
+    edge_post_process: String,
+    taa_enabled: bool,
+    taa_feedback_alpha: f32,
 ) -> Result<String, String> {
     let is_exporting = true;
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count, is_exporting);
@@ -623,7 +691,17 @@ async fn export_kaleidoscope(
             "hexagonal_flat_top" => kaleidomo_core::KaleidoType::HexagonalFlatTop,
             _ => return Err("Invalid kaleidoscope type".into()),
         },
-        hue_rotation
+        hue_rotation,
+        recolor_enabled,
+        recolor_seed,
+        recolor_mode,
+        recolor_threshold,
+        recolor_cell_size,
+        anti_alias,
+        derivative_mipmapping,
+        anisotropy_level,
+        super_sample: super_sample.clamp(1, 4),
+        aspect_correct,
     };
 
     let use_gpu = {
@@ -635,6 +713,7 @@ async fn export_kaleidoscope(
     };
 
     adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
+    let enhancement = enhancement_config(&reconstruction_filter, derivative_mipmapping, anisotropy_level, &edge_post_process, taa_enabled, taa_feedback_alpha);
 
     if use_gpu {
         let gpu_arc = Arc::clone(&state.gpu_arc);
@@ -644,15 +723,43 @@ async fn export_kaleidoscope(
                 .lock()
                 .map_err(|_| "failed to lock GPU backend".to_string())?;
             let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
-            let pixel_count = (output_size_w as usize)
-                .checked_mul(output_size_h as usize)
-                .and_then(|v| v.checked_mul(4))
-                .ok_or_else(|| "output dimensions overflowed".to_string())?;
-            let mut pixels = vec![0u8; pixel_count];
-            gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+            // `super_sample`: render at `output_size * factor` internally, then
+            // box-downsample back down before saving, same as the CPU path (which
+            // gets this for free via `render_kaleidoscope_with_auto_backend`).
+            let factor = kaleidomo_core::safe_super_sample(settings.super_sample, settings.output_size_w, settings.output_size_h);
+            let pixels = if factor > 1 {
+                let render_w = output_size_w * factor as u32;
+                let render_h = output_size_h * factor as u32;
+                let render_settings = kaleidomo_core::KaleidoSettings {
+                    output_size_w: render_w,
+                    output_size_h: render_h,
+                    offset_x: settings.offset_x * factor as i32,
+                    offset_y: settings.offset_y * factor as i32,
+                    // Keep source framing invariant when the intermediate render
+                    // width grows for supersampling.
+                    zoom: settings.zoom * factor as f32,
+                    ..settings.clone()
+                };
+                let render_pixel_count = (render_w as usize)
+                    .checked_mul(render_h as usize)
+                    .and_then(|v| v.checked_mul(4))
+                    .ok_or_else(|| "output dimensions overflowed".to_string())?;
+                let mut big = vec![0u8; render_pixel_count];
+                gpu.render_into_buffer(&render_settings, &mut big).map_err(|e| e.to_string())?;
+                kaleidomo_core::downsample_box(&big, render_w, render_h, factor, output_size_w, output_size_h)
+            } else {
+                let pixel_count = (output_size_w as usize)
+                    .checked_mul(output_size_h as usize)
+                    .and_then(|v| v.checked_mul(4))
+                    .ok_or_else(|| "output dimensions overflowed".to_string())?;
+                let mut pixels = vec![0u8; pixel_count];
+                gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+                pixels
+            };
             let result_buffer = image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
                 .ok_or_else(|| "failed to create image from GPU output".to_string())?;
-            result_buffer.save(&path_str).map_err(|e| format!("Failed to save image: {}", e))
+            let mut pipeline = kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement);
+            pipeline.finish_frame(&result_buffer).save(&path_str).map_err(|e| format!("Failed to save image: {}", e))
         })
         .await
         .map_err(|e| format!("spawn_blocking error: {e}"))??;
@@ -663,7 +770,8 @@ async fn export_kaleidoscope(
                 settings,
             );
 
-        result_buffer
+        let mut pipeline = kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement);
+        pipeline.finish_frame(&result_buffer)
             .save(path_to_save.to_string())
             .map_err(|e| format!("Failed to save image: {}", e))?;
     }
@@ -672,6 +780,36 @@ async fn export_kaleidoscope(
 }
 
 use base64::Engine as _;
+
+#[tauri::command]
+async fn preprocess_source_preview(
+    path: String,
+    seed_input: String,
+    threshold: f32,
+    mode: u8,
+    cell_size: f32,
+) -> Result<String, String> {
+    let mut rgba = load_source_image(&adjust_path(&path))?.to_rgba8();
+    kaleidomo_core::preprocess::preprocess_source_frame_with_mode_and_cell_size(
+        &mut rgba,
+        seed_input.as_bytes(),
+        threshold,
+        match mode {
+            1 => kaleidomo_core::preprocess::RecolorMode::BorderedCells,
+            2 => kaleidomo_core::preprocess::RecolorMode::SeededVoronoi,
+            3 => kaleidomo_core::preprocess::RecolorMode::ConnectedComponents,
+            4 => kaleidomo_core::preprocess::RecolorMode::SlicSuperpixels,
+            _ => kaleidomo_core::preprocess::RecolorMode::ColorBands,
+        },
+        cell_size,
+    ).map_err(|e| e.to_string())?;
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut buffer, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(buffer.into_inner());
+    Ok(format!("data:image/png;base64,{encoded}"))
+}
 
 #[tauri::command]
 async fn generate_kaleidoscope(
@@ -689,8 +827,23 @@ async fn generate_kaleidoscope(
     kaleido_type: String,
     mut tile_count: f32,
     hue_rotation: u32,
+    recolor_enabled: bool,
+    recolor_seed: String,
+    recolor_mode: u8,
+    recolor_threshold: f32,
+    recolor_cell_size: f32,
     img_width: u32,
     img_height: u32,
+    // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
+    anti_alias: u8,
+    super_sample: u8,
+    aspect_correct: bool,
+    reconstruction_filter: String,
+    derivative_mipmapping: bool,
+    anisotropy_level: u8,
+    edge_post_process: String,
+    taa_enabled: bool,
+    taa_feedback_alpha: f32,
 ) -> Result<String, String> {
     let mut _offset_x = 0;
     let mut _offset_y = 0;
@@ -719,6 +872,16 @@ async fn generate_kaleidoscope(
             _ => return Err("Invalid kaleidoscope type".into()),
         },
         hue_rotation,
+        recolor_enabled,
+        recolor_seed,
+        recolor_mode,
+        recolor_threshold,
+        recolor_cell_size,
+        anti_alias,
+        derivative_mipmapping,
+        anisotropy_level,
+        super_sample: super_sample.clamp(1, 4),
+        aspect_correct,
     };
 
     let use_gpu = {
@@ -738,8 +901,29 @@ async fn generate_kaleidoscope(
                 .lock()
                 .map_err(|_| "Failed to lock GPU backend".to_string())?;
             let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
-            let mut pixels = vec![0u8; (output_size_w * output_size_h * 4) as usize];
-            gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+            // `super_sample`: see `export_kaleidoscope` above for the same wrapper.
+            let factor = kaleidomo_core::safe_super_sample(settings.super_sample, settings.output_size_w, settings.output_size_h);
+            let pixels = if factor > 1 {
+                let render_w = output_size_w * factor as u32;
+                let render_h = output_size_h * factor as u32;
+                let render_settings = kaleidomo_core::KaleidoSettings {
+                    output_size_w: render_w,
+                    output_size_h: render_h,
+                    offset_x: settings.offset_x * factor as i32,
+                    offset_y: settings.offset_y * factor as i32,
+                    // Keep source framing invariant when the intermediate render
+                    // width grows for supersampling.
+                    zoom: settings.zoom * factor as f32,
+                    ..settings.clone()
+                };
+                let mut big = vec![0u8; (render_w * render_h * 4) as usize];
+                gpu.render_into_buffer(&render_settings, &mut big).map_err(|e| e.to_string())?;
+                kaleidomo_core::downsample_box(&big, render_w, render_h, factor, output_size_w, output_size_h)
+            } else {
+                let mut pixels = vec![0u8; (output_size_w * output_size_h * 4) as usize];
+                gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+                pixels
+            };
             image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
                 .ok_or_else(|| "Failed to construct image".to_string())
         })
@@ -757,6 +941,9 @@ async fn generate_kaleidoscope(
 
         kaleidomo_core::render_kaleidoscope_with_auto_backend(&img, settings)
     };
+
+    let mut pipeline = kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement_config(&reconstruction_filter, derivative_mipmapping, anisotropy_level, &edge_post_process, taa_enabled, taa_feedback_alpha));
+    let output = pipeline.finish_frame(&output);
 
     // 3. Convert RgbaImage to Base64 so React can show it in an <img /> tag
     let mut buffer = std::io::Cursor::new(Vec::new());
@@ -785,6 +972,11 @@ async fn generate_video(
     kaleido_type: String,
     mut tile_count: f32,
     hue_rotation: u32,
+    recolor_enabled: bool,
+    recolor_seed: String,
+    recolor_mode: u8,
+    recolor_threshold: f32,
+    recolor_cell_size: f32,
     still_frame_ending: u32,
     fps: u32,
     quality: f32,
@@ -814,6 +1006,16 @@ async fn generate_video(
     hero_circle_left_x: f32,
     hero_circle_right_x: f32,
     hero_circle_y: f32,
+    // ── Enhancements — see `KaleidoSettings` in kaleidomo-core/src/lib.rs ──
+    anti_alias: u8,
+    super_sample: u8,
+    aspect_correct: bool,
+    reconstruction_filter: String,
+    derivative_mipmapping: bool,
+    anisotropy_level: u8,
+    edge_post_process: String,
+    taa_enabled: bool,
+    taa_feedback_alpha: f32,
 ) -> Result<String, String> {
     let is_exporting = true;
     limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count, is_exporting);
@@ -858,6 +1060,16 @@ async fn generate_video(
             _ => return Err("Invalid kaleidoscope type".into()),
         },
         hue_rotation,
+        recolor_enabled,
+        recolor_seed,
+        recolor_mode,
+        recolor_threshold,
+        recolor_cell_size,
+        anti_alias,
+        derivative_mipmapping,
+        anisotropy_level,
+        super_sample: super_sample.clamp(1, 4),
+        aspect_correct,
     };
 
     let video_settings = kaleidomo_core::VideoSettings {
@@ -890,6 +1102,8 @@ async fn generate_video(
         hero_circle_y,
         hero_desired_left_rotation: rotation,
     };
+    let total_export_frames =
+        (animation_duration * fps as f32).round() as u64 + still_frame_ending as u64;
 
     let use_gpu = {
         let guard = state
@@ -901,81 +1115,73 @@ async fn generate_video(
 
     adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
 
-    let _output = if use_gpu {
+    let video_enhancement = enhancement_config(&reconstruction_filter, derivative_mipmapping, anisotropy_level, &edge_post_process, taa_enabled, taa_feedback_alpha);
+
+    // Validate the audio file (if any) up front, before we spend time
+    // rendering, and resolve it to a `PathBuf` for `FfmpegSink`.
+    let audio_path: Option<std::path::PathBuf> = match audio_file_path {
+        Some(p) if !p.is_empty() => {
+            log_info!("[generate_video] audio_file_path={p}");
+            if !std::path::Path::new(&p).exists() {
+                return Err(format!("Audio file does not exist: {p}"));
+            }
+            Some(std::path::PathBuf::from(p))
+        }
+        _ => None,
+    };
+
+    // Bitrate mapping carried over unchanged from the previous
+    // openh264-based pipeline: resolution * fps * quality.
+    let bitrate_bps =
+        (output_size_w as f32 * output_size_h as f32 * fps as f32 * quality).round() as u32;
+    let final_path = std::path::PathBuf::from(file_path.to_string());
+    log_info!("[generate_video] video_path={}", final_path.display());
+
+    if use_gpu {
         let gpu_arc = Arc::clone(&state.gpu_arc);
-        let file_path_str = file_path.to_string();
+        let app_handle = app.clone();
         tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let mut sink = ffmpeg_sink::FfmpegSink::create(
+                &app_handle,
+                &final_path,
+                output_size_w,
+                output_size_h,
+                fps,
+                bitrate_bps,
+                audio_path.as_deref(),
+                total_export_frames,
+            )?;
+            let mut enhanced_sink = EnhancingVideoSink { inner: &mut sink, width: output_size_w, height: output_size_h, pipeline: kaleidomo_core::enhancement::EnhancementPipeline::new(video_enhancement) };
             let mut gpu_guard = gpu_arc
                 .lock()
                 .map_err(|_| "Failed to lock GPU backend".to_string())?;
             let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
-            kaleidomo_core::render_video_gpu(settings, video_settings, &file_path_str, gpu)
+            kaleidomo_core::render_video_gpu(settings, video_settings, &mut enhanced_sink, gpu)
                 .map_err(|e| format!("Video generation failed: {}", e))
         })
         .await
         .map_err(|e| format!("spawn_blocking error: {e}"))??;
     } else {
-        match kaleidomo_core::render_video_with_auto_backend(&img, settings, video_settings, &file_path.to_string()) {
-            Ok(_) => (),
-            Err(e) => return Err(format!("Video generation failed: {}", e)),
-        };
-    };
-
-    // If an audio file was provided, mux it into the output video using ffmpeg.
-    if let Some(audio_path) = audio_file_path {
-        if !audio_path.is_empty() {
-            let video_path_str = file_path.to_string();
-
-            log_info!("[generate_video] audio_file_path={audio_path}");
-            log_info!("[generate_video] video_path={video_path_str}");
-
-            if !std::path::Path::new(&audio_path).exists() {
-                return Err(format!("Audio file does not exist: {audio_path}"));
-            }
-
-            // Write to a temp file alongside the output, then replace it.
-            let tmp_path = format!("{}.audiomux.mp4", video_path_str);
-
-            let output = app
-                .shell()
-                .sidecar("ffmpeg")
-                .map_err(|e| format!("Failed to load bundled FFmpeg sidecar: {e}"))?
-                .args([
-                    "-y",
-                    "-i", &video_path_str,
-                    "-i", &audio_path,
-                    "-c:v", "copy",          // copy video stream — no re-encode
-                    "-c:a", "aac",           // encode audio to AAC for MP4
-                    "-b:a", "192k",
-                    "-ar", "48000",          // normalize to video-friendly sample rate
-                    "-ac", "2",              // normalize to stereo
-                    "-shortest",             // trim to the shorter of video/audio
-                    "-movflags", "+faststart",
-                    &tmp_path,
-                ])
-                .output()
-                .await
-                .map_err(|e| format!("Failed to run bundled FFmpeg sidecar: {e}"))?;
-
-            if output.status.success() {
-                // Replace original with muxed version
-                std::fs::rename(&tmp_path, &video_path_str)
-                    .map_err(|e| format!("Failed to replace video with muxed version: {e}"))?;
-            } else {
-                let _ = std::fs::remove_file(&tmp_path);
-
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-
-                return Err(format!(
-                    "FFmpeg audio muxing failed.\n\nstatus: {:?}\n\nstderr:\n{}\n\nstdout:\n{}",
-                    output.status,
-                    stderr,
-                    stdout
-                ));
-            }
+        let mut sink = ffmpeg_sink::FfmpegSink::create(
+            &app,
+            &final_path,
+            output_size_w,
+            output_size_h,
+            fps,
+            bitrate_bps,
+            audio_path.as_deref(),
+            total_export_frames,
+        )?;
+        let mut enhanced_sink = EnhancingVideoSink { inner: &mut sink, width: output_size_w, height: output_size_h, pipeline: kaleidomo_core::enhancement::EnhancementPipeline::new(video_enhancement) };
+        if let Err(e) = kaleidomo_core::render_video_with_auto_backend(
+            &img,
+            settings,
+            video_settings,
+            &mut enhanced_sink,
+        ) {
+            return Err(format!("Video generation failed: {}", e));
         }
-    }
+    };
 
     Ok(format!("data:video/mp4"))
 }
@@ -1019,6 +1225,30 @@ fn gpu_available(state: tauri::State<'_, AppState>) -> bool {
 #[tauri::command]
 fn get_preview_ws_port(state: tauri::State<'_, AppState>) -> u16 {
     state.preview_ws_port
+}
+
+#[cfg(target_os = "macos")]
+fn begin_macos_shutdown(app: &tauri::AppHandle) {
+    static SHUTDOWN_STARTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    if SHUTDOWN_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+
+    // Let every WebView stop animation frames, WebSockets, media playback,
+    // and WASM/native preview engines before WebKit starts destroying them.
+    let _ = app.emit("kd://app-will-exit", ());
+
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // macOS 14 can trap inside WebPageProxy::~WebPageProxy while tearing
+        // down a busy WKWebView. The cleanup event above releases the app's
+        // resources; exiting directly then avoids WebKit's faulty destructor
+        // path. This only runs after an explicit close or quit request.
+        std::process::exit(0);
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1088,11 +1318,14 @@ pub fn run() {
                 license_sync_cooldown: AsyncMutex::new(cooldown_state),
                 loaded_gpu_image_path: Mutex::new(None),
                 last_version_fetch: AsyncMutex::new(ts),
+                live_enhancement: Arc::new(Mutex::new(None)),
                 cli_preset_path: cli_preset_path.clone(),
             });
             // LoopbackState is managed independently so that tauri::State<'_, LoopbackState>
             // resolves in start_loopback_capture / stop_loopback_capture / get_loopback_peak.
             app.manage(LoopbackState::new());
+            #[cfg(target_os = "macos")]
+            app.manage(native_preview_surface::NativePreviewSurfaceState::default());
 
             // Paths chosen through the Tauri dialog plugin are automatically
             // added to the fs plugin scope. A preset supplied on the command
@@ -1161,6 +1394,17 @@ pub fn run() {
         })
         .on_window_event(move |window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the main window does not necessarily emit
+                // RunEvent::ExitRequested while the hidden controls window is
+                // still alive. Intercept it before Tauri drops the WKWebView so
+                // the live-preview callbacks can shut down first.
+                #[cfg(target_os = "macos")]
+                if window.label() == "main" {
+                    api.prevent_close();
+                    begin_macos_shutdown(window.app_handle());
+                    return;
+                }
+
                 // A CLI/kiosk launch keeps the controls WebView hidden. If the
                 // main window is closed without exiting the app, that hidden
                 // controls window keeps the Tauri event loop (and kaleidomo.exe)
@@ -1202,6 +1446,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             generate_kaleidoscope,
+            preprocess_source_preview,
             generate_video,
             export_kaleidoscope,
             init_gpu,
@@ -1211,6 +1456,10 @@ pub fn run() {
             select_image,
             gpu_available,
             render_live_preview_frame,
+            native_preview_surface::mount_native_preview_surface,
+            native_preview_surface::unmount_native_preview_surface,
+            native_preview_surface::update_native_preview_surface,
+            native_preview_surface::present_native_preview_frame,
             get_preview_ws_port,
             license_data,
             is_unlocked,
@@ -1242,6 +1491,19 @@ pub fn run() {
             stop_loopback_capture,
             get_loopback_peak,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                // On macOS, destroying WKWebView while its live-preview
+                // WebSocket/requestAnimationFrame callbacks are still active can
+                // trip a WebKit WebPageProxy destructor assertion. Give both
+                // webviews a short, explicit teardown phase before the real exit.
+                if cfg!(target_os = "macos") && code.is_none() {
+                    api.prevent_exit();
+                    #[cfg(target_os = "macos")]
+                    begin_macos_shutdown(app);
+                }
+            }
+        });
 }

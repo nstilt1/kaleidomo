@@ -1,3 +1,4 @@
+// kaleidomo-core src-tauri/src/preview_server.rs
 //! Local WebSocket server for live-preview frame streaming.
 //!
 //! ## Why WebSocket + JPEG instead of IPC invoke + raw RGBA?
@@ -59,11 +60,43 @@ pub struct FrameRequest {
     pub rotation: f32,
     pub kaleido_type: String,
     pub hue_rotation: u32,
+    #[serde(default)]
+    pub recolor_enabled: bool,
+    #[serde(default)]
+    pub recolor_seed: String,
+    #[serde(default)]
+    pub recolor_mode: u8,
+    #[serde(default = "default_recolor_threshold")]
+    pub recolor_threshold: f32,
+    #[serde(default = "default_recolor_cell_size")]
+    pub recolor_cell_size: f32,
     pub img_width: u32,
     pub img_height: u32,
     /// JPEG quality 1-100. Frontend sends e.g. 85.
     #[serde(default = "default_quality")]
     pub jpeg_quality: u8,
+    // ── Enhancements (see `KaleidoSettings` in kaleidomo-core/src/lib.rs) ──
+    /// Bilinear texture filtering instead of nearest-neighbor. Default: `false`.
+    #[serde(default)]
+    pub anti_alias: u8,
+    /// Internal supersampling factor, `1`-`4` (`1` disables it). Default: `1`.
+    #[serde(default = "default_super_sample")]
+    pub super_sample: u8,
+    /// Corrects stretching of the pattern on non-square canvases. Default: `false`.
+    #[serde(default)]
+    pub aspect_correct: bool,
+    #[serde(default = "default_reconstruction")]
+    pub reconstruction_filter: String,
+    #[serde(default = "default_true")]
+    pub derivative_mipmapping: bool,
+    #[serde(default = "default_anisotropy")]
+    pub anisotropy_level: u8,
+    #[serde(default = "default_edge_filter")]
+    pub edge_post_process: String,
+    #[serde(default)]
+    pub taa_enabled: bool,
+    #[serde(default = "default_taa_feedback")]
+    pub taa_feedback_alpha: f32,
 }
 
 #[derive(Default)]
@@ -71,9 +104,22 @@ struct PreviewScratch {
     rgba: Vec<u8>,
     rgb: Vec<u8>,
     jpeg: Vec<u8>,
+    enhancement_config: Option<kaleidomo_core::enhancement::EnhancementConfig>,
+    enhancement_pipeline: Option<kaleidomo_core::enhancement::EnhancementPipeline>,
 }
 
 fn default_quality() -> u8 { 85 }
+
+/// Default for `FrameRequest::super_sample` so requests sent before this field
+/// existed still deserialize with supersampling disabled (`1`).
+fn default_super_sample() -> u8 { 1 }
+fn default_reconstruction() -> String { "bilinear".into() }
+fn default_true() -> bool { true }
+fn default_anisotropy() -> u8 { 1 }
+fn default_edge_filter() -> String { "disabled".into() }
+fn default_taa_feedback() -> f32 { 0.9 }
+fn default_recolor_threshold() -> f32 { 0.08 }
+fn default_recolor_cell_size() -> f32 { 64.0 }
 
 impl FrameRequest {
     fn to_kaleido_settings(&self) -> Result<KaleidoSettings, String> {
@@ -98,6 +144,16 @@ impl FrameRequest {
             triangle_rotation_rad: self.rotation,
             kaleido_type,
             hue_rotation: self.hue_rotation,
+            recolor_enabled: self.recolor_enabled,
+            recolor_seed: self.recolor_seed.clone(),
+            recolor_mode: self.recolor_mode,
+            recolor_threshold: self.recolor_threshold,
+            recolor_cell_size: self.recolor_cell_size,
+            anti_alias: self.anti_alias,
+            derivative_mipmapping: self.derivative_mipmapping,
+            anisotropy_level: self.anisotropy_level,
+            super_sample: self.super_sample.clamp(1, 4),
+            aspect_correct: self.aspect_correct,
         })
     }
 }
@@ -265,8 +321,30 @@ fn render_jpeg(
     let w = settings.output_size_w;
     let h = settings.output_size_h;
 
-    let rgba_len = (w as usize)
-        .checked_mul(h as usize)
+    // `super_sample`: render at `w/h * factor` on the GPU into a scratch buffer,
+    // then box-downsample back down to the requested preview size, mirroring
+    // the CPU/offline GPU wrappers in kaleidomo-core::rlib.
+    let factor = settings.super_sample.clamp(1, 4);
+    let (render_w, render_h) = (w * factor as u32, h * factor as u32);
+    let render_settings = if factor > 1 {
+        KaleidoSettings {
+            output_size_w: render_w,
+            output_size_h: render_h,
+            offset_x: settings.offset_x * factor as i32,
+            offset_y: settings.offset_y * factor as i32,
+            // `source_scale = width_over_2 / zoom` ties visible source
+            // content to the actual render width, which just grew by
+            // `factor` (render_w/h vs w/h) — without this, supersampling
+            // silently zoomed the preview out relative to `w x h`.
+            zoom: settings.zoom * factor as f32,
+            ..settings.clone()
+        }
+    } else {
+        settings.clone()
+    };
+
+    let rgba_len = (render_w as usize)
+        .checked_mul(render_h as usize)
         .and_then(|n| n.checked_mul(4))
         .ok_or("RGBA output dimensions overflow")?;
 
@@ -283,12 +361,37 @@ fn render_jpeg(
         let mut guard = gpu_arc.lock().map_err(|_| "mutex poisoned")?;
         let gpu = guard.as_mut().ok_or("GPU unavailable")?;
 
-        gpu.render_into_buffer(&settings, &mut scratch.rgba)
+        gpu.render_into_buffer(&render_settings, &mut scratch.rgba)
             .map_err(|e| e.to_string())?;
     }
 
-    for (src, dst) in scratch
-        .rgba
+    // Downsample in-place (into a local Vec, then copy back) when supersampling.
+    let rgba_resolved: std::borrow::Cow<[u8]> = if factor > 1 {
+        std::borrow::Cow::Owned(kaleidomo_core::downsample_box(&scratch.rgba, render_w, render_h, factor, w, h))
+    } else {
+        std::borrow::Cow::Borrowed(&scratch.rgba)
+    };
+
+    let enhancement_config = kaleidomo_core::enhancement::EnhancementConfig::from_wire(
+        &req.reconstruction_filter,
+        req.derivative_mipmapping,
+        req.anisotropy_level,
+        &req.edge_post_process,
+        req.taa_enabled,
+        req.taa_feedback_alpha,
+    );
+    if scratch.enhancement_config != Some(enhancement_config) {
+        scratch.enhancement_pipeline = Some(kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement_config));
+        scratch.enhancement_config = Some(enhancement_config);
+    }
+    let resolved_image = image::RgbaImage::from_raw(w, h, rgba_resolved.into_owned())
+        .ok_or("invalid resolved RGBA dimensions")?;
+    let enhanced = scratch.enhancement_pipeline.as_mut()
+        .expect("enhancement pipeline initialized")
+        .finish_frame(&resolved_image);
+    let rgba_final = enhanced.as_raw();
+
+    for (src, dst) in rgba_final
         .chunks_exact(4)
         .zip(scratch.rgb.chunks_exact_mut(3))
     {

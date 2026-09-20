@@ -73,8 +73,10 @@ dispatch2 = "0.3"
 # capture requires macOS 13+ at runtime and does not pull in the Swift-based
 # `apple-metal` dependency used by the higher-level `screencapturekit` crate.
 objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = ["NSResponder", "NSView", "NSWindow", "NSScrollView", "NSClipView", "objc2-quartz-core"] }
+objc2-quartz-core = { version = "0.3.2", features = ["CALayer"] }
 block2 = "0.6.2"
-objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSError", "NSObject", "NSString"] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSError", "NSObject", "NSString", "NSGeometry", "NSThread"] }
 objc2-core-foundation = "0.3.2"
 objc2-core-media = { version = "0.3.2", features = ["CMSampleBuffer", "CMBlockBuffer", "objc2-core-audio"] }
 objc2-core-audio-types = { version = "0.3.2", features = ["CoreAudioBaseTypes"] }
@@ -87,6 +89,7 @@ objc2-screen-capture-kit = { version = "0.3.2", features = [
     "SCShareableContent",
     "SCStream",
 ] }
+wgpu = { version = "29", default-features = false, features = ["std", "wgsl", "metal"] }
 
 # Linux — PipeWire monitor sources + ALSA input devices via cpal.
 # Build requirement: sudo apt install libasound2-dev
