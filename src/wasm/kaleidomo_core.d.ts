@@ -188,10 +188,10 @@ export interface InitOutput {
     readonly wasmvideosettings_set_orientation_fn: (a: number, b: number, c: number) => void;
     readonly wasmvideosettings_set_rotation_fn: (a: number, b: number, c: number) => void;
     readonly wasmvideosettings_set_zoom_fn: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_442: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_2238: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_443: (a: number, b: number, c: number) => void;
     readonly __wasm_bindgen_func_elem_2240: (a: number, b: number, c: number, d: number) => void;
-    readonly __wasm_bindgen_func_elem_793: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_2242: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_795: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;
