@@ -2,6 +2,10 @@
 
 All notable changes to Kaleidomo are documented here.
 
+### 1.3.2 — 2026-09-23
+
+- Fixed Windows WASM/WGPU bug that prevented the live preview from loading.
+
 ## 1.3 — 2026-09-20
 
 - Added multiple enhancement algorithms for anti-aliasing and supersampling.
