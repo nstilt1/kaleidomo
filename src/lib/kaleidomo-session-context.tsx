@@ -1,10 +1,12 @@
 // kaleidomo-session-context.tsx
 import React from "react";
+import { listen } from "@tauri-apps/api/event";
 
 export type ExportDurationMode = "audio" | "seconds" | "infinite";
 export type ReconstructionFilter = "nearest" | "bilinear" | "bicubic";
 export type AnisotropyLevel = 1 | 2 | 4 | 8 | 16;
 export type EdgePostProcess = "disabled" | "fxaa" | "smaa";
+export type VideoExportProgress = { currentFrame: number; totalFrames: number; percent: number };
 
 export type Settings = {
   x: number;
@@ -43,6 +45,7 @@ export type Settings = {
   zoom_start_offset: number;
   // Cycles per second — replaces num_zoom_loops / animation_duration
   zoom_cps: number;
+  zoomRateUnit: "cycles/s" | "s/cycle";
   // Rotation modulation
   rotation_range: number;
   rotation_start_offset: number;
@@ -139,6 +142,7 @@ export const DEFAULT_SETTINGS: Settings = {
   zoom_fn: "sin",
   zoom_start_offset: 0.0,
   zoom_cps: 0.0,
+  zoomRateUnit: "cycles/s",
   rotation_range: 360,
   rotation_start_offset: 0,
   rotation_fn: "sin",
@@ -200,6 +204,10 @@ type KaleidomoSessionContextValue = {
   setImgHeight: React.Dispatch<React.SetStateAction<number>>;
   isRendering: boolean;
   setIsRendering: React.Dispatch<React.SetStateAction<boolean>>;
+  isVideoExporting: boolean;
+  setIsVideoExporting: React.Dispatch<React.SetStateAction<boolean>>;
+  videoExportProgress: VideoExportProgress;
+  setVideoExportProgress: React.Dispatch<React.SetStateAction<VideoExportProgress>>;
   canUndo: boolean;
   canRedo: boolean;
   undo: () => void;
@@ -231,6 +239,16 @@ export function KaleidomoProvider({
   const [imgWidth, setImgWidth] = React.useState(0);
   const [imgHeight, setImgHeight] = React.useState(0);
   const [isRendering, setIsRendering] = React.useState(false);
+  const [isVideoExporting, setIsVideoExporting] = React.useState(false);
+  const [videoExportProgress, setVideoExportProgress] = React.useState<VideoExportProgress>({ currentFrame: 0, totalFrames: 0, percent: 0 });
+
+  React.useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<VideoExportProgress>("kd://video-export-progress", (event) => {
+      setVideoExportProgress(event.payload);
+    }).then((fn) => { unlisten = fn; }).catch(console.error);
+    return () => unlisten?.();
+  }, []);
   const stateRef = React.useRef<HistorySnapshot>({
     settings: DEFAULT_SETTINGS,
     count: 6,
@@ -346,6 +364,10 @@ export function KaleidomoProvider({
       setImgHeight,
       isRendering,
       setIsRendering,
+      isVideoExporting,
+      setIsVideoExporting,
+      videoExportProgress,
+      setVideoExportProgress,
       canUndo,
       canRedo,
       undo,
@@ -361,6 +383,8 @@ export function KaleidomoProvider({
       imgWidth,
       imgHeight,
       isRendering,
+      isVideoExporting,
+      videoExportProgress,
       historyVersion,
       canUndo,
       canRedo,

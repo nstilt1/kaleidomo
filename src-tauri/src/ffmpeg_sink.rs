@@ -20,9 +20,9 @@ use std::time::Instant;
 use kaleidomo_core::{VideoFrameSink, VideoSinkError};
 use tauri::AppHandle;
 use tauri::Emitter;
-use tauri_plugin_shell::process::CommandEvent;
-use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::process::CommandChild;
+use tauri_plugin_shell::process::CommandEvent;
 
 use crate::{log_info, log_warn};
 
@@ -234,7 +234,8 @@ impl FfmpegSink {
                     CommandEvent::Terminated(payload) => {
                         log_info!(
                             "[ffmpeg_sink] ffmpeg terminated: code={:?} signal={:?}",
-                            payload.code, payload.signal
+                            payload.code,
+                            payload.signal
                         );
                         if !sent {
                             sent = true;
@@ -317,8 +318,8 @@ impl VideoFrameSink for FfmpegSink {
         }
 
         self.frames_written += 1;
-        let percent = ((self.frames_written.saturating_mul(100) / self.total_frames)
-            .min(100)) as u8;
+        let percent =
+            ((self.frames_written.saturating_mul(100) / self.total_frames).min(100)) as u8;
         if percent != self.last_emitted_percent {
             self.last_emitted_percent = percent;
             let _ = self.app.emit(
@@ -339,7 +340,9 @@ impl VideoFrameSink for FfmpegSink {
             };
             log_info!(
                 "[ffmpeg_sink] fed {} frames to ffmpeg in {:.1}s ({:.1} fps feed rate)",
-                self.frames_written, elapsed, fps
+                self.frames_written,
+                elapsed,
+                fps
             );
         }
 
@@ -374,7 +377,10 @@ impl VideoFrameSink for FfmpegSink {
             FfmpegOutcome::Failure(msg) => {
                 let stderr = self.stderr_snapshot();
                 self.cleanup_temp();
-                Err(format!("FFmpeg video encoding failed: {msg}\n\nffmpeg stderr:\n{stderr}").into())
+                Err(
+                    format!("FFmpeg video encoding failed: {msg}\n\nffmpeg stderr:\n{stderr}")
+                        .into(),
+                )
             }
         }
     }

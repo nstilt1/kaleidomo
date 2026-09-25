@@ -2,6 +2,13 @@
 
 All notable changes to Kaleidomo are documented here.
 
+### 1.3.3 — 2026-09-24
+
+- Fixed export progress bar disappearing after switching pages.
+- Fixed zoom rates to accept different units.
+- Fixed zoom rates being rounded down to a whole number in live previews.
+- Fixed issue where Kaleidomo.exe would continue to run on Windows after closing it.
+
 ### 1.3.2 — 2026-09-23
 
 - Fixed Windows WASM/WGPU bug that prevented the live preview from loading.

@@ -58,12 +58,6 @@ type LoadedImage = {
   height: number;
 };
 
-type VideoExportProgress = {
-  currentFrame: number;
-  totalFrames: number;
-  percent: number;
-};
-
 const tryLoadImageFromPath = async (path: string): Promise<LoadedImage> => {
   const assetUrl = convertFileSrc(path);
   const img = new Image();
@@ -236,6 +230,7 @@ const VIDEO_SETTING_KEYS = [
   "zoom_fn",
   "zoom_start_offset",
   "zoom_cps",
+  "zoomRateUnit",
   "rotation_range",
   "rotation_start_offset",
   "rotationPhaseUnit",
@@ -363,6 +358,7 @@ function migrateVideoSettings(incoming: unknown): Partial<Settings> {
   migrated.orientationSpeedUnit = incoming.orientationSpeedUnit === "s/cycle" || incoming.orientationSpeedUnit === "cycles/s" ? incoming.orientationSpeedUnit : "px/s";
   migrated.rotationRateUnit = incoming.rotationRateUnit === "degrees/s" || incoming.rotationRateUnit === "s/cycle" ? incoming.rotationRateUnit : "cycles/s";
   migrated.colorRateUnit = incoming.colorRateUnit === "degrees/s" || incoming.colorRateUnit === "s/cycle" ? incoming.colorRateUnit : "cycles/s";
+  migrated.zoomRateUnit = incoming.zoomRateUnit === "s/cycle" ? "s/cycle" : "cycles/s";
   if (incoming.rotationPhaseUnit !== "degrees" && typeof incoming.rotation_start_offset === "number") {
     migrated.rotation_start_offset = ((incoming.rotation_start_offset % 1 + 1) % 1) * 360;
   }
@@ -513,6 +509,10 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
     setImgHeight,
     isRendering,
     setIsRendering,
+    isVideoExporting,
+    setIsVideoExporting,
+    videoExportProgress,
+    setVideoExportProgress,
   } = useKaleidomoSession();
 
   // Sync settings bidirectionally with the floating controls window.
@@ -557,24 +557,6 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
   // 720 is the safe default (70 MB/s at 20fps with reusable ImageData).
   const [nativePreviewRes, setNativePreviewRes] = useState<512 | 720 | 1080>(720);
   const [audioPlaying, setAudioPlaying] = useState(false);
-  const [isVideoExporting, setIsVideoExporting] = useState(false);
-  const [videoExportProgress, setVideoExportProgress] = useState<VideoExportProgress>({
-    currentFrame: 0,
-    totalFrames: 0,
-    percent: 0,
-  });
-  const [showVideoExportProgress, setShowVideoExportProgress] = useState(false);
-
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void listen<VideoExportProgress>("kd://video-export-progress", (event) => {
-      setVideoExportProgress(event.payload);
-    }).then((fn) => {
-      unlisten = fn;
-    }).catch(console.error);
-
-    return () => unlisten?.();
-  }, []);
 
   useEffect(() => {
     const stopForShutdown = () => {
@@ -678,7 +660,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       vs.set_zoom_fn(settings.zoom_fn);
       vs.zoom_start_offset = settings.zoom_start_offset;
       // WASM shim: pass zoom_cps as num_zoom_loops since animation_duration=1.0
-      vs.num_zoom_loops = settings.zoom_cps;
+      vs.num_zoom_loops = rateToCycles(settings.zoom_cps, settings.zoomRateUnit);
       // orientationPhase is in degrees; convert to [0,1) fraction for the WASM engine
       vs.orientation_start_offset = settings.orientationPhase / 360;
       vs.audio_reactive_enabled = settings.audioReactiveEnabled;
@@ -1113,7 +1095,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       vs.set_zoom_fn(settings.zoom_fn);
       vs.zoom_start_offset = settings.zoom_start_offset;
       // WASM shim: pass zoom_cps as num_zoom_loops since animation_duration=1.0
-      vs.num_zoom_loops = settings.zoom_cps;
+      vs.num_zoom_loops = rateToCycles(settings.zoom_cps, settings.zoomRateUnit);
       // orientationPhase is in degrees; convert to [0,1) fraction for the WASM engine
       vs.orientation_start_offset = settings.orientationPhase / 360;
       vs.audio_reorientation_amount = settings.audioReorientationAmount;
@@ -2200,7 +2182,6 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
 
   const handleVideo = async () => {
     if (isVideoExporting) {
-      setShowVideoExportProgress((visible) => !visible);
       return;
     }
 
@@ -2238,7 +2219,6 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
     ).effectiveZoom;
 
     setIsVideoExporting(true);
-    setShowVideoExportProgress(false);
     setVideoExportProgress({ currentFrame: 0, totalFrames: 0, percent: 0 });
 
     try {
@@ -2287,7 +2267,7 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
         zoomFn: settings.zoom_fn,
         zoomStartOffset: settings.zoom_start_offset,
         // Convert cps back to cycles for the Rust command (cycles = cps * duration)
-        numZoomLoops: Math.max(1, Math.round(settings.zoom_cps * exportDurationS)),
+        numZoomLoops: rateToCycles(settings.zoom_cps, settings.zoomRateUnit) * exportDurationS,
         imgWidth,
         imgHeight,
         animationDuration: exportDurationS,
@@ -2329,6 +2309,14 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
       }
     } finally {
       setIsVideoExporting(false);
+    }
+  };
+
+  const handleCancelVideo = async () => {
+    try {
+      await invoke("cancel_video_export");
+    } catch (error) {
+      console.error("Failed to cancel video export", error);
     }
   };
 
@@ -2621,19 +2609,20 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
                 </SelectContent>
               </Select>
               <NumberSliderInput label="Zoom Offset" value={settings.zoom_start_offset} min={0.0} max={1.0} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, zoom_start_offset: v }))} unit="cycles" roundToInteger={false} />
-              <NumberSliderInput label="Zoom Rate" value={settings.zoom_cps} min={0} max={10} step={0.01} onChange={(v) => setSettings((s) => ({ ...s, zoom_cps: v }))} unit="cycles/s" roundToInteger={false} />
+              <Select value={settings.zoomRateUnit} onValueChange={(unit: Settings["zoomRateUnit"]) => setSettings((s) => ({ ...s, zoomRateUnit: unit, zoom_cps: cyclesToRate(rateToCycles(s.zoom_cps, s.zoomRateUnit), unit) }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cycles/s">Cycles per second</SelectItem><SelectItem value="s/cycle">Seconds per cycle</SelectItem></SelectContent></Select>
+              <NumberSliderInput label="Zoom Rate" value={settings.zoom_cps} min={0} max={settings.zoomRateUnit === "s/cycle" ? 600 : 10} step={settings.zoomRateUnit === "s/cycle" ? 0.1 : 0.01} onChange={(v) => setSettings((s) => ({ ...s, zoom_cps: v }))} unit={settings.zoomRateUnit} roundToInteger={false} presetValues={settings.zoomRateUnit === "s/cycle" ? [0, 1, 2, 5, 10] : [0, 0.25, 0.5, 1, 2]} />
 
               <div className="grid grid-cols-2 gap-2 pt-2">
                 <Button
                   onClick={handleVideo}
                   className="bg-primary"
-                  aria-expanded={isVideoExporting ? showVideoExportProgress : undefined}
+                  disabled={isVideoExporting}
                 >
                   {isVideoExporting ? "Exporting…" : "Export MP4"}
                 </Button>
                 <Button variant="outline" size="sm" onClick={resetVideoSettings}>Reset</Button>
               </div>
-              {isVideoExporting && showVideoExportProgress && (
+              {isVideoExporting && (
                 <div className="space-y-1.5" role="status" aria-live="polite">
                   <div className="flex justify-between text-xs text-muted-foreground">
                     <span>{videoExportProgress.percent >= 100 ? "Finalizing video…" : "Rendering video…"}</span>
@@ -2656,6 +2645,9 @@ function Kaleidomo({ controlsOnly = false }: { controlsOnly?: boolean }) {
                       Frame {Math.min(videoExportProgress.currentFrame, videoExportProgress.totalFrames).toLocaleString()} of {videoExportProgress.totalFrames.toLocaleString()}
                     </p>
                   )}
+                  <Button variant="outline" size="sm" className="w-full" onClick={() => void handleCancelVideo()}>
+                    Cancel Export
+                  </Button>
                 </div>
               )}
               <div className="grid grid-cols-2 gap-1">

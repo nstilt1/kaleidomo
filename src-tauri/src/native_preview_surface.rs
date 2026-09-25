@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use objc2::{define_class, msg_send, rc::Retained, MainThreadOnly};
+use objc2::{MainThreadOnly, define_class, msg_send, rc::Retained};
 use objc2_app_kit::{NSClipView, NSScrollView, NSView};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use tauri::{State, WebviewWindow};
@@ -62,7 +62,9 @@ pub struct NativePreviewRect {
     pub visible: bool,
 }
 
-fn default_visible() -> bool { true }
+fn default_visible() -> bool {
+    true
+}
 
 fn apply_view_clipping(view: &NSView, visible: bool) {
     view.setHidden(!visible);
@@ -119,10 +121,13 @@ fn webkit_viewport(webview: &NSView) -> Result<Retained<NSClipView>, String> {
 
 async fn webview_ptr(window: &WebviewWindow) -> Result<usize, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    window.with_webview(move |webview| {
-        let _ = tx.send(webview.inner() as usize);
-    }).map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "failed to obtain WKWebView pointer".to_string())
+    window
+        .with_webview(move |webview| {
+            let _ = tx.send(webview.inner() as usize);
+        })
+        .map_err(|e| e.to_string())?;
+    rx.await
+        .map_err(|_| "failed to obtain WKWebView pointer".to_string())
 }
 
 #[tauri::command]
@@ -197,7 +202,8 @@ pub async fn mount_native_preview_surface(
         let _ = tx.send(result);
     }).map_err(|e| e.to_string())?;
 
-    rx.await.map_err(|_| "native preview mount was cancelled".to_string())?
+    rx.await
+        .map_err(|_| "native preview mount was cancelled".to_string())?
 }
 
 #[tauri::command]
@@ -207,17 +213,24 @@ pub async fn unmount_native_preview_surface(
 ) -> Result<(), String> {
     let native_inner = Arc::clone(&native.inner);
     let (tx, rx) = tokio::sync::oneshot::channel();
-    window.run_on_main_thread(move || {
-        let result = (|| -> Result<(), String> {
-            if let Some(mounted) = native_inner.lock().map_err(|_| "native preview mutex poisoned")?.take() {
-                let stage = unsafe { &*(mounted.stage_ptr as *const NSView) };
-                stage.removeFromSuperview();
-            }
-            Ok(())
-        })();
-        let _ = tx.send(result);
-    }).map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "native preview unmount was cancelled".to_string())?
+    window
+        .run_on_main_thread(move || {
+            let result = (|| -> Result<(), String> {
+                if let Some(mounted) = native_inner
+                    .lock()
+                    .map_err(|_| "native preview mutex poisoned")?
+                    .take()
+                {
+                    let stage = unsafe { &*(mounted.stage_ptr as *const NSView) };
+                    stage.removeFromSuperview();
+                }
+                Ok(())
+            })();
+            let _ = tx.send(result);
+        })
+        .map_err(|e| e.to_string())?;
+    rx.await
+        .map_err(|_| "native preview unmount was cancelled".to_string())?
 }
 
 #[tauri::command]
@@ -231,33 +244,40 @@ pub async fn update_native_preview_surface(
     let gpu_arc = Arc::clone(&app.gpu_arc);
     let webview = webview_ptr(&window).await?;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    window.run_on_main_thread(move || {
-        let result = (|| -> Result<(), String> {
-            let webview = unsafe { &*(webview as *const NSView) };
-            let viewport = webkit_viewport(webview)?;
-            let mut mounted = native_inner.lock().map_err(|_| "native preview mutex poisoned")?;
-            let mounted = mounted.as_mut().ok_or("native preview surface is not mounted")?;
-            let stage = unsafe { &*(mounted.stage_ptr as *const NSView) };
-            stage.setFrame(appkit_frame(&viewport, &rect));
-            apply_view_clipping(stage, rect.visible);
-            let view = unsafe { &*(mounted.view_ptr as *const NSView) };
-            view.setFrame(content_frame(&rect));
+    window
+        .run_on_main_thread(move || {
+            let result = (|| -> Result<(), String> {
+                let webview = unsafe { &*(webview as *const NSView) };
+                let viewport = webkit_viewport(webview)?;
+                let mut mounted = native_inner
+                    .lock()
+                    .map_err(|_| "native preview mutex poisoned")?;
+                let mounted = mounted
+                    .as_mut()
+                    .ok_or("native preview surface is not mounted")?;
+                let stage = unsafe { &*(mounted.stage_ptr as *const NSView) };
+                stage.setFrame(appkit_frame(&viewport, &rect));
+                apply_view_clipping(stage, rect.visible);
+                let view = unsafe { &*(mounted.view_ptr as *const NSView) };
+                view.setFrame(content_frame(&rect));
 
-            let dpr = rect.device_pixel_ratio.clamp(1.0, 4.0);
-            let width = (rect.content_width * dpr).round().max(1.0) as u32;
-            let height = (rect.content_height * dpr).round().max(1.0) as u32;
-            if mounted.config.width != width || mounted.config.height != height {
-                mounted.config.width = width;
-                mounted.config.height = height;
-                let gpu = gpu_arc.lock().map_err(|_| "GPU mutex poisoned")?;
-                let gpu = gpu.as_ref().ok_or("GPU backend unavailable")?;
-                gpu.configure_surface(&mounted.surface, &mounted.config);
-            }
-            Ok(())
-        })();
-        let _ = tx.send(result);
-    }).map_err(|e| e.to_string())?;
-    rx.await.map_err(|_| "native preview layout update was cancelled".to_string())?
+                let dpr = rect.device_pixel_ratio.clamp(1.0, 4.0);
+                let width = (rect.content_width * dpr).round().max(1.0) as u32;
+                let height = (rect.content_height * dpr).round().max(1.0) as u32;
+                if mounted.config.width != width || mounted.config.height != height {
+                    mounted.config.width = width;
+                    mounted.config.height = height;
+                    let gpu = gpu_arc.lock().map_err(|_| "GPU mutex poisoned")?;
+                    let gpu = gpu.as_ref().ok_or("GPU backend unavailable")?;
+                    gpu.configure_surface(&mounted.surface, &mounted.config);
+                }
+                Ok(())
+            })();
+            let _ = tx.send(result);
+        })
+        .map_err(|e| e.to_string())?;
+    rx.await
+        .map_err(|_| "native preview layout update was cancelled".to_string())?
 }
 
 #[tauri::command]
@@ -267,8 +287,12 @@ pub fn present_native_preview_frame(
     params: LivePreviewParams,
 ) -> Result<(), String> {
     let mut settings = params.to_kaleido_settings()?;
-    settings.triangle_center_x = settings.triangle_center_x.clamp(0.0, params.img_width.saturating_sub(1) as f32);
-    settings.triangle_center_y = settings.triangle_center_y.clamp(0.0, params.img_height.saturating_sub(1) as f32);
+    settings.triangle_center_x = settings
+        .triangle_center_x
+        .clamp(0.0, params.img_width.saturating_sub(1) as f32);
+    settings.triangle_center_y = settings
+        .triangle_center_y
+        .clamp(0.0, params.img_height.saturating_sub(1) as f32);
 
     let factor = kaleidomo_core::safe_super_sample(
         settings.super_sample,
@@ -284,8 +308,13 @@ pub fn present_native_preview_frame(
         settings.super_sample = 1;
     }
 
-    let mut mounted = native.inner.lock().map_err(|_| "native preview mutex poisoned")?;
-    let mounted = mounted.as_mut().ok_or("native preview surface is not mounted")?;
+    let mut mounted = native
+        .inner
+        .lock()
+        .map_err(|_| "native preview mutex poisoned")?;
+    let mounted = mounted
+        .as_mut()
+        .ok_or("native preview surface is not mounted")?;
     let frame = match mounted.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(frame)
         | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -295,10 +324,16 @@ pub fn present_native_preview_frame(
             gpu.configure_surface(&mounted.surface, &mounted.config);
             return Ok(());
         }
-        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
-        wgpu::CurrentSurfaceTexture::Validation => return Err("native preview surface validation error".into()),
+        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+            return Ok(());
+        }
+        wgpu::CurrentSurfaceTexture::Validation => {
+            return Err("native preview surface validation error".into());
+        }
     };
-    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let view = frame
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
     let mut gpu = app.gpu_arc.lock().map_err(|_| "GPU mutex poisoned")?;
     let gpu = gpu.as_mut().ok_or("GPU backend unavailable")?;
     gpu.render_directly_to_view_with_internal_uniform(&settings, &view, mounted.config.format)

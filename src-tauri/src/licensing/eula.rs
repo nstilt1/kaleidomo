@@ -1,7 +1,7 @@
-use serde::{Serialize, Deserialize};
-use tauri::Manager;
 use crate::fs;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use tauri::Manager;
 
 const EULA_VERSION: &str = "2026-06-03";
 const EULA_TEXT: &str = include_str!("../../resources/EULA.txt");
@@ -41,21 +41,36 @@ fn load_eula_acceptance(app: &tauri::AppHandle) -> Result<EulaAcceptanceRecord, 
         return Ok(EulaAcceptanceRecord::default());
     }
 
-    let contents = fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read EULA acceptance file '{}': {e}", path.display()))?;
+    let contents = fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "failed to read EULA acceptance file '{}': {e}",
+            path.display()
+        )
+    })?;
 
-    serde_json::from_str::<EulaAcceptanceRecord>(&contents)
-        .map_err(|e| format!("failed to parse EULA acceptance file '{}': {e}", path.display()))
+    serde_json::from_str::<EulaAcceptanceRecord>(&contents).map_err(|e| {
+        format!(
+            "failed to parse EULA acceptance file '{}': {e}",
+            path.display()
+        )
+    })
 }
 
-fn save_eula_acceptance(app: &tauri::AppHandle, record: &EulaAcceptanceRecord) -> Result<(), String> {
+fn save_eula_acceptance(
+    app: &tauri::AppHandle,
+    record: &EulaAcceptanceRecord,
+) -> Result<(), String> {
     let path = eula_acceptance_path(app)?;
 
     let json = serde_json::to_string_pretty(record)
         .map_err(|e| format!("failed to serialize EULA acceptance record: {e}"))?;
 
-    fs::write(&path, json)
-        .map_err(|e| format!("failed to write EULA acceptance file '{}': {e}", path.display()))
+    fs::write(&path, json).map_err(|e| {
+        format!(
+            "failed to write EULA acceptance file '{}': {e}",
+            path.display()
+        )
+    })
 }
 
 #[tauri::command]

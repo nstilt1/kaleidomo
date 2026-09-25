@@ -46,11 +46,11 @@
 //   })
 //   recv result_rx → propagate Err
 
-use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
-    Arc, Mutex,
-};
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU32, Ordering},
+};
 use tauri::AppHandle;
 
 // ── Shared state ─────────────────────────────────────────────────────────────
@@ -138,8 +138,8 @@ mod platform {
         }
 
         // Also offer regular input devices (microphone, line-in).
-        let host = cpal::host_from_id(cpal::HostId::Wasapi)
-            .unwrap_or_else(|_| cpal::default_host());
+        let host =
+            cpal::host_from_id(cpal::HostId::Wasapi).unwrap_or_else(|_| cpal::default_host());
         if let Ok(devices) = host.input_devices() {
             for d in devices {
                 if let Ok(name) = d.name() {
@@ -189,7 +189,7 @@ mod platform {
         // stop_clone is what we hand to the data callback (innermost closure).
         // The keepalive loop inside each spawn branch gets its own Arc::clone too,
         // so the original `stop` is never moved — only cloned into each closure.
-        let stop_ret   = Arc::clone(&stop);
+        let stop_ret = Arc::clone(&stop);
         let stop_clone = Arc::clone(&stop);
 
         // Oneshot channel: the audio thread sends Ok(()) on successful stream
@@ -209,25 +209,37 @@ mod platform {
                 // All cpal calls happen here — stream never leaves this thread.
                 let host = match cpal::host_from_id(cpal::HostId::Wasapi) {
                     Ok(h) => h,
-                    Err(e) => { let _ = result_tx.send(Err(format!("WASAPI host unavailable: {e}"))); return; }
+                    Err(e) => {
+                        let _ = result_tx.send(Err(format!("WASAPI host unavailable: {e}")));
+                        return;
+                    }
                 };
                 let device = match host.default_output_device() {
                     Some(d) => d,
-                    None => { let _ = result_tx.send(Err("no default output device".into())); return; }
+                    None => {
+                        let _ = result_tx.send(Err("no default output device".into()));
+                        return;
+                    }
                 };
                 let config = match device.default_output_config() {
                     Ok(c) => c,
-                    Err(e) => { let _ = result_tx.send(Err(format!("output config error: {e}"))); return; }
+                    Err(e) => {
+                        let _ = result_tx.send(Err(format!("output config error: {e}")));
+                        return;
+                    }
                 };
 
                 let mut smoothed = 0f32;
                 let stream = match device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _| {
-                        if stop_clone.load(Ordering::Relaxed) { return; }
+                        if stop_clone.load(Ordering::Relaxed) {
+                            return;
+                        }
                         // RMS of the block, exponentially smoothed.
                         let rms = (data.iter().map(|&s| s * s).sum::<f32>()
-                            / data.len().max(1) as f32).sqrt();
+                            / data.len().max(1) as f32)
+                            .sqrt();
                         smoothed = smoothed * 0.9 + rms * 0.1;
                         store_peak(&peak_clone, smoothed * 2.0);
                     },
@@ -235,7 +247,10 @@ mod platform {
                     None,
                 ) {
                     Ok(s) => s,
-                    Err(e) => { let _ = result_tx.send(Err(format!("build_input_stream error: {e}"))); return; }
+                    Err(e) => {
+                        let _ = result_tx.send(Err(format!("build_input_stream error: {e}")));
+                        return;
+                    }
                 };
 
                 if let Err(e) = stream.play() {
@@ -256,31 +271,46 @@ mod platform {
         } else {
             // Named input device (microphone, line-in, etc.)
             // Strip the "input:" prefix that list_sources adds as a namespace.
-            let device_name = source_id.strip_prefix("input:").unwrap_or(source_id).to_owned();
+            let device_name = source_id
+                .strip_prefix("input:")
+                .unwrap_or(source_id)
+                .to_owned();
             let peak_clone = Arc::clone(&peak);
             let stop_loop = Arc::clone(&stop);
             std::thread::spawn(move || {
                 let host = cpal::default_host();
-                let device = match host.input_devices()
-                    .map_err(|e| e.to_string())
-                    .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
-                        .ok_or_else(|| format!("device '{}' not found", device_name)))
-                {
-                    Ok(d) => d,
-                    Err(e) => { let _ = result_tx.send(Err(e)); return; }
-                };
+                let device =
+                    match host
+                        .input_devices()
+                        .map_err(|e| e.to_string())
+                        .and_then(|mut devs| {
+                            devs.find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
+                                .ok_or_else(|| format!("device '{}' not found", device_name))
+                        }) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            let _ = result_tx.send(Err(e));
+                            return;
+                        }
+                    };
                 let config = match device.default_input_config() {
                     Ok(c) => c,
-                    Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+                    Err(e) => {
+                        let _ = result_tx.send(Err(e.to_string()));
+                        return;
+                    }
                 };
 
                 let mut smoothed = 0f32;
                 let stream = match device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _| {
-                        if stop_clone.load(Ordering::Relaxed) { return; }
+                        if stop_clone.load(Ordering::Relaxed) {
+                            return;
+                        }
                         let rms = (data.iter().map(|&s| s * s).sum::<f32>()
-                            / data.len().max(1) as f32).sqrt();
+                            / data.len().max(1) as f32)
+                            .sqrt();
                         smoothed = smoothed * 0.9 + rms * 0.1;
                         store_peak(&peak_clone, smoothed * 2.0);
                     },
@@ -288,7 +318,10 @@ mod platform {
                     None,
                 ) {
                     Ok(s) => s,
-                    Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+                    Err(e) => {
+                        let _ = result_tx.send(Err(e.to_string()));
+                        return;
+                    }
                 };
 
                 if let Err(e) = stream.play() {
@@ -307,10 +340,14 @@ mod platform {
         }
 
         // Block until the audio thread reports success or failure.
-        result_rx.recv()
+        result_rx
+            .recv()
             .map_err(|_| "audio thread exited before signalling".to_string())??;
 
-        Ok(LoopbackSession { stop: stop_ret, pid: None })
+        Ok(LoopbackSession {
+            stop: stop_ret,
+            pid: None,
+        })
     }
 }
 
@@ -325,7 +362,7 @@ mod platform {
     use dispatch2::{DispatchQueue, DispatchQueueAttr};
     use objc2::rc::Retained;
     use objc2::runtime::ProtocolObject;
-    use objc2::{define_class, msg_send, AnyThread, DefinedClass};
+    use objc2::{AnyThread, DefinedClass, define_class, msg_send};
     use objc2_core_audio_types::{AudioBuffer, AudioBufferList, AudioStreamBasicDescription};
     use objc2_core_foundation::CFRetained;
     use objc2_core_media::{
@@ -333,19 +370,18 @@ mod platform {
     };
     use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol, NSString};
     use objc2_screen_capture_kit::{
-        SCContentFilter, SCRunningApplication, SCShareableContent, SCStream,
-        SCStreamConfiguration, SCStreamOutput, SCStreamOutputType, SCWindow,
+        SCContentFilter, SCRunningApplication, SCShareableContent, SCStream, SCStreamConfiguration,
+        SCStreamOutput, SCStreamOutputType, SCWindow,
     };
     use std::ffi::c_void;
-    use std::mem::{size_of, MaybeUninit};
+    use std::mem::{MaybeUninit, size_of};
     use std::ptr;
     use std::ptr::NonNull;
     use std::slice;
     use std::time::{Duration, Instant};
     use tauri::Emitter;
 
-    const SCREEN_CAPTURE_PERMISSION_HINT: &str =
-        "Grant Kaleidomo access in System Settings → Privacy & Security → Screen & System Audio Recording, then restart the app.";
+    const SCREEN_CAPTURE_PERMISSION_HINT: &str = "Grant Kaleidomo access in System Settings → Privacy & Security → Screen & System Audio Recording, then restart the app.";
 
     // Apps launched via Finder/double-click have no terminal attached, so plain
     // `eprintln!` output goes nowhere and never shows up in Console.app — only
@@ -407,8 +443,14 @@ mod platform {
                     return;
                 };
 
-                if !self.ivars().logged_first_buffer.swap(true, Ordering::Relaxed) {
-                    dbg_log(&format!("[sck] received first decodable audio buffer; rms={rms:.6}"));
+                if !self
+                    .ivars()
+                    .logged_first_buffer
+                    .swap(true, Ordering::Relaxed)
+                {
+                    dbg_log(&format!(
+                        "[sck] received first decodable audio buffer; rms={rms:.6}"
+                    ));
                 }
                 if rms > 0.000_001
                     && !self
@@ -416,7 +458,9 @@ mod platform {
                         .logged_first_nonzero_peak
                         .swap(true, Ordering::Relaxed)
                 {
-                    dbg_log(&format!("[sck] received first nonzero system-audio peak; rms={rms:.6}"));
+                    dbg_log(&format!(
+                        "[sck] received first nonzero system-audio peak; rms={rms:.6}"
+                    ));
                 }
 
                 if let Ok(mut smoothed) = self.ivars().smoothed.lock() {
@@ -430,10 +474,10 @@ mod platform {
                     if let Ok(mut last_emit) = self.ivars().last_emit.lock() {
                         if last_emit.elapsed() >= Duration::from_millis(30) {
                             *last_emit = Instant::now();
-                            let _ = self.ivars().app.emit(
-                                "kd://loopback-peak",
-                                serde_json::json!({ "peak": peak }),
-                            );
+                            let _ = self
+                                .ivars()
+                                .app
+                                .emit("kd://loopback-peak", serde_json::json!({ "peak": peak }));
                         }
                     }
                 }
@@ -557,7 +601,9 @@ mod platform {
             )
         };
         if status != 0 {
-            dbg_log(&format!("[sck] failed to get AudioBufferList: OSStatus {status}"));
+            dbg_log(&format!(
+                "[sck] failed to get AudioBufferList: OSStatus {status}"
+            ));
             return None;
         }
 
@@ -602,22 +648,14 @@ mod platform {
             }
 
             let bytes = unsafe {
-                slice::from_raw_parts(
-                    buffer.mData.cast::<u8>(),
-                    buffer.mDataByteSize as usize,
-                )
+                slice::from_raw_parts(buffer.mData.cast::<u8>(), buffer.mDataByteSize as usize)
             };
 
             for chunk in bytes.chunks_exact(bytes_per_sample) {
                 let sample = if is_float {
                     decode_float_sample(chunk, bits, is_big_endian)
                 } else if is_signed_integer {
-                    decode_signed_integer_sample(
-                        chunk,
-                        bits,
-                        is_big_endian,
-                        is_aligned_high,
-                    )
+                    decode_signed_integer_sample(chunk, bits, is_big_endian, is_aligned_high)
                 } else {
                     None
                 };
@@ -649,8 +687,7 @@ mod platform {
             }
             64 if bytes.len() >= 8 => {
                 let raw = [
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
                 ];
                 let value = if big_endian {
                     f64::from_bits(u64::from_be_bytes(raw))
@@ -690,7 +727,11 @@ mod platform {
         }
 
         let sign_bit = 1u32 << (bits - 1);
-        let mask = if bits == 32 { u32::MAX } else { (1u32 << bits) - 1 };
+        let mask = if bits == 32 {
+            u32::MAX
+        } else {
+            (1u32 << bits) - 1
+        };
         raw &= mask;
 
         let signed = if raw & sign_bit != 0 {
@@ -716,29 +757,31 @@ mod platform {
     /// that +1 retain count with Retained::from_raw.
     fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<usize, String>>(1);
-        let block = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
-            if !error.is_null() {
-                let _ = tx.send(Err(error_string(error)));
-                return;
-            }
-            if content.is_null() {
-                let _ = tx.send(Err("ScreenCaptureKit returned no shareable content".into()));
-                return;
-            }
+        let block = RcBlock::new(
+            move |content: *mut SCShareableContent, error: *mut NSError| {
+                if !error.is_null() {
+                    let _ = tx.send(Err(error_string(error)));
+                    return;
+                }
+                if content.is_null() {
+                    let _ = tx.send(Err("ScreenCaptureKit returned no shareable content".into()));
+                    return;
+                }
 
-            // SAFETY: `content` is valid for the duration of the callback. Retain
-            // it before sending the address to the waiting thread.
-            let retained = unsafe { Retained::retain(content) };
-            match retained {
-                Some(retained) => {
-                    let raw = Retained::into_raw(retained) as usize;
-                    let _ = tx.send(Ok(raw));
+                // SAFETY: `content` is valid for the duration of the callback. Retain
+                // it before sending the address to the waiting thread.
+                let retained = unsafe { Retained::retain(content) };
+                match retained {
+                    Some(retained) => {
+                        let raw = Retained::into_raw(retained) as usize;
+                        let _ = tx.send(Ok(raw));
+                    }
+                    None => {
+                        let _ = tx.send(Err("failed to retain SCShareableContent".into()));
+                    }
                 }
-                None => {
-                    let _ = tx.send(Err("failed to retain SCShareableContent".into()));
-                }
-            }
-        });
+            },
+        );
 
         unsafe {
             SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
@@ -748,9 +791,9 @@ mod platform {
             );
         }
 
-        let raw = rx
-            .recv_timeout(Duration::from_secs(20))
-            .map_err(|_| format!("ScreenCaptureKit content request timed out. {SCREEN_CAPTURE_PERMISSION_HINT}"))??;
+        let raw = rx.recv_timeout(Duration::from_secs(20)).map_err(|_| {
+            format!("ScreenCaptureKit content request timed out. {SCREEN_CAPTURE_PERMISSION_HINT}")
+        })??;
 
         // SAFETY: The callback transferred a +1 retain count with into_raw.
         unsafe { Retained::from_raw(raw as *mut SCShareableContent) }
@@ -858,7 +901,8 @@ mod platform {
                 })?;
                 dbg_log(&format!(
                     "[sck] shareable content resolved; capture mode={}",
-                    pid.map(|p| format!("app pid={p}")).unwrap_or_else(|| "system".to_string())
+                    pid.map(|p| format!("app pid={p}"))
+                        .unwrap_or_else(|| "system".to_string())
                 ));
 
                 let displays = unsafe { content.displays() };
@@ -873,10 +917,11 @@ mod platform {
                         .to_vec()
                         .into_iter()
                         .find(|app| unsafe { app.processID() as u32 == target_pid })
-                        .ok_or_else(|| format!("application with pid {target_pid} is no longer available"))?;
-                    let included = NSArray::<SCRunningApplication>::from_retained_slice(&[
-                        application,
-                    ]);
+                        .ok_or_else(|| {
+                            format!("application with pid {target_pid} is no longer available")
+                        })?;
+                    let included =
+                        NSArray::<SCRunningApplication>::from_retained_slice(&[application]);
                     unsafe {
                         SCContentFilter::initWithDisplay_includingApplications_exceptingWindows(
                             SCContentFilter::alloc(),
@@ -907,11 +952,7 @@ mod platform {
                     configuration.setQueueDepth(3);
                 }
 
-                let output = AudioOutput::new(
-                    app_thread,
-                    peak_thread,
-                    Arc::clone(&stop_thread),
-                );
+                let output = AudioOutput::new(app_thread, peak_thread, Arc::clone(&stop_thread));
                 let stream = unsafe {
                     SCStream::initWithFilter_configuration_delegate(
                         SCStream::alloc(),
@@ -949,7 +990,11 @@ mod platform {
                     },
                     "start",
                 )
-                .map_err(|error| format!("ScreenCaptureKit capture failed: {error}. {SCREEN_CAPTURE_PERMISSION_HINT}"))?;
+                .map_err(|error| {
+                    format!(
+                        "ScreenCaptureKit capture failed: {error}. {SCREEN_CAPTURE_PERMISSION_HINT}"
+                    )
+                })?;
                 dbg_log("[sck] startCapture completed successfully; waiting for sample buffers");
 
                 result_tx
@@ -1110,13 +1155,19 @@ mod platform {
         }
         // If no monitor source was listed (ALSA without PipeWire),
         // suggest the user install PipeWire.
-        if !sources.iter().any(|s| matches!(s.kind, AudioSourceKind::SystemLoopback)) {
-            sources.insert(0, AudioSource {
-                id: "pipewire_unavailable".into(),
-                label: "⚠ Install PipeWire for system audio capture".into(),
-                pid: None,
-                kind: AudioSourceKind::SystemLoopback,
-            });
+        if !sources
+            .iter()
+            .any(|s| matches!(s.kind, AudioSourceKind::SystemLoopback))
+        {
+            sources.insert(
+                0,
+                AudioSource {
+                    id: "pipewire_unavailable".into(),
+                    label: "⚠ Install PipeWire for system audio capture".into(),
+                    pid: None,
+                    kind: AudioSourceKind::SystemLoopback,
+                },
+            );
         }
         sources
     }
@@ -1134,14 +1185,17 @@ mod platform {
             return Err("PipeWire is not available. Install pipewire and pipewire-alsa.".into());
         }
 
-        let device_name = source_id.strip_prefix("alsa:").unwrap_or(source_id).to_owned();
+        let device_name = source_id
+            .strip_prefix("alsa:")
+            .unwrap_or(source_id)
+            .to_owned();
         let stop = Arc::new(AtomicBool::new(false));
         // stop_ret is kept here for the LoopbackSession return value.
         // stop_clone goes into the data callback closure.
         // stop_loop goes into the keepalive while-loop inside the spawn.
-        let stop_ret   = Arc::clone(&stop);
+        let stop_ret = Arc::clone(&stop);
         let stop_clone = Arc::clone(&stop);
-        let stop_loop  = Arc::clone(&stop);
+        let stop_loop = Arc::clone(&stop);
         let peak_clone = Arc::clone(&peak);
 
         let (result_tx, result_rx) = std::sync::mpsc::channel::<Result<(), String>>();
@@ -1149,26 +1203,37 @@ mod platform {
         // cpal::Stream is !Send — build it inside the thread that will own it.
         std::thread::spawn(move || {
             let host = cpal::default_host();
-            let device = match host.input_devices()
-                .map_err(|e| e.to_string())
-                .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
-                    .ok_or_else(|| format!("ALSA device '{}' not found", device_name)))
-            {
-                Ok(d) => d,
-                Err(e) => { let _ = result_tx.send(Err(e)); return; }
-            };
+            let device =
+                match host
+                    .input_devices()
+                    .map_err(|e| e.to_string())
+                    .and_then(|mut devs| {
+                        devs.find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
+                            .ok_or_else(|| format!("ALSA device '{}' not found", device_name))
+                    }) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let _ = result_tx.send(Err(e));
+                        return;
+                    }
+                };
             let config = match device.default_input_config() {
                 Ok(c) => c,
-                Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+                Err(e) => {
+                    let _ = result_tx.send(Err(e.to_string()));
+                    return;
+                }
             };
 
             let mut smoothed = 0f32;
             let stream = match device.build_input_stream(
                 &config.into(),
                 move |data: &[f32], _| {
-                    if stop_clone.load(Ordering::Relaxed) { return; }
-                    let rms = (data.iter().map(|&s| s * s).sum::<f32>()
-                        / data.len().max(1) as f32).sqrt();
+                    if stop_clone.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let rms = (data.iter().map(|&s| s * s).sum::<f32>() / data.len().max(1) as f32)
+                        .sqrt();
                     smoothed = smoothed * 0.9 + rms * 0.1;
                     store_peak(&peak_clone, smoothed * 2.0);
                 },
@@ -1176,7 +1241,10 @@ mod platform {
                 None,
             ) {
                 Ok(s) => s,
-                Err(e) => { let _ = result_tx.send(Err(e.to_string())); return; }
+                Err(e) => {
+                    let _ = result_tx.send(Err(e.to_string()));
+                    return;
+                }
             };
 
             if let Err(e) = stream.play() {
@@ -1193,10 +1261,14 @@ mod platform {
             // stream drops here, on the thread that created it.
         });
 
-        result_rx.recv()
+        result_rx
+            .recv()
             .map_err(|_| "ALSA thread exited before signalling".to_string())??;
 
-        Ok(LoopbackSession { stop: stop_ret, pid: None })
+        Ok(LoopbackSession {
+            stop: stop_ret,
+            pid: None,
+        })
     }
 }
 
@@ -1254,9 +1326,7 @@ pub async fn start_loopback_capture(
 
 /// Stop capturing and release all resources.
 #[tauri::command]
-pub fn stop_loopback_capture(
-    state: tauri::State<'_, LoopbackState>,
-) -> Result<(), String> {
+pub fn stop_loopback_capture(state: tauri::State<'_, LoopbackState>) -> Result<(), String> {
     let mut guard = state.session.lock().map_err(|_| "lock error")?;
     if let Some(s) = guard.take() {
         s.stop.store(true, Ordering::Relaxed);
@@ -1269,8 +1339,6 @@ pub fn stop_loopback_capture(
 /// The frontend polls this at ~30 fps when loopback is active and no audio
 /// file is loaded, using the value as a substitute for the per-frame peaks array.
 #[tauri::command]
-pub fn get_loopback_peak(
-    state: tauri::State<'_, LoopbackState>,
-) -> f32 {
+pub fn get_loopback_peak(state: tauri::State<'_, LoopbackState>) -> f32 {
     read_peak(&state.peak)
 }
