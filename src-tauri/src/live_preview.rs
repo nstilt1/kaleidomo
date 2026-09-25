@@ -13,11 +13,10 @@
 ///   [0..4]  width  LE u32
 ///   [4..8]  height LE u32
 ///   [8..]   raw RGBA pixels (width * height * 4 bytes)
-
 use std::sync::{Arc, Mutex};
 
 use kaleidomo_core::{KaleidoSettings, KaleidoType};
-use tauri::{ipc::Response, State};
+use tauri::{State, ipc::Response};
 
 use crate::{AppState, log_error, log_info};
 
@@ -81,21 +80,35 @@ pub struct LivePreviewParams {
 fn default_super_sample() -> u8 {
     1
 }
-fn default_reconstruction() -> String { "bilinear".into() }
-fn default_true() -> bool { true }
-fn default_anisotropy() -> u8 { 1 }
-fn default_edge_filter() -> String { "disabled".into() }
-fn default_taa_feedback() -> f32 { 0.9 }
-fn default_recolor_threshold() -> f32 { 0.08 }
-fn default_recolor_cell_size() -> f32 { 64.0 }
+fn default_reconstruction() -> String {
+    "bilinear".into()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_anisotropy() -> u8 {
+    1
+}
+fn default_edge_filter() -> String {
+    "disabled".into()
+}
+fn default_taa_feedback() -> f32 {
+    0.9
+}
+fn default_recolor_threshold() -> f32 {
+    0.08
+}
+fn default_recolor_cell_size() -> f32 {
+    64.0
+}
 
 impl LivePreviewParams {
     pub(crate) fn to_kaleido_settings(&self) -> Result<KaleidoSettings, String> {
         let kaleido_type = match self.kaleido_type.to_lowercase().as_str() {
-            "radial"            => KaleidoType::Radial,
-            "square"            => KaleidoType::Square,
-            "diamond"           => KaleidoType::Diamond,
-            "hexagonal"         => KaleidoType::Hexagonal,
+            "radial" => KaleidoType::Radial,
+            "square" => KaleidoType::Square,
+            "diamond" => KaleidoType::Diamond,
+            "hexagonal" => KaleidoType::Hexagonal,
             "hexagonal_flat_top" => KaleidoType::HexagonalFlatTop,
             other => return Err(format!("unknown kaleido_type: {other}")),
         };
@@ -156,7 +169,11 @@ pub async fn render_live_preview_frame(
     // `super_sample`: render at `w/h * factor` internally, then box-downsample
     // back down to `w x h` before it goes into the response body (whose header
     // always reports the requested `w`/`h`, not the oversized render size).
-    let factor = kaleidomo_core::safe_super_sample(settings.super_sample, settings.output_size_w, settings.output_size_h);
+    let factor = kaleidomo_core::safe_super_sample(
+        settings.super_sample,
+        settings.output_size_w,
+        settings.output_size_h,
+    );
     let (render_w, render_h) = (w * factor as u32, h * factor as u32);
 
     let pixel_count = (w as usize)
@@ -189,8 +206,13 @@ pub async fn render_live_preview_frame(
     let body = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<u8>, String> {
         log_info!(
             "[live_preview] rendering {}x{} x={:.1} y={:.1} rot={:.4} zoom={:.3} hue={}",
-            w, h, settings.triangle_center_x, settings.triangle_center_y,
-            settings.triangle_rotation_rad, settings.zoom, settings.hue_rotation,
+            w,
+            h,
+            settings.triangle_center_x,
+            settings.triangle_center_y,
+            settings.triangle_rotation_rad,
+            settings.zoom,
+            settings.hue_rotation,
         );
 
         let mut body = Vec::with_capacity(8 + pixel_count);
@@ -225,7 +247,8 @@ pub async fn render_live_preview_frame(
                     log_error!("[live_preview] GPU render failed: {e}");
                     format!("GPU render failed: {e}")
                 })?;
-            let downsampled = kaleidomo_core::downsample_box(&big, render_w, render_h, factor, w, h);
+            let downsampled =
+                kaleidomo_core::downsample_box(&big, render_w, render_h, factor, w, h);
             body[8..].copy_from_slice(&downsampled);
         } else {
             gpu.render_into_buffer(&settings, &mut body[8..])
@@ -237,12 +260,20 @@ pub async fn render_live_preview_frame(
 
         let resolved = image::RgbaImage::from_raw(w, h, body[8..].to_vec())
             .ok_or_else(|| "invalid live-preview RGBA dimensions".to_string())?;
-        let mut enhancement = enhancement_state.lock()
+        let mut enhancement = enhancement_state
+            .lock()
             .map_err(|_| "enhancement mutex poisoned".to_string())?;
         if enhancement.as_ref().map(|(config, _)| *config) != Some(enhancement_config) {
-            *enhancement = Some((enhancement_config, kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement_config)));
+            *enhancement = Some((
+                enhancement_config,
+                kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement_config),
+            ));
         }
-        let enhanced = enhancement.as_mut().expect("enhancement initialized").1.finish_frame(&resolved);
+        let enhanced = enhancement
+            .as_mut()
+            .expect("enhancement initialized")
+            .1
+            .finish_frame(&resolved);
         body[8..].copy_from_slice(enhanced.as_raw());
 
         Ok(body)

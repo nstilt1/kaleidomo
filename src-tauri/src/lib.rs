@@ -2,23 +2,44 @@
 const PRODUCT_NAME: &str = "Kaleidomo";
 const DOWNLOADS_URL: &str = "https://alteredbrainchemistry.com/downloads/kaleidomo";
 const STORE_PAGE_URL: &str = "https://alteredbrainchemistry.com/downloads/kaleidomo";
-const VERSION_URL: &str = "https://hephaestus.alteredbrainchemistry.com/downloads/kaleidomo-version.txt";
+const VERSION_URL: &str =
+    "https://hephaestus.alteredbrainchemistry.com/downloads/kaleidomo-version.txt";
 
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_fs::FsExt;
 
-use std::{collections::HashMap, sync::{Arc, Mutex}};
 use kaleidomo_core::{KaleidoSettings, pollster};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tauri::{Emitter, Manager, State};
 
+use image::io::Reader as ImageReader;
 use std::fs;
 use std::io::Cursor;
-use image::io::Reader as ImageReader;
 
 use kaleidomo_core::backends::gpu::GpuBackend;
 
-fn enhancement_config(reconstruction: &str, derivatives: bool, anisotropy: u8, edge: &str, taa: bool, feedback: f32) -> kaleidomo_core::enhancement::EnhancementConfig {
-    kaleidomo_core::enhancement::EnhancementConfig::from_wire(reconstruction, derivatives, anisotropy, edge, taa, feedback)
+fn enhancement_config(
+    reconstruction: &str,
+    derivatives: bool,
+    anisotropy: u8,
+    edge: &str,
+    taa: bool,
+    feedback: f32,
+) -> kaleidomo_core::enhancement::EnhancementConfig {
+    kaleidomo_core::enhancement::EnhancementConfig::from_wire(
+        reconstruction,
+        derivatives,
+        anisotropy,
+        edge,
+        taa,
+        feedback,
+    )
 }
 
 struct EnhancingVideoSink<'a> {
@@ -26,17 +47,32 @@ struct EnhancingVideoSink<'a> {
     width: u32,
     height: u32,
     pipeline: kaleidomo_core::enhancement::EnhancementPipeline,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl kaleidomo_core::VideoFrameSink for EnhancingVideoSink<'_> {
     fn write_rgba_frame(&mut self, rgba: &[u8]) -> Result<(), kaleidomo_core::VideoSinkError> {
-        let frame = image::RgbaImage::from_raw(self.width, self.height, rgba.to_vec())
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid video RGBA frame dimensions"))?;
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err("Video export cancelled".into());
+        }
+        let frame = image::RgbaImage::from_raw(self.width, self.height, rgba.to_vec()).ok_or_else(
+            || {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid video RGBA frame dimensions",
+                )
+            },
+        )?;
         let enhanced = self.pipeline.finish_frame(&frame);
         self.inner.write_rgba_frame(enhanced.as_raw())
     }
 
-    fn finish(&mut self) -> Result<(), kaleidomo_core::VideoSinkError> { self.inner.finish() }
+    fn finish(&mut self) -> Result<(), kaleidomo_core::VideoSinkError> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err("Video export cancelled".into());
+        }
+        self.inner.finish()
+    }
 }
 
 mod licensing;
@@ -79,11 +115,8 @@ mod preview_server;
 
 mod audio_loopback;
 pub use audio_loopback::{
-    LoopbackState,
-    list_loopback_sources,
-    start_loopback_capture,
+    LoopbackState, get_loopback_peak, list_loopback_sources, start_loopback_capture,
     stop_loopback_capture,
-    get_loopback_peak,
 };
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -123,8 +156,7 @@ fn apply_exif_orientation(img: image::DynamicImage, path: &str) -> image::Dynami
 }
 
 fn load_source_image(path: &str) -> Result<image::DynamicImage, String> {
-    let bytes = fs::read(path)
-        .map_err(|e| format!("failed to read image '{}': {}", path, e))?;
+    let bytes = fs::read(path).map_err(|e| format!("failed to read image '{}': {}", path, e))?;
 
     let reader = ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
@@ -151,8 +183,7 @@ macro_rules! log_error {
 #[macro_export]
 #[cfg(not(feature = "logging"))]
 macro_rules! log_error {
-    ($($arg:tt)*) => {{
-    }};
+    ($($arg:tt)*) => {{}};
 }
 
 #[cfg(feature = "logging")]
@@ -166,8 +197,7 @@ macro_rules! log_info {
 #[macro_export]
 #[cfg(not(feature = "logging"))]
 macro_rules! log_info {
-    ($($arg:tt)*) => {{
-    }};
+    ($($arg:tt)*) => {{}};
 }
 
 #[cfg(feature = "logging")]
@@ -181,8 +211,7 @@ macro_rules! log_warn {
 #[macro_export]
 #[cfg(not(feature = "logging"))]
 macro_rules! log_warn {
-    ($($arg:tt)*) => {{
-    }};
+    ($($arg:tt)*) => {{}};
 }
 
 use std::backtrace::Backtrace;
@@ -213,9 +242,7 @@ fn install_panic_hook() {
         #[cfg(feature = "logging")]
         error!(
             "PANIC at {}: {}\nBacktrace:\n{}",
-            location,
-            payload,
-            backtrace
+            location, payload, backtrace
         );
     }));
 }
@@ -232,13 +259,21 @@ pub struct AppState {
     pub license_sync_cooldown: AsyncMutex<licensing::cooldown::LicenseSyncCooldownState>,
     pub loaded_gpu_image_path: Mutex<Option<String>>,
     pub last_version_fetch: AsyncMutex<Option<u64>>,
-    pub live_enhancement: Arc<Mutex<Option<(kaleidomo_core::enhancement::EnhancementConfig, kaleidomo_core::enhancement::EnhancementPipeline)>>>,
+    pub live_enhancement: Arc<
+        Mutex<
+            Option<(
+                kaleidomo_core::enhancement::EnhancementConfig,
+                kaleidomo_core::enhancement::EnhancementPipeline,
+            )>,
+        >,
+    >,
     /// Path to a preset/project file (.json) passed on the command line, e.g.
     /// `kaleidomo.exe C:\presets\my-preset.kmo.json`. When present, the
     /// frontend loads it on startup and enters fullscreen "kiosk" mode
     /// (main window fullscreen, controls window never shown) instead of the
     /// normal windowed UI. `None` for a regular double-click/dev launch.
     pub cli_preset_path: Option<String>,
+    pub video_export_cancelled: Arc<AtomicBool>,
     // Note: LoopbackState is NOT a field here. It is registered separately via
     // app.manage(LoopbackState::new()) in run() so that tauri::State<'_, LoopbackState>
     // resolves correctly in start_loopback_capture / stop_loopback_capture / get_loopback_peak.
@@ -352,8 +387,7 @@ fn exit_fullscreen_impl(app: &tauri::AppHandle) -> Result<(), String> {
     // Native fullscreen already handles the Windows frame. Do not mutate
     // decorations before or after fullscreen; doing so can leave a borderless
     // window that visually appears to remain fullscreen.
-    main
-        .set_fullscreen(false)
+    main.set_fullscreen(false)
         .map_err(|e| format!("set_fullscreen(false) error: {e}"))?;
 
     let _ = main.unminimize();
@@ -380,8 +414,7 @@ async fn set_fullscreen(app: tauri::AppHandle, fullscreen: bool) -> Result<(), S
     // Fullscreen must never fail merely because the optional controls window
     // was not instantiated. The setup hook creates it as a fallback, but this
     // command remains tolerant so the main window can always enter fullscreen.
-    main
-        .set_fullscreen(true)
+    main.set_fullscreen(true)
         .map_err(|e| format!("set_fullscreen(true) error: {e}"))?;
 
     let controls = ensure_controls_window(&app)?;
@@ -427,7 +460,12 @@ pub(crate) fn clamp(value: &mut f32, min: f32, max: f32) {
     *value = value.min(max);
 }
 
-fn adjust_wedge_params(settings: &mut KaleidoSettings, img_width: u32, img_height: u32, _use_gpu: bool) {
+fn adjust_wedge_params(
+    settings: &mut KaleidoSettings,
+    img_width: u32,
+    img_height: u32,
+    _use_gpu: bool,
+) {
     // #[cfg(target_os = "windows")]
     // if true {
     //     settings.triangle_center_x = (img_width - 1) as f32 - settings.triangle_center_x;
@@ -435,8 +473,16 @@ fn adjust_wedge_params(settings: &mut KaleidoSettings, img_width: u32, img_heigh
     //     settings.triangle_rotation_rad -= core::f32::consts::PI;
     // }
 
-    clamp(&mut settings.triangle_center_x, 0f32, img_width as f32 - 1.0);
-    clamp(&mut settings.triangle_center_y, 0f32, img_height as f32 - 1.0);
+    clamp(
+        &mut settings.triangle_center_x,
+        0f32,
+        img_width as f32 - 1.0,
+    );
+    clamp(
+        &mut settings.triangle_center_y,
+        0f32,
+        img_height as f32 - 1.0,
+    );
 }
 
 fn adjust_path(path: &String) -> String {
@@ -448,16 +494,20 @@ fn adjust_path(path: &String) -> String {
     path_str
 }
 
-/// Limiting the license using a macro since it copies all of the code 
+/// Limiting the license using a macro since it copies all of the code
 /// at compile time.
 macro_rules! limit_license {
     ($state:expr, $output_size_w:expr, $output_size_h:expr, $offset_x:expr, $offset_y:expr, $zoom:expr, $tile_count:expr, $is_exporting:expr) => {
         let (unlocked, _license_type) = match $state.license_status.check_license(true).await {
             Ok(v) => {
                 //$license_data = v.1.clone();
-                log_info!("limit_license initial check was Ok(({}, {}))", v.0, v.1.license_type);
+                log_info!(
+                    "limit_license initial check was Ok(({}, {}))",
+                    v.0,
+                    v.1.license_type
+                );
                 (v.0, v.1.license_type)
-            },
+            }
             Err(e) => {
                 log_error!("limit_license initial check was Err({})", e.1.error_message);
                 (false, "".to_string())
@@ -536,16 +586,13 @@ fn set_source_image_from_path(
 
     if let Some(gpu) = guard.as_mut() {
         gpu.set_source_image(&image)
-        .map_err(|e| format!("failed to select source image: {e}"))?;
+            .map_err(|e| format!("failed to select source image: {e}"))?;
     }
     Ok(())
 }
 
 #[tauri::command]
-fn select_image(
-    state: tauri::State<'_, AppState>,
-    path: String,
-) -> Result<(), String> {
+fn select_image(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
     let normalized_path = adjust_path(&path);
 
     {
@@ -563,13 +610,14 @@ fn select_image(
         let guard = match state
             .use_gpu_acceleration
             .lock()
-            .map_err(|_| "Failed to lock GPU preference state".to_string()) {
-                Ok(v) => v,
-                Err(e) => {
-                    log_error!("Error select_image: {}", e);
-                    return Err(e);
-                }
-            };
+            .map_err(|_| "Failed to lock GPU preference state".to_string())
+        {
+            Ok(v) => v,
+            Err(e) => {
+                log_error!("Error select_image: {}", e);
+                return Err(e);
+            }
+        };
         *guard
     };
 
@@ -601,13 +649,14 @@ fn select_image(
     let mut current_path = match state
         .loaded_gpu_image_path
         .lock()
-        .map_err(|_| "failed to lock loaded GPU image path".to_string()) {
-            Ok(v) => v,
-            Err(e) => {
-                log_error!("select_image error current_path = ... {}", e);
-                return Err(e);
-            }
-        };
+        .map_err(|_| "failed to lock loaded GPU image path".to_string())
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log_error!("select_image error current_path = ... {}", e);
+            return Err(e);
+        }
+    };
 
     *current_path = Some(normalized_path);
 
@@ -621,7 +670,7 @@ async fn export_kaleidoscope(
     path: String,
     x: f32,
     y: f32,
-    rotation: f32, 
+    rotation: f32,
     mut zoom: f32,
     count: u32,
     mut output_size_h: u32,
@@ -650,10 +699,20 @@ async fn export_kaleidoscope(
     taa_feedback_alpha: f32,
 ) -> Result<String, String> {
     let is_exporting = true;
-    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count, is_exporting);
+    limit_license!(
+        state,
+        output_size_w,
+        output_size_h,
+        offset_x,
+        offset_y,
+        zoom,
+        tile_count,
+        is_exporting
+    );
 
     // 1. Open the Save Dialog first (don't render if they hit cancel)
-    let file_path = app.dialog()
+    let file_path = app
+        .dialog()
         .file()
         .add_filter("PNG Image", &["png"])
         .set_file_name("my_kaleidoscope.png")
@@ -671,7 +730,7 @@ async fn export_kaleidoscope(
             return Err(e);
         }
     };
-    
+
     let mut settings = kaleidomo_core::KaleidoSettings {
         count,
         output_size_h,
@@ -713,7 +772,14 @@ async fn export_kaleidoscope(
     };
 
     adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
-    let enhancement = enhancement_config(&reconstruction_filter, derivative_mipmapping, anisotropy_level, &edge_post_process, taa_enabled, taa_feedback_alpha);
+    let enhancement = enhancement_config(
+        &reconstruction_filter,
+        derivative_mipmapping,
+        anisotropy_level,
+        &edge_post_process,
+        taa_enabled,
+        taa_feedback_alpha,
+    );
 
     if use_gpu {
         let gpu_arc = Arc::clone(&state.gpu_arc);
@@ -726,7 +792,11 @@ async fn export_kaleidoscope(
             // `super_sample`: render at `output_size * factor` internally, then
             // box-downsample back down before saving, same as the CPU path (which
             // gets this for free via `render_kaleidoscope_with_auto_backend`).
-            let factor = kaleidomo_core::safe_super_sample(settings.super_sample, settings.output_size_w, settings.output_size_h);
+            let factor = kaleidomo_core::safe_super_sample(
+                settings.super_sample,
+                settings.output_size_w,
+                settings.output_size_h,
+            );
             let pixels = if factor > 1 {
                 let render_w = output_size_w * factor as u32;
                 let render_h = output_size_h * factor as u32;
@@ -745,33 +815,42 @@ async fn export_kaleidoscope(
                     .and_then(|v| v.checked_mul(4))
                     .ok_or_else(|| "output dimensions overflowed".to_string())?;
                 let mut big = vec![0u8; render_pixel_count];
-                gpu.render_into_buffer(&render_settings, &mut big).map_err(|e| e.to_string())?;
-                kaleidomo_core::downsample_box(&big, render_w, render_h, factor, output_size_w, output_size_h)
+                gpu.render_into_buffer(&render_settings, &mut big)
+                    .map_err(|e| e.to_string())?;
+                kaleidomo_core::downsample_box(
+                    &big,
+                    render_w,
+                    render_h,
+                    factor,
+                    output_size_w,
+                    output_size_h,
+                )
             } else {
                 let pixel_count = (output_size_w as usize)
                     .checked_mul(output_size_h as usize)
                     .and_then(|v| v.checked_mul(4))
                     .ok_or_else(|| "output dimensions overflowed".to_string())?;
                 let mut pixels = vec![0u8; pixel_count];
-                gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+                gpu.render_into_buffer(&settings, &mut pixels)
+                    .map_err(|e| e.to_string())?;
                 pixels
             };
             let result_buffer = image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
                 .ok_or_else(|| "failed to create image from GPU output".to_string())?;
             let mut pipeline = kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement);
-            pipeline.finish_frame(&result_buffer).save(&path_str).map_err(|e| format!("Failed to save image: {}", e))
+            pipeline
+                .finish_frame(&result_buffer)
+                .save(&path_str)
+                .map_err(|e| format!("Failed to save image: {}", e))
         })
         .await
         .map_err(|e| format!("spawn_blocking error: {e}"))??;
     } else {
-        let result_buffer =
-            kaleidomo_core::render_kaleidoscope_with_auto_backend(
-                &img,
-                settings,
-            );
+        let result_buffer = kaleidomo_core::render_kaleidoscope_with_auto_backend(&img, settings);
 
         let mut pipeline = kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement);
-        pipeline.finish_frame(&result_buffer)
+        pipeline
+            .finish_frame(&result_buffer)
             .save(path_to_save.to_string())
             .map_err(|e| format!("Failed to save image: {}", e))?;
     }
@@ -802,7 +881,8 @@ async fn preprocess_source_preview(
             _ => kaleidomo_core::preprocess::RecolorMode::ColorBands,
         },
         cell_size,
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     let mut buffer = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(rgba)
         .write_to(&mut buffer, image::ImageFormat::Png)
@@ -848,7 +928,16 @@ async fn generate_kaleidoscope(
     let mut _offset_x = 0;
     let mut _offset_y = 0;
     let is_exporting = false;
-    limit_license!(state, output_size_w, output_size_h, _offset_x, _offset_y, zoom, tile_count, is_exporting);
+    limit_license!(
+        state,
+        output_size_w,
+        output_size_h,
+        _offset_x,
+        _offset_y,
+        zoom,
+        tile_count,
+        is_exporting
+    );
 
     let path = adjust_path(&path);
     // 1. Load the image from the absolute path
@@ -902,7 +991,11 @@ async fn generate_kaleidoscope(
                 .map_err(|_| "Failed to lock GPU backend".to_string())?;
             let gpu = gpu_guard.as_mut().ok_or("GPU backend is unavailable")?;
             // `super_sample`: see `export_kaleidoscope` above for the same wrapper.
-            let factor = kaleidomo_core::safe_super_sample(settings.super_sample, settings.output_size_w, settings.output_size_h);
+            let factor = kaleidomo_core::safe_super_sample(
+                settings.super_sample,
+                settings.output_size_w,
+                settings.output_size_h,
+            );
             let pixels = if factor > 1 {
                 let render_w = output_size_w * factor as u32;
                 let render_h = output_size_h * factor as u32;
@@ -917,11 +1010,20 @@ async fn generate_kaleidoscope(
                     ..settings.clone()
                 };
                 let mut big = vec![0u8; (render_w * render_h * 4) as usize];
-                gpu.render_into_buffer(&render_settings, &mut big).map_err(|e| e.to_string())?;
-                kaleidomo_core::downsample_box(&big, render_w, render_h, factor, output_size_w, output_size_h)
+                gpu.render_into_buffer(&render_settings, &mut big)
+                    .map_err(|e| e.to_string())?;
+                kaleidomo_core::downsample_box(
+                    &big,
+                    render_w,
+                    render_h,
+                    factor,
+                    output_size_w,
+                    output_size_h,
+                )
             } else {
                 let mut pixels = vec![0u8; (output_size_w * output_size_h * 4) as usize];
-                gpu.render_into_buffer(&settings, &mut pixels).map_err(|e| e.to_string())?;
+                gpu.render_into_buffer(&settings, &mut pixels)
+                    .map_err(|e| e.to_string())?;
                 pixels
             };
             image::RgbaImage::from_raw(output_size_w, output_size_h, pixels)
@@ -931,18 +1033,26 @@ async fn generate_kaleidoscope(
         .map_err(|e| format!("spawn_blocking error: {e}"))??
     } else {
         let img = match load_source_image(&path)
-            .map_err(|e| format!("Failed to open image at path '{}': {}", path, e)) {
-                Ok(v) => v,
-                Err(e) => {
-                    log_error!("error generate_kaleidoscope: {}", e);
-                    return Err(e);
-                }
-            };
+            .map_err(|e| format!("Failed to open image at path '{}': {}", path, e))
+        {
+            Ok(v) => v,
+            Err(e) => {
+                log_error!("error generate_kaleidoscope: {}", e);
+                return Err(e);
+            }
+        };
 
         kaleidomo_core::render_kaleidoscope_with_auto_backend(&img, settings)
     };
 
-    let mut pipeline = kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement_config(&reconstruction_filter, derivative_mipmapping, anisotropy_level, &edge_post_process, taa_enabled, taa_feedback_alpha));
+    let mut pipeline = kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement_config(
+        &reconstruction_filter,
+        derivative_mipmapping,
+        anisotropy_level,
+        &edge_post_process,
+        taa_enabled,
+        taa_feedback_alpha,
+    ));
     let output = pipeline.finish_frame(&output);
 
     // 3. Convert RgbaImage to Base64 so React can show it in an <img /> tag
@@ -984,7 +1094,7 @@ async fn generate_video(
     mut zoom_min: f32,
     zoom_fn: String,
     zoom_start_offset: f32,
-    num_zoom_loops: u32,
+    num_zoom_loops: f32,
     img_width: u32,
     img_height: u32,
     // new video settings
@@ -1018,10 +1128,38 @@ async fn generate_video(
     taa_feedback_alpha: f32,
 ) -> Result<String, String> {
     let is_exporting = true;
-    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom, tile_count, is_exporting);
-    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_max, tile_count, is_exporting);
-    limit_license!(state, output_size_w, output_size_h, offset_x, offset_y, zoom_min, tile_count, is_exporting);
-    let file_path = app.dialog()
+    limit_license!(
+        state,
+        output_size_w,
+        output_size_h,
+        offset_x,
+        offset_y,
+        zoom,
+        tile_count,
+        is_exporting
+    );
+    limit_license!(
+        state,
+        output_size_w,
+        output_size_h,
+        offset_x,
+        offset_y,
+        zoom_max,
+        tile_count,
+        is_exporting
+    );
+    limit_license!(
+        state,
+        output_size_w,
+        output_size_h,
+        offset_x,
+        offset_y,
+        zoom_min,
+        tile_count,
+        is_exporting
+    );
+    let file_path = app
+        .dialog()
         .file()
         .add_filter("MP4 Video", &["mp4"])
         .set_file_name("my_kaleidoscope.mp4")
@@ -1031,6 +1169,8 @@ async fn generate_video(
     } else {
         return Err("Video export cancelled".into());
     };
+    state.video_export_cancelled.store(false, Ordering::Relaxed);
+    let cancel_token = Arc::clone(&state.video_export_cancelled);
     // 1. Load the image from the absolute path
     let img = match load_source_image(&path) {
         Ok(v) => v,
@@ -1115,7 +1255,14 @@ async fn generate_video(
 
     adjust_wedge_params(&mut settings, img_width, img_height, use_gpu);
 
-    let video_enhancement = enhancement_config(&reconstruction_filter, derivative_mipmapping, anisotropy_level, &edge_post_process, taa_enabled, taa_feedback_alpha);
+    let video_enhancement = enhancement_config(
+        &reconstruction_filter,
+        derivative_mipmapping,
+        anisotropy_level,
+        &edge_post_process,
+        taa_enabled,
+        taa_feedback_alpha,
+    );
 
     // Validate the audio file (if any) up front, before we spend time
     // rendering, and resolve it to a `PathBuf` for `FfmpegSink`.
@@ -1151,7 +1298,13 @@ async fn generate_video(
                 audio_path.as_deref(),
                 total_export_frames,
             )?;
-            let mut enhanced_sink = EnhancingVideoSink { inner: &mut sink, width: output_size_w, height: output_size_h, pipeline: kaleidomo_core::enhancement::EnhancementPipeline::new(video_enhancement) };
+            let mut enhanced_sink = EnhancingVideoSink {
+                inner: &mut sink,
+                width: output_size_w,
+                height: output_size_h,
+                pipeline: kaleidomo_core::enhancement::EnhancementPipeline::new(video_enhancement),
+                cancelled: cancel_token,
+            };
             let mut gpu_guard = gpu_arc
                 .lock()
                 .map_err(|_| "Failed to lock GPU backend".to_string())?;
@@ -1172,7 +1325,13 @@ async fn generate_video(
             audio_path.as_deref(),
             total_export_frames,
         )?;
-        let mut enhanced_sink = EnhancingVideoSink { inner: &mut sink, width: output_size_w, height: output_size_h, pipeline: kaleidomo_core::enhancement::EnhancementPipeline::new(video_enhancement) };
+        let mut enhanced_sink = EnhancingVideoSink {
+            inner: &mut sink,
+            width: output_size_w,
+            height: output_size_h,
+            pipeline: kaleidomo_core::enhancement::EnhancementPipeline::new(video_enhancement),
+            cancelled: cancel_token,
+        };
         if let Err(e) = kaleidomo_core::render_video_with_auto_backend(
             &img,
             settings,
@@ -1184,6 +1343,11 @@ async fn generate_video(
     };
 
     Ok(format!("data:video/mp4"))
+}
+
+#[tauri::command]
+fn cancel_video_export(state: tauri::State<'_, AppState>) {
+    state.video_export_cancelled.store(true, Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -1206,9 +1370,7 @@ fn set_use_gpu_acceleration(
 }
 
 #[tauri::command]
-fn get_use_gpu_acceleration(
-    state: tauri::State<'_, AppState>,
-) -> Result<bool, String> {
+fn get_use_gpu_acceleration(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     let guard = state
         .use_gpu_acceleration
         .lock()
@@ -1279,9 +1441,8 @@ pub fn run() {
 
     // Start the WebSocket preview server. It binds on a random localhost port
     // and serves JPEG frames outside the JSC heap (blob delivery).
-    let preview_ws_port = tauri::async_runtime::block_on(
-        preview_server::start(Arc::clone(&gpu_arc_init))
-    );
+    let preview_ws_port =
+        tauri::async_runtime::block_on(preview_server::start(Arc::clone(&gpu_arc_init)));
 
     let mut product_id_hashmap = HashMap::with_capacity(1);
     product_id_hashmap.insert(
@@ -1295,7 +1456,7 @@ pub fn run() {
             "AlteredBrainChemistry",
             product_id_hashmap,
             true,
-            "KALEIDOM-lmeFJbHEr_TBYqpeOSGjbsNl"
+            "KALEIDOM-lmeFJbHEr_TBYqpeOSGjbsNl",
         )
         .await
     });
@@ -1320,6 +1481,7 @@ pub fn run() {
                 last_version_fetch: AsyncMutex::new(ts),
                 live_enhancement: Arc::new(Mutex::new(None)),
                 cli_preset_path: cli_preset_path.clone(),
+                video_export_cancelled: Arc::new(AtomicBool::new(false)),
             });
             // LoopbackState is managed independently so that tauri::State<'_, LoopbackState>
             // resolves in start_loopback_capture / stop_loopback_capture / get_loopback_peak.
@@ -1332,11 +1494,11 @@ pub fn run() {
             // line bypasses that dialog, so explicitly allow only that exact
             // preset file before the frontend calls readTextFile().
             if let Some(preset_path) = cli_preset_path.as_deref() {
-                app.fs_scope()
-                    .allow_file(preset_path)
-                    .map_err(|e| -> Box<dyn std::error::Error> {
+                app.fs_scope().allow_file(preset_path).map_err(
+                    |e| -> Box<dyn std::error::Error> {
                         format!("failed to allow CLI preset path '{preset_path}': {e}").into()
-                    })?;
+                    },
+                )?;
             }
 
             // Remove the default Tauri menu ("App / File / Edit").
@@ -1410,6 +1572,14 @@ pub fn run() {
                 // controls window keeps the Tauri event loop (and kaleidomo.exe)
                 // alive, which also locks target/release/deps/kaleidomo.exe on
                 // Windows and causes LNK1104 on the next build.
+                if cfg!(target_os = "windows") && window.label() == "main" {
+                    // The pre-created hidden controls WebView otherwise keeps
+                    // the Windows process and FFmpeg sidecar lifetime alive.
+                    let _ = window.app_handle().emit("kd://app-will-exit", ());
+                    window.app_handle().exit(0);
+                    return;
+                }
+
                 if is_cli_kiosk_launch && window.label() == "main" {
                     window.app_handle().exit(0);
                     return;
@@ -1448,6 +1618,7 @@ pub fn run() {
             generate_kaleidoscope,
             preprocess_source_preview,
             generate_video,
+            cancel_video_export,
             export_kaleidoscope,
             init_gpu,
             set_source_image_from_path,

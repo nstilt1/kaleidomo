@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use image::ImageFormat;
-use kaleidomo_core::{backends::gpu::GpuBackend, KaleidoSettings, KaleidoType};
+use kaleidomo_core::{KaleidoSettings, KaleidoType, backends::gpu::GpuBackend};
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -108,26 +108,44 @@ struct PreviewScratch {
     enhancement_pipeline: Option<kaleidomo_core::enhancement::EnhancementPipeline>,
 }
 
-fn default_quality() -> u8 { 85 }
+fn default_quality() -> u8 {
+    85
+}
 
 /// Default for `FrameRequest::super_sample` so requests sent before this field
 /// existed still deserialize with supersampling disabled (`1`).
-fn default_super_sample() -> u8 { 1 }
-fn default_reconstruction() -> String { "bilinear".into() }
-fn default_true() -> bool { true }
-fn default_anisotropy() -> u8 { 1 }
-fn default_edge_filter() -> String { "disabled".into() }
-fn default_taa_feedback() -> f32 { 0.9 }
-fn default_recolor_threshold() -> f32 { 0.08 }
-fn default_recolor_cell_size() -> f32 { 64.0 }
+fn default_super_sample() -> u8 {
+    1
+}
+fn default_reconstruction() -> String {
+    "bilinear".into()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_anisotropy() -> u8 {
+    1
+}
+fn default_edge_filter() -> String {
+    "disabled".into()
+}
+fn default_taa_feedback() -> f32 {
+    0.9
+}
+fn default_recolor_threshold() -> f32 {
+    0.08
+}
+fn default_recolor_cell_size() -> f32 {
+    64.0
+}
 
 impl FrameRequest {
     fn to_kaleido_settings(&self) -> Result<KaleidoSettings, String> {
         let kaleido_type = match self.kaleido_type.to_lowercase().as_str() {
-            "radial"            => KaleidoType::Radial,
-            "square"            => KaleidoType::Square,
-            "diamond"           => KaleidoType::Diamond,
-            "hexagonal"         => KaleidoType::Hexagonal,
+            "radial" => KaleidoType::Radial,
+            "square" => KaleidoType::Square,
+            "diamond" => KaleidoType::Diamond,
+            "hexagonal" => KaleidoType::Hexagonal,
             "hexagonal_flat_top" => KaleidoType::HexagonalFlatTop,
             other => return Err(format!("unknown kaleido_type: {other}")),
         };
@@ -256,39 +274,36 @@ async fn handle_connection(
         // thread, so we must run it on a blocking thread pool.
         let gpu_clone = Arc::clone(&gpu_arc);
         let req_clone = req.clone();
-        let mut render_scratch = scratch
-    .take()
-    .unwrap_or_else(PreviewScratch::default);
+        let mut render_scratch = scratch.take().unwrap_or_else(PreviewScratch::default);
 
-    let render_result = tokio::task::spawn_blocking(move || {
-        let jpeg = render_jpeg(&gpu_clone, &req_clone, &mut render_scratch);
-        (jpeg, render_scratch)
-    })
-    .await;
+        let render_result = tokio::task::spawn_blocking(move || {
+            let jpeg = render_jpeg(&gpu_clone, &req_clone, &mut render_scratch);
+            (jpeg, render_scratch)
+        })
+        .await;
 
-    let (jpeg_result, returned_scratch) = match render_result {
-        Ok(v) => v,
-        Err(e) => {
-            log_error!("[preview_server] spawn_blocking error: {e}");
-            scratch = Some(PreviewScratch::default());
-            write_ws_binary_frame(&mut stream, &[]).await?;
-            continue;
-        }
-    };
+        let (jpeg_result, returned_scratch) = match render_result {
+            Ok(v) => v,
+            Err(e) => {
+                log_error!("[preview_server] spawn_blocking error: {e}");
+                scratch = Some(PreviewScratch::default());
+                write_ws_binary_frame(&mut stream, &[]).await?;
+                continue;
+            }
+        };
 
-    scratch = Some(returned_scratch);
+        scratch = Some(returned_scratch);
 
-    let jpeg = match jpeg_result {
-        Ok(j) => j,
-        Err(e) => {
-            log_error!("[preview_server] render error: {e}");
-            write_ws_binary_frame(&mut stream, &[]).await?;
-            continue;
-        }
-    };
+        let jpeg = match jpeg_result {
+            Ok(j) => j,
+            Err(e) => {
+                log_error!("[preview_server] render error: {e}");
+                write_ws_binary_frame(&mut stream, &[]).await?;
+                continue;
+            }
+        };
 
-        static FRAME_COUNTER: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
+        static FRAME_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
         let frame_no = FRAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
 
@@ -367,7 +382,14 @@ fn render_jpeg(
 
     // Downsample in-place (into a local Vec, then copy back) when supersampling.
     let rgba_resolved: std::borrow::Cow<[u8]> = if factor > 1 {
-        std::borrow::Cow::Owned(kaleidomo_core::downsample_box(&scratch.rgba, render_w, render_h, factor, w, h))
+        std::borrow::Cow::Owned(kaleidomo_core::downsample_box(
+            &scratch.rgba,
+            render_w,
+            render_h,
+            factor,
+            w,
+            h,
+        ))
     } else {
         std::borrow::Cow::Borrowed(&scratch.rgba)
     };
@@ -381,12 +403,16 @@ fn render_jpeg(
         req.taa_feedback_alpha,
     );
     if scratch.enhancement_config != Some(enhancement_config) {
-        scratch.enhancement_pipeline = Some(kaleidomo_core::enhancement::EnhancementPipeline::new(enhancement_config));
+        scratch.enhancement_pipeline = Some(kaleidomo_core::enhancement::EnhancementPipeline::new(
+            enhancement_config,
+        ));
         scratch.enhancement_config = Some(enhancement_config);
     }
     let resolved_image = image::RgbaImage::from_raw(w, h, rgba_resolved.into_owned())
         .ok_or("invalid resolved RGBA dimensions")?;
-    let enhanced = scratch.enhancement_pipeline.as_mut()
+    let enhanced = scratch
+        .enhancement_pipeline
+        .as_mut()
         .expect("enhancement pipeline initialized")
         .finish_frame(&resolved_image);
     let rgba_final = enhanced.as_raw();
@@ -403,18 +429,11 @@ fn render_jpeg(
     let quality = req.jpeg_quality.clamp(1, 100);
 
     {
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-            &mut scratch.jpeg,
-            quality,
-        );
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut scratch.jpeg, quality);
 
         encoder
-            .encode(
-                &scratch.rgb,
-                w,
-                h,
-                image::ColorType::Rgb8.into(),
-            )
+            .encode(&scratch.rgb, w, h, image::ColorType::Rgb8.into())
             .map_err(|e| e.to_string())?;
     }
 

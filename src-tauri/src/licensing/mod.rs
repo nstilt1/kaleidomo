@@ -34,7 +34,7 @@ impl From<String> for LicenseInfo {
                 license_code: "".into(),
                 machine_count: None,
                 machine_limit: None,
-            }
+            },
         }
     }
 }
@@ -65,8 +65,16 @@ pub async fn is_unlocked(state: tauri::State<'_, AppState>) -> Result<LicenseInf
 }
 
 #[tauri::command]
-pub async fn read_reply_from_webserver(state: State<'_, AppState>, license_code: String, save_system_stats: bool) -> Result<LicenseInfo, LicenseInfo> {
-    match state.license_status.read_reply_from_webserver(&license_code, save_system_stats).await {
+pub async fn read_reply_from_webserver(
+    state: State<'_, AppState>,
+    license_code: String,
+    save_system_stats: bool,
+) -> Result<LicenseInfo, LicenseInfo> {
+    match state
+        .license_status
+        .read_reply_from_webserver(&license_code, save_system_stats)
+        .await
+    {
         Ok(v) => Ok(LicenseInfo {
             is_unlocked: v.0,
             license_data: v.1,
@@ -79,19 +87,23 @@ pub async fn read_reply_from_webserver(state: State<'_, AppState>, license_code:
 }
 
 #[tauri::command]
-pub async fn is_new_version_available(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> Result<bool, String> {
+pub async fn is_new_version_available(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
     let mut last = state.last_version_fetch.lock().await;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     let should_fetch = match *last {
         Some(ts) => now - ts >= Duration::from_hours(48).as_secs(),
-        None => true
+        None => true,
     };
 
     if should_fetch {
-        let response = reqwest::get(VERSION_URL)
-            .await
-            .map_err(|e| e.to_string())?;
+        let response = reqwest::get(VERSION_URL).await.map_err(|e| e.to_string())?;
         let text = match response.text().await {
             Ok(v) => v,
             Err(e) => {
@@ -108,9 +120,13 @@ pub async fn is_new_version_available(state: tauri::State<'_, AppState>, app: ta
                 return Err(e);
             }
         }
-        return Ok(state.license_status.is_update_available_manual(&app.package_info().version.to_string(), cloud_version));
+        return Ok(state
+            .license_status
+            .is_update_available_manual(&app.package_info().version.to_string(), cloud_version));
     }
-    Ok(state.license_status.is_update_available(&app.package_info().version.to_string(), &state.license_data))
+    Ok(state
+        .license_status
+        .is_update_available(&app.package_info().version.to_string(), &state.license_data))
 }
 
 #[tauri::command]
@@ -136,14 +152,17 @@ pub fn store_page_url() -> String {
 #[tauri::command]
 pub async fn display_system_stats() -> Result<kaleidomo_core::StatsDisplay, String> {
     // Safety: function is only used to display hardware information.
-    unsafe {
-        kaleidomo_core::get_machine_stats_for_display().await
-    }
+    unsafe { kaleidomo_core::get_machine_stats_for_display().await }
 }
 
 #[tauri::command]
-pub async fn get_current_cloud_info(state: tauri::State<'_, AppState>) -> Result<kaleidomo_core::StatsDisplay, String> {
-    Ok(state.license_status.get_current_system_information_that_is_stored_in_cloud().await)
+pub async fn get_current_cloud_info(
+    state: tauri::State<'_, AppState>,
+) -> Result<kaleidomo_core::StatsDisplay, String> {
+    Ok(state
+        .license_status
+        .get_current_system_information_that_is_stored_in_cloud()
+        .await)
 }
 
 #[tauri::command]
@@ -205,12 +224,15 @@ pub async fn update_license(
         Err(e) => Ok(LicenseInfo {
             is_unlocked: false,
             license_data: e.1,
-        })
+        }),
     }
 }
 
+use std::{
+    fs,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tauri::AppHandle;
-use std::{fs, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 fn persist_timestamp(app: &AppHandle, ts: u64) -> Result<(), String> {
     let path = app

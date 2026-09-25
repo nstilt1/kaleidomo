@@ -284,7 +284,7 @@ export class WasmVideoSettings {
      */
     get num_zoom_loops() {
         const ret = wasm.__wbg_get_wasmvideosettings_num_zoom_loops(this.__wbg_ptr);
-        return ret >>> 0;
+        return ret;
     }
     /**
      * Independent orientation cycles per second (base reorientation speed, no audio)
